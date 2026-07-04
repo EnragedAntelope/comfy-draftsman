@@ -133,11 +133,11 @@ def save_learning(
     return path
 
 
-def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
-    """String widget values that look like model file references."""
+def _model_refs(wf, object_info: dict[str, Any]) -> list[tuple[str, str]]:
+    """(widget_name, filename) pairs that look like model file references."""
     from ..graph import widgets as w  # local import to avoid cycle
 
-    found: list[str] = []
+    found: list[tuple[str, str]] = []
     for node in wf.nodes.values():
         schema = object_info.get(node.type)
         if schema is None:
@@ -150,15 +150,33 @@ def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
             if not isinstance(value, str):
                 continue
             if key in _MODEL_WIDGETS or re.search(r"\.(safetensors|ckpt|sft|gguf|pt)$", value):
-                found.append(value)
+                found.append((key, value))
     return found
 
 
+def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
+    """String widget values that look like model file references."""
+    return [filename for _, filename in _model_refs(wf, object_info)]
+
+
 def detect_family(wf, object_info: dict[str, Any]) -> str | None:
-    """Best-effort family detection from model filenames used in the workflow."""
-    for filename in model_filenames(wf, object_info):
+    """Family detection from model filenames, disambiguated by loader topology.
+
+    Merge names lie ("...XLFluxPony...DMD" is an SDXL merge, not FLUX), so a
+    filename pattern match alone scores 1; a match whose loader widget agrees
+    with the family's loader style (ckpt_name for checkpoint families,
+    unet_name for split-loader families) scores 2 and wins.
+    """
+    best_score, best_family = 0, None
+    for widget_name, filename in _model_refs(wf, object_info):
         for family, data in _load_floor().items():
             patterns = (data.get("detect") or {}).get("checkpoint_patterns", [])
-            if _matches(filename, patterns):
-                return family
-    return None
+            if not _matches(filename, patterns):
+                continue
+            score = 1
+            loader = data.get("loader")
+            if (widget_name == "ckpt_name" and loader == "checkpoint") or (widget_name in ("unet_name", "model_name") and loader == "unet_clip_vae"):
+                score += 1
+            if score > best_score:
+                best_score, best_family = score, family
+    return best_family

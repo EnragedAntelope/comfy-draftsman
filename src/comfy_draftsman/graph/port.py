@@ -157,7 +157,7 @@ def _swap_loader_topology(wf, guidance, object_info, changes, flags) -> None:
             changes.append(f"added {class_type} #{new_node.id} ({role})")
 
         # rewire every consumer of the checkpoint's outputs
-        for out_index, out in enumerate(ckpt.outputs):
+        for out in ckpt.outputs:
             role = role_for_output.get(out.type)
             new_id = replacements.get(role)
             for link_id in list(out.links):
@@ -172,11 +172,10 @@ def _swap_loader_topology(wf, guidance, object_info, changes, flags) -> None:
                     )
                     continue
                 wf.connect(new_id, 0, link.target_id, input_name)
-        ckpt_name = None
         try:
             ckpt_name = wf.get_widget(ckpt.id, "ckpt_name", object_info)
         except (ValueError, KeyError):
-            pass
+            ckpt_name = None
         wf.remove_node(ckpt.id)
         changes.append(
             f"replaced CheckpointLoaderSimple #{ckpt.id} ({ckpt_name}) with separate loaders"

@@ -61,6 +61,17 @@ def test_detect_family_from_checkpoint_widget(object_info):
     assert detect_family(wf, object_info) == "sdxl"
 
 
+def test_detect_family_survives_lying_merge_names(object_info):
+    # a real-world SDXL/Pony merge with 'Flux' in its marketing name, loaded
+    # through a checkpoint loader - must detect as sdxl, not flux
+    wf = Workflow.new()
+    ckpt = wf.add_node("CheckpointLoaderSimple", object_info=object_info)
+    wf.set_widget(
+        ckpt.id, "ckpt_name", "SDXL\\gonzalomoXLFluxPony_v60PhotoXLDMD.safetensors", object_info
+    )
+    assert detect_family(wf, object_info) == "sdxl"
+
+
 def test_detect_family_returns_none_when_unknown(object_info):
     wf = Workflow.new()
     wf.add_node("VAEDecode", object_info=object_info)

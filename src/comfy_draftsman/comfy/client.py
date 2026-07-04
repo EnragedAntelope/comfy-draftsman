@@ -17,6 +17,7 @@ import asyncio
 import json
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -92,6 +93,16 @@ class ComfyClient:
         response = await self._http.post("/interrupt")
         response.raise_for_status()
 
+    async def save_userdata_workflow(self, name: str, document: dict[str, Any]) -> str:
+        """Save a UI-format workflow into ComfyUI's workflow browser (userdata API)."""
+        filename = name if name.endswith(".json") else f"{name}.json"
+        response = await self._http.post(
+            f"/api/userdata/{quote(f'workflows/{filename}', safe='')}",
+            json=document,
+        )
+        response.raise_for_status()
+        return filename
+
     def _ws_url(self) -> str:
         scheme = "wss" if self.base_url.startswith("https") else "ws"
         host = self.base_url.split("://", 1)[1]
@@ -125,11 +136,11 @@ class ComfyClient:
                     if kind == "execution_interrupted":
                         error = {"exception_message": "interrupted"}
                         break
-                    if kind in ("execution_success", "executing") and (
-                        kind == "execution_success" or data.get("node") is None
-                    ):
-                        if data.get("prompt_id") == prompt_id:
-                            break
+                    finished = kind == "execution_success" or (
+                        kind == "executing" and data.get("node") is None
+                    )
+                    if finished and data.get("prompt_id") == prompt_id:
+                        break
         history = await self.get_history(prompt_id)
         outputs: list[dict[str, Any]] = []
         for node_id, node_output in (history.get("outputs") or {}).items():
