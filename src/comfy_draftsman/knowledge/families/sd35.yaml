@@ -1,0 +1,29 @@
+family: sd35
+display_name: Stable Diffusion 3.5
+detect:
+  checkpoint_patterns: ["sd3.5", "sd3_5", "sd35", "sd3"]
+loader: checkpoint
+sampling:
+  cfg: {min: 3.5, max: 6.0, default: 4.5}
+  steps: {min: 25, max: 40, default: 30}
+  samplers: [dpmpp_2m, euler]
+  schedulers: [sgm_uniform, simple]
+resolutions: ["1024x1024", "1152x896", "896x1152"]
+notes:
+  conditioning: >-
+    SD3.5 uses triple text encoders (clip_l, clip_g, t5xxl); prompts can be
+    long and natural. Empty negative prompts work fine at low CFG.
+  sampling: >-
+    CFG 3.5-6 (start 4.5), 25-40 steps. Use the SD3-type empty latent
+    (16-channel).
+variants:
+  turbo:
+    patterns: ["turbo", "large-turbo", "large_turbo"]
+    sampling:
+      cfg: {min: 1.0, max: 1.2, default: 1.0}
+      steps: {min: 4, max: 8, default: 4}
+    notes:
+      sampling: "SD3.5 Large Turbo: CFG 1.0, 4 steps."
+research: >-
+  Floor last reviewed July 2026. Check the Stability model card for encoder
+  precision recommendations for your VRAM.

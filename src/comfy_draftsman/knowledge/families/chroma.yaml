@@ -1,0 +1,24 @@
+family: chroma
+display_name: Chroma
+detect:
+  checkpoint_patterns: ["chroma"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["t5xxl fp8/fp16 (CLIPLoader, type=chroma)"]
+  vae: "ae.safetensors (FLUX VAE)"
+sampling:
+  cfg: {min: 3.0, max: 5.0, default: 4.0}
+  steps: {min: 26, max: 40, default: 30}
+  samplers: [euler, res_multistep]
+  schedulers: [beta, simple]
+resolutions: ["1024x1024", "1216x832", "832x1216"]
+notes:
+  conditioning: >-
+    Chroma uses real CFG (unlike distilled FLUX), so negative prompts DO
+    work. Natural-language prompts, optionally with tag emphasis.
+  sampling: >-
+    CFG ~4, ~30 steps, euler/beta. Chroma is FLUX-schnell-derived but
+    de-distilled - do not copy FLUX's CFG 1.0 here.
+research: >-
+  Floor last reviewed July 2026. Chroma checkpoints evolve (HD, flash
+  variants) - check the model card for the release you are using.

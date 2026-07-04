@@ -1,0 +1,54 @@
+family: sd15
+display_name: Stable Diffusion 1.5
+detect:
+  checkpoint_patterns: ["sd15", "sd_15", "v1-5", "1.5", "dreamshaper_8", "realisticvision"]
+loader: checkpoint
+sampling:
+  cfg: {min: 5.0, max: 11.0, default: 7.0}
+  steps: {min: 20, max: 35, default: 25}
+  samplers: [dpmpp_2m, euler_ancestral]
+  schedulers: [karras, normal]
+resolutions: ["512x512", "512x768", "768x512", "640x640"]
+notes:
+  loaders: >-
+    SD1.5 checkpoints bundle UNet + CLIP + VAE. Some older checkpoints have a
+    weak baked VAE - if colors look washed out, load vae-ft-mse-840000
+    separately.
+  conditioning: >-
+    SD1.5 works best with tag-style prompts and benefits from negative
+    embeddings (easynegative, bad-hands). Keep prompts under ~75 tokens per
+    chunk.
+  sampling: >-
+    CFG 5-11 (start 7), 20-35 steps, dpmpp_2m + karras is the classic combo.
+  latent: >-
+    Native resolution is 512x512; going much above 768 in either dimension
+    without hires-fix causes doubled subjects.
+techniques:
+  face_detailer:
+    denoise: 0.40
+    cfg: 7.0
+    steps: 20
+    guide_size: 384
+    max_size: 768
+    sampler: dpmpp_2m
+    scheduler: karras
+    feather: 5
+    note: "SD1.5 detailing: guide_size 384-512, CFG matches the family (~7)."
+  hires_fix:
+    upscale_by: 1.75
+    denoise: 0.45
+    steps: 15
+    note: "SD1.5 practically requires hires-fix above 768px to avoid doubling."
+variants:
+  lcm:
+    patterns: ["lcm"]
+    sampling:
+      cfg: {min: 1.0, max: 2.0, default: 1.5}
+      steps: {min: 4, max: 8, default: 6}
+      samplers: [lcm]
+      schedulers: [sgm_uniform]
+    notes:
+      sampling: "LCM-distilled: CFG 1-2, 4-8 steps, lcm sampler."
+research: >-
+  Floor last reviewed July 2026. SD1.5 finetunes vary widely - check the
+  model page for prompt style and recommended settings.

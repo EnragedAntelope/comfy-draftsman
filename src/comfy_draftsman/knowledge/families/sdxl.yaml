@@ -1,0 +1,108 @@
+family: sdxl
+display_name: SDXL
+detect:
+  checkpoint_patterns: ["sdxl", "sd_xl", "xl_", "pony", "illustrious", "noobai", "juggernautxl", "dreamshaperxl", "realvisxl"]
+loader: checkpoint
+sampling:
+  cfg: {min: 4.0, max: 8.0, default: 6.0}
+  steps: {min: 20, max: 40, default: 28}
+  samplers: [dpmpp_2m, euler_ancestral, dpmpp_2m_sde]
+  schedulers: [karras, normal]
+resolutions: ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"]
+notes:
+  loaders: >-
+    SDXL checkpoints bundle UNet + CLIP + VAE, so one Load Checkpoint node
+    feeds everything. Swap the checkpoint here to change the whole style.
+  conditioning: >-
+    SDXL responds well to natural-language prompts. Keep negatives short
+    (artifacts, watermark). Pony/Illustrious-derived models expect
+    tag-style prompts and score tags instead - check the model page.
+  sampling: >-
+    Sweet spot: CFG 4-8 (start 6), 20-40 steps (start 28), dpmpp_2m + karras
+    or euler_ancestral + normal. Higher CFG saturates colors and burns
+    contrast; fewer than 20 steps loses detail.
+  latent: >-
+    SDXL was trained near 1024x1024 total pixels. Use one of the trained
+    aspect buckets (1024x1024, 1152x896, 1216x832, ...) - arbitrary sizes
+    produce duplicated limbs and mushy composition.
+techniques:
+  face_detailer:
+    denoise: 0.45
+    cfg: 6.0
+    steps: 20
+    guide_size: 512
+    max_size: 1024
+    sampler: dpmpp_2m
+    scheduler: karras
+    feather: 5
+    note: >-
+      FaceDetailer inherits the base model, so its sampler settings must
+      match the family: CFG ~6 and ~20 steps for standard SDXL. Denoise
+      0.35-0.5 - lower keeps identity, higher fixes worse faces.
+  hires_fix:
+    upscale_by: 1.5
+    denoise: 0.40
+    steps: 15
+    note: >-
+      Latent or model upscale then re-sample at denoise 0.35-0.45; higher
+      re-invents details, lower leaves upscaler softness.
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {min: 1.0, max: 1.0, default: 1.0}
+      steps: {min: 1, max: 8, default: 4}
+      samplers: [euler_ancestral]
+      schedulers: [sgm_uniform]
+    techniques:
+      face_detailer:
+        cfg: 1.0
+        steps: 6
+        sampler: euler_ancestral
+        scheduler: sgm_uniform
+        note: >-
+          Turbo model: the detailer's own sampler must also run at CFG 1.0
+          and few steps - copying "universal" detailer settings breaks here.
+    notes:
+      sampling: >-
+        Turbo-distilled model: CFG must stay at 1.0 (raising it burns the
+        image) and 1-8 steps is all it needs. Negative prompt has no effect
+        at CFG 1.
+  lightning:
+    patterns: ["lightning"]
+    sampling:
+      cfg: {min: 1.0, max: 2.0, default: 1.0}
+      steps: {min: 4, max: 8, default: 6}
+      samplers: [euler_ancestral, euler]
+      schedulers: [sgm_uniform]
+    notes:
+      sampling: >-
+        Lightning-distilled model: CFG 1-2 and 4-8 steps with sgm_uniform.
+        Don't raise CFG above 2 - it fries contrast.
+  dmd:
+    patterns: ["dmd"]
+    sampling:
+      cfg: {min: 1.0, max: 1.0, default: 1.0}
+      steps: {min: 4, max: 8, default: 4}
+      samplers: [lcm, euler_ancestral]
+      schedulers: [sgm_uniform]
+    notes:
+      sampling: >-
+        DMD2-distilled model: CFG stays at 1.0, 4-8 steps, lcm or
+        euler_ancestral with sgm_uniform.
+  hyper:
+    patterns: ["hyper"]
+    sampling:
+      cfg: {min: 1.0, max: 2.0, default: 1.0}
+      steps: {min: 4, max: 12, default: 8}
+      samplers: [euler_ancestral]
+      schedulers: [sgm_uniform]
+    notes:
+      sampling: >-
+        Hyper-distilled model: CFG 1-2, 4-12 steps with sgm_uniform.
+research: >-
+  These values are a curated floor last reviewed July 2026. For this exact
+  checkpoint, check its Civitai/HF model page for recommended CFG, steps,
+  sampler, and prompt style (score tags, quality tags, clip skip) - finetunes
+  frequently override family defaults, and distilled merges (turbo/lightning/
+  dmd) change the rules entirely.

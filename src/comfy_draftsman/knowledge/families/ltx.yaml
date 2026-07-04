@@ -1,0 +1,23 @@
+family: ltx
+display_name: LTX Video
+detect:
+  checkpoint_patterns: ["ltx", "ltxv"]
+loader: checkpoint
+sampling:
+  cfg: {min: 2.5, max: 4.0, default: 3.0}
+  steps: {min: 20, max: 40, default: 25}
+  samplers: [euler]
+  schedulers: [simple, normal]
+resolutions: ["768x512x97f", "1216x704x121f"]
+notes:
+  conditioning: >-
+    LTX needs long, detailed, chronological scene descriptions - short
+    prompts produce static or incoherent motion. Describe the shot like a
+    storyboard: subject, action, camera, lighting.
+  sampling: >-
+    CFG ~3, 20-40 steps. Newer LTX releases ship dedicated conditioning/
+    scheduler nodes in their template - prefer the template's node set.
+research: >-
+  Floor last reviewed July 2026. LTX 2.x changed pipelines significantly
+  between releases; always start from the bundled template for your exact
+  version and check Lightricks' release notes.

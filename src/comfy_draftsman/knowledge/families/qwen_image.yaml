@@ -1,0 +1,37 @@
+family: qwen_image
+display_name: Qwen-Image
+detect:
+  checkpoint_patterns: ["qwen_image", "qwen-image", "qwenimage"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen_2.5_vl_7b fp8 (CLIPLoader, type=qwen_image)"]
+  vae: "qwen_image_vae.safetensors"
+sampling:
+  cfg: {min: 2.0, max: 5.0, default: 2.5}
+  steps: {min: 20, max: 50, default: 30}
+  samplers: [euler, res_multistep]
+  schedulers: [simple, normal]
+resolutions: ["1328x1328", "1664x928", "928x1664", "1472x1140", "1140x1472"]
+notes:
+  loaders: >-
+    Qwen-Image ships as separate diffusion model + Qwen2.5-VL text encoder +
+    dedicated VAE. fp8 variants are the practical choice below 24 GB VRAM.
+  conditioning: >-
+    Excels at long descriptive prompts and rendered text: quote any words
+    you want drawn ("a sign that says 'OPEN'"). Both English and Chinese
+    text rendering are strong.
+  sampling: >-
+    CFG 2.5 and ~30 steps with euler/simple is the reference. Distilled or
+    lightning variants drop to CFG 1 and 4-8 steps.
+variants:
+  distill:
+    patterns: ["distill", "lightning", "turbo"]
+    sampling:
+      cfg: {min: 1.0, max: 1.0, default: 1.0}
+      steps: {min: 4, max: 15, default: 8}
+    notes:
+      sampling: "Distilled Qwen-Image: CFG 1.0, 4-15 steps."
+research: >-
+  Floor last reviewed July 2026. Qwen-Image iterates quickly (edit variants,
+  distillations) - check the model card and ComfyUI blog examples for the
+  exact release you are wiring.

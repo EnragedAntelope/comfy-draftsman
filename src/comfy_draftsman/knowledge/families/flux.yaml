@@ -1,0 +1,75 @@
+family: flux
+display_name: FLUX.1
+detect:
+  checkpoint_patterns: ["flux", "krea"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["clip_l.safetensors", "t5xxl_fp16.safetensors (or fp8_e4m3fn for low VRAM)"]
+  vae: "ae.safetensors"
+sampling:
+  cfg: {min: 1.0, max: 1.0, default: 1.0}
+  guidance: {min: 1.5, max: 5.0, default: 3.5}
+  steps: {min: 20, max: 32, default: 26}
+  samplers: [euler, deis]
+  schedulers: [simple, beta]
+resolutions: ["1024x1024", "1216x832", "832x1216", "1344x768", "1408x1408"]
+notes:
+  loaders: >-
+    FLUX ships as separate parts: diffusion model (Load Diffusion Model),
+    dual text encoders clip_l + t5xxl (DualCLIPLoader, type=flux), and the
+    ae.safetensors VAE. fp8 weights halve VRAM with minor quality cost.
+  conditioning: >-
+    FLUX loves long natural-language descriptions - write full sentences,
+    not tag soup. Negative prompts do nothing at CFG 1.0; guide with the
+    positive prompt instead. Distilled guidance is set via the FluxGuidance
+    node (not the sampler's CFG).
+  sampling: >-
+    Keep sampler CFG at 1.0 - guidance-distilled models burn badly above it.
+    Steer strength with FluxGuidance (2.0 loose/painterly, 3.5 balanced,
+    4.5 literal). euler + simple at 20-32 steps is the reference setup.
+  latent: >-
+    Use SD3/Flux empty latent (16-channel). Flux handles flexible
+    resolutions around 1-2 MP well.
+techniques:
+  face_detailer:
+    denoise: 0.40
+    cfg: 1.0
+    steps: 20
+    guide_size: 768
+    max_size: 1024
+    sampler: euler
+    scheduler: simple
+    feather: 5
+    note: >-
+      FLUX detailing runs at the family's CFG 1.0 (guidance comes from the
+      FluxGuidance value on the conditioning, not the detailer's CFG).
+      Denoise 0.3-0.45.
+  hires_fix:
+    upscale_by: 1.5
+    denoise: 0.35
+    steps: 15
+    note: "Re-sample upscaled latents gently; FLUX gets waxy above ~0.45 denoise."
+variants:
+  schnell:
+    patterns: ["schnell"]
+    sampling:
+      steps: {min: 1, max: 8, default: 4}
+      guidance: {min: 0.0, max: 0.0, default: 0.0}
+    notes:
+      sampling: "FLUX schnell: timestep-distilled, 1-8 steps, no guidance node needed."
+  krea:
+    patterns: ["krea"]
+    sampling:
+      guidance: {min: 2.5, max: 5.0, default: 4.0}
+      steps: {min: 24, max: 32, default: 28}
+    notes:
+      sampling: >-
+        Krea-tuned FLUX: aesthetic-focused distillation. Guidance ~3.5-4.5,
+        26-32 steps. Check the release notes for your exact Krea version -
+        newer Krea releases change recommended guidance.
+research: >-
+  Floor last reviewed July 2026. FLUX ecosystem moves fast (Krea revisions,
+  new distillations, fp4/nunchaku runtimes): check Black Forest Labs / Krea
+  release notes and the ComfyUI blog for the exact model file you are using,
+  especially guidance value, step count, and which text-encoder precision
+  fits available VRAM.

@@ -1,0 +1,38 @@
+family: wan
+display_name: Wan Video
+detect:
+  checkpoint_patterns: ["wan2", "wan_2", "wan-2", "wanvideo"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["umt5_xxl fp8 (CLIPLoader, type=wan)"]
+  vae: "wan_2.1_vae.safetensors (2.2 uses same VAE except the 5B ti2v model)"
+sampling:
+  cfg: {min: 3.0, max: 6.0, default: 5.0}
+  steps: {min: 20, max: 30, default: 25}
+  samplers: [uni_pc, euler]
+  schedulers: [simple, normal]
+resolutions: ["832x480x81f", "1280x720x81f"]
+notes:
+  loaders: >-
+    Wan 2.2 14B uses TWO diffusion models (high-noise + low-noise experts)
+    chained through two samplers via KSamplerAdvanced start/end steps; the
+    5B ti2v model is single-stage. Text encoder is umt5_xxl.
+  conditioning: >-
+    Describe motion explicitly (camera pans, subject actions). Wan follows
+    cinematic language well. Keep clips near 81 frames at 16 fps unless the
+    model card says otherwise.
+  sampling: >-
+    CFG ~5, 20-30 steps, uni_pc/simple. With lightx2v/lightning distill
+    LoRAs, drop to CFG 1.0 and 4-8 steps - the LoRA notes are authoritative.
+variants:
+  lightx2v:
+    patterns: ["lightx2v", "lightning"]
+    sampling:
+      cfg: {min: 1.0, max: 1.0, default: 1.0}
+      steps: {min: 4, max: 8, default: 4}
+    notes:
+      sampling: "Distill-LoRA workflow: CFG 1.0, 4-8 steps per stage."
+research: >-
+  Floor last reviewed July 2026. Wan releases move fast (2.2 experts,
+  distill LoRAs, VACE variants): verify stage split, fps, and frame counts
+  against the ComfyUI blog and the model card for your exact weights.
