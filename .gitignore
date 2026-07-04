@@ -1,0 +1,27 @@
+# Test ComfyUI environment (cloned/installed locally, never committed)
+.comfyui-test/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+uv.lock
+
+# Session workspaces created at runtime
+.draftsman-sessions/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
