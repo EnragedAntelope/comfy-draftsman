@@ -6,6 +6,26 @@ loader: unet_clip_vae
 components:
   text_encoders: ["clip_l.safetensors", "t5xxl_fp16.safetensors (or fp8_e4m3fn for low VRAM)"]
   vae: "ae.safetensors"
+loader_nodes:
+  model:
+    class: UNETLoader
+    file_widget: unet_name
+    file_patterns: ["flux", "krea"]
+    widgets: {weight_dtype: default}
+    output: MODEL
+  clip:
+    class: DualCLIPLoader
+    widgets: {type: flux}
+    file_widgets:
+      clip_name1: ["clip_l"]
+      clip_name2: ["t5xxl"]
+    output: CLIP
+  vae:
+    class: VAELoader
+    file_widget: vae_name
+    file_patterns: ["ae.safetensors", "flux"]
+    output: VAE
+latent_node: EmptySD3LatentImage
 sampling:
   cfg: {min: 1.0, max: 1.0, default: 1.0}
   guidance: {min: 1.5, max: 5.0, default: 3.5}

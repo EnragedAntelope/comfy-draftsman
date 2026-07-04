@@ -13,10 +13,13 @@ Endpoint shapes verified against ComfyUI 0.27.0 (July 2026):
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from typing import Any
 
 import httpx
+import websockets
 
 from ..config import Config
 
@@ -88,3 +91,79 @@ class ComfyClient:
     async def interrupt(self) -> None:
         response = await self._http.post("/interrupt")
         response.raise_for_status()
+
+    def _ws_url(self) -> str:
+        scheme = "wss" if self.base_url.startswith("https") else "ws"
+        host = self.base_url.split("://", 1)[1]
+        return f"{scheme}://{host}/ws?clientId={self.client_id}"
+
+    async def run_and_wait(
+        self, api_prompt: dict[str, Any], timeout: float = 600.0
+    ) -> dict[str, Any]:
+        """Queue a prompt and wait for completion via the /ws event stream.
+
+        Returns {"status", "prompt_id", "outputs" (image/video/audio files from
+        history), "error"?}.
+        """
+        async with websockets.connect(self._ws_url(), max_size=32 * 1024 * 1024) as ws:
+            queued = await self.queue_prompt(api_prompt)
+            prompt_id = queued["prompt_id"]
+            error: dict[str, Any] | None = None
+            async with asyncio.timeout(timeout):
+                while True:
+                    frame = await ws.recv()
+                    if isinstance(frame, bytes):  # preview image frames
+                        continue
+                    event = json.loads(frame)
+                    data = event.get("data", {})
+                    if data.get("prompt_id") not in (None, prompt_id):
+                        continue
+                    kind = event.get("type")
+                    if kind == "execution_error":
+                        error = data
+                        break
+                    if kind == "execution_interrupted":
+                        error = {"exception_message": "interrupted"}
+                        break
+                    if kind in ("execution_success", "executing") and (
+                        kind == "execution_success" or data.get("node") is None
+                    ):
+                        if data.get("prompt_id") == prompt_id:
+                            break
+        history = await self.get_history(prompt_id)
+        outputs: list[dict[str, Any]] = []
+        for node_id, node_output in (history.get("outputs") or {}).items():
+            for key in ("images", "gifs", "videos", "audio"):
+                for item in node_output.get(key, []) or []:
+                    outputs.append({**item, "node_id": node_id, "kind": key})
+        result: dict[str, Any] = {
+            "status": "error" if error else "success",
+            "prompt_id": prompt_id,
+            "outputs": outputs,
+        }
+        if error:
+            result["error"] = {
+                "node_id": error.get("node_id"),
+                "node_type": error.get("node_type"),
+                "message": error.get("exception_message"),
+                "type": error.get("exception_type"),
+            }
+        return result
+
+    def view_url(self, item: dict[str, Any]) -> str:
+        """URL to fetch an output file returned by run_and_wait."""
+        params = httpx.QueryParams(
+            filename=item.get("filename", ""),
+            subfolder=item.get("subfolder", ""),
+            type=item.get("type", "output"),
+        )
+        return f"{self.base_url}/view?{params}"
+
+    async def fetch_output(self, item: dict[str, Any]) -> bytes:
+        response = await self._http.get("/view", params={
+            "filename": item.get("filename", ""),
+            "subfolder": item.get("subfolder", ""),
+            "type": item.get("type", "output"),
+        })
+        response.raise_for_status()
+        return response.content
