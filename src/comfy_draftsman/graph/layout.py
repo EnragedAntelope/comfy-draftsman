@@ -153,3 +153,66 @@ def apply_layout(
         for note in notes:
             note.pos = [note_x, y_cursor]
             y_cursor += note.size[1] + Y_GAP
+
+
+def apply_staged_layout(
+    wf: Workflow,
+    object_info: dict[str, Any],
+    stage_of: dict[int, int],
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> dict[int, tuple[float, float, float, float]]:
+    """Lay nodes out in left-to-right stage bands (models | prompts | sampling | ...).
+
+    Within a band, nodes form sub-columns by their global dataflow rank, so
+    chains like checkpoint -> lora -> lora stay ordered. Bands are top-aligned,
+    which leaves the space above every band free for the annotator's notes.
+
+    Returns {stage_index: (x, y, width, height)} bounding box per band.
+    """
+    rank = _ranks(wf)
+    for nid in stage_of:
+        node = wf.nodes[nid]
+        if node.type not in NOTE_TYPES:
+            node.size = list(estimate_size(node.type, object_info))
+
+    bands: dict[int, list[int]] = {}
+    for nid, stage in sorted(stage_of.items()):
+        if wf.nodes[nid].type not in NOTE_TYPES:
+            bands.setdefault(stage, []).append(nid)
+
+    boxes: dict[int, tuple[float, float, float, float]] = {}
+    x_cursor = origin[0]
+    for stage in sorted(bands):
+        members = bands[stage]
+        # sub-columns by global rank
+        sub_ranks = sorted({rank.get(nid, 0) for nid in members})
+        sub_index = {r: i for i, r in enumerate(sub_ranks)}
+        sub_cols: dict[int, list[int]] = {}
+        for nid in members:
+            sub_cols.setdefault(sub_index[rank.get(nid, 0)], []).append(nid)
+        col_widths = []
+        for i in sorted(sub_cols):
+            col = sorted(sub_cols[i], key=lambda nid: (rank.get(nid, 0), nid))
+            col_widths.append(max(wf.nodes[nid].size[0] for nid in col))
+        band_x = x_cursor
+        band_h = 0.0
+        for i in sorted(sub_cols):
+            col = sorted(sub_cols[i], key=lambda nid: (rank.get(nid, 0), nid))
+            col_x = band_x + sum(col_widths[:i]) + i * (X_GUTTER / 2)
+            y_cursor = origin[1]
+            for nid in col:
+                node = wf.nodes[nid]
+                node.pos = [col_x, y_cursor]
+                y_cursor += node.size[1] + Y_GAP
+            band_h = max(band_h, y_cursor - Y_GAP - origin[1])
+        band_w = sum(col_widths) + (len(col_widths) - 1) * (X_GUTTER / 2)
+        boxes[stage] = (band_x, origin[1], band_w, band_h)
+        x_cursor = band_x + band_w + X_GUTTER
+    # execution order roughly left-to-right, top-to-bottom
+    ordered = sorted(
+        (nid for nid in stage_of if wf.nodes[nid].type not in NOTE_TYPES),
+        key=lambda nid: (rank.get(nid, 0), wf.nodes[nid].pos[0], wf.nodes[nid].pos[1]),
+    )
+    for i, nid in enumerate(ordered):
+        wf.nodes[nid].order = i
+    return boxes
