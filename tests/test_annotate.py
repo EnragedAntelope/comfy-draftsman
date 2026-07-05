@@ -213,6 +213,25 @@ def test_classify_image_in_image_out_as_post():
     assert classify(node, {"TextOverlay": schema}) == "post"
 
 
+def test_post_note_describes_actual_nodes():
+    """The post-processing fallback note must name the actual member nodes and
+    never claim tuning or refer to spatial position ('the model above')."""
+    from comfy_draftsman.graph.annotate import _note_text
+    from comfy_draftsman.graph.model import Node
+
+    oi = {
+        "ImageBlur": {"display_name": "Image Blur", "input": {}, "output": ["IMAGE"]},
+        "TextOverlay": {"input": {}, "output": ["IMAGE"]},
+    }
+    wf = Workflow.new()
+    members = [Node(id=1, type="ImageBlur"), Node(id=2, type="TextOverlay", title="Menu Text")]
+    text = _note_text("post", wf, oi, None, members)
+    assert "Image Blur" in text
+    assert "Menu Text" in text
+    assert "above" not in text.lower()
+    assert "tuned" not in text.lower()
+
+
 def test_group_bounds_shrink_to_fit_members(txt2img, object_info):
     """Group boxes must tightly wrap their member nodes (+ note + padding),
     never trapping large empty areas."""

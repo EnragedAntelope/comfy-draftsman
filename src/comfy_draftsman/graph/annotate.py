@@ -264,7 +264,16 @@ def _note_text(
             if any(hint.split()[0] in n.type.lower() for n in members) and settings.get("note"):
                 lines.append("⚙️ " + settings["note"])
         if not lines:
-            lines.append("⚙️ Post-processing chain — tuned to match the model above.")
+            # no technique guidance matched: describe what's actually here
+            # (never claim tuning or refer to spatial position - layouts vary)
+            steps = list(
+                dict.fromkeys(
+                    n.title or (object_info.get(n.type) or {}).get("display_name") or n.type
+                    for n in members
+                )
+            )
+            listed = ", ".join(steps[:4]) + (", …" if len(steps) > 4 else "")
+            lines.append(f"⚙️ Extra image steps applied after generation: {listed}.")
     elif stage == "output":
         lines.append("💾 Finished images land here (check the filename prefix).")
     elif stage == "inputs":
