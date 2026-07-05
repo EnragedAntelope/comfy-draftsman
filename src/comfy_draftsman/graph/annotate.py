@@ -58,6 +58,20 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
             return "sampling"
         if category.startswith("image") or category.startswith("mask"):
             return "post"
+        # category didn't decide - infer from the data types flowing through
+        out_types = {str(t).upper() for t in (schema.get("output") or [])}
+        if out_types and out_types <= {"STRING"}:
+            # pure text machinery (wildcards, concatenators, templates)
+            # belongs with the prompts, not dumped into sampling
+            return "prompts"
+        in_types = {
+            str(spec[0]).upper()
+            for section in ("required", "optional")
+            for spec in (schema.get("input", {}).get(section, {}) or {}).values()
+            if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str)
+        }
+        if "IMAGE" in in_types and "IMAGE" in out_types:
+            return "post"  # image-in/image-out = post-processing (overlays, filters)
     if any(hint in name for hint in _POST_HINTS):
         return "post"
     return "sampling"
@@ -297,9 +311,17 @@ def annotate(
     for nid, stage in stage_of.items():
         members_by_stage.setdefault(stage, []).append(wf.nodes[nid])
 
-    for stage_index, (x, y, w_, h_) in sorted(band_boxes.items()):
+    for stage_index in sorted(band_boxes):
         key, default_title, color = STAGES[stage_index]
         members = members_by_stage.get(stage_index, [])
+        if not members:
+            continue
+        # shrink-to-fit: group bounds come from the members' real extents,
+        # not the layout band estimate, so groups never trap empty space
+        min_x = min(n.pos[0] for n in members)
+        min_y = min(n.pos[1] for n in members)
+        max_x = max(n.pos[0] + n.size[0] for n in members)
+        max_y = max(n.pos[1] + n.size[1] for n in members)
         # Dynamic title for models stage: only mention LoRAs if a LoRA loader is present
         title = default_title
         if key == "models":
@@ -311,8 +333,9 @@ def annotate(
             if not has_lora:
                 title = "\U0001f9e0 Models"
         text = _note_text(key, wf, object_info, guidance, members, title=title)
+        top = min_y
         if text:
-            note_w = max(min(w_, 380.0), 300.0)
+            note_w = max(min(max_x - min_x, 380.0), 300.0)
             # frontend renders markdown at ~17px/line; blank separator lines
             # collapse, headings add a little
             rendered_lines = sum(1 for line in text.splitlines() if line.strip())
@@ -320,16 +343,22 @@ def annotate(
             note = wf.add_node("MarkdownNote", title=title)
             note.widgets_values = [text]
             note.size = [note_w, note_h]
-            note.pos = [x, y - note_h - Y_GAP]
+            note.pos = [min_x, min_y - note_h - Y_GAP]
             note.color, note.bgcolor = NOTE_COLOR
             note.properties["draftsman"] = NOTE_MARKER
-            top = y - note_h - Y_GAP
+            top = min_y - note_h - Y_GAP
+            max_x = max(max_x, min_x + note_w)
         pad = 30.0
         wf.groups.append(
             Group(
                 id=len(wf.groups) + 1,
                 title=title,
-                bounding=[x - pad, top - 70.0, max(w_, 320.0) + 2 * pad, h_ + (y - top) + 90.0],
+                bounding=[
+                    min_x - pad,
+                    top - 70.0,
+                    (max_x - min_x) + 2 * pad,
+                    (max_y - top) + 90.0,
+                ],
                 color=color,
             )
         )

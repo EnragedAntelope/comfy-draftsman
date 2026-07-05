@@ -90,3 +90,14 @@ def test_widget_count_drift_reported(object_info):
     node.widgets_values = [42, "randomize"]  # ancient workflow with fewer widgets
     findings = validate(wf, object_info)
     assert any(f["code"] == "widget-count-drift" for f in findings)
+
+
+def test_null_widget_value_is_error(object_info):
+    """A null widget value crashes the ComfyUI editor when queueing - validate
+    must flag it even though the count matches and the type is right."""
+    wf = Workflow.new()
+    node = wf.add_node("CLIPTextEncode", object_info=object_info)
+    node.widgets_values = [None]
+    findings = validate(wf, object_info)
+    nulls = [f for f in findings if f["code"] == "null-widget-value"]
+    assert nulls and nulls[0]["level"] == "error" and nulls[0]["node_id"] == node.id

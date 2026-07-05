@@ -406,8 +406,13 @@ class Workflow:
         if not isinstance(node.widgets_values, list):
             node.widgets_values[input_name] = value
             return
-        while len(node.widgets_values) < len(slots):
-            node.widgets_values.append(None)
+        if len(node.widgets_values) < len(slots):
+            # Dynamic nodes often serialize fewer values than the schema
+            # declares. Pad with schema defaults - never None: the ComfyUI
+            # frontend crashes on null string widgets when queueing a prompt
+            # ("Cannot read properties of null (reading 'replace')").
+            defaults = w.widget_defaults(node.type, object_info)
+            node.widgets_values.extend(defaults[len(node.widgets_values) :])
         node.widgets_values[slots.index(input_name)] = value
 
     def get_widget(self, node_id: int, input_name: str, object_info: dict[str, Any]) -> Any:

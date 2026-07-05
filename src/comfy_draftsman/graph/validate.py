@@ -75,6 +75,22 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
         }
         named = w.widgets_to_named(node.type, node.widgets_values, object_info)
         for name, value in named.items():
+            if value is None:
+                # the frontend runs string replacement over every widget value
+                # when queueing, so a null crashes it even if the slot is
+                # connected or optional
+                findings.append(
+                    _finding(
+                        "error",
+                        "null-widget-value",
+                        f"{node.type} #{node.id}: widget '{name}' is null - the ComfyUI "
+                        "editor crashes on null widget values (\"Cannot read properties "
+                        "of null\"); set a concrete value (empty string is fine)",
+                        node.id,
+                        input=name,
+                    )
+                )
+                continue
             if name.endswith(w.SYNTHETIC_SUFFIXES) or name not in specs:
                 continue
             spec = specs[name]

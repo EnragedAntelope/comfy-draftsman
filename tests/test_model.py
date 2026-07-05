@@ -251,3 +251,18 @@ def test_set_widget_control_after_generate_succeeds(object_info):
     sampler = wf.add_node("KSampler", object_info=object_info)
     wf.set_widget(sampler.id, "seed__control_after_generate", "randomize", object_info)
     assert wf.get_widget(sampler.id, "seed__control_after_generate", object_info) == "randomize"
+
+
+def test_set_widget_pads_short_array_with_defaults_not_none(object_info):
+    """Dynamic nodes serialize fewer widgets_values than the schema declares;
+    padding must use schema defaults - a None here crashes the ComfyUI editor
+    ("Cannot read properties of null (reading 'replace')")."""
+    wf = Workflow.new()
+    node = wf.add_node("KSampler", object_info=object_info)
+    node.widgets_values = node.widgets_values[:2]  # simulate a short/old array
+    wf.set_widget(node.id, "seed", 42, object_info)
+    from comfy_draftsman.graph.widgets import widget_slot_names
+
+    assert None not in node.widgets_values
+    assert len(node.widgets_values) == len(widget_slot_names("KSampler", object_info))
+    assert wf.get_widget(node.id, "seed", object_info) == 42

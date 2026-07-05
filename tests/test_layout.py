@@ -101,3 +101,41 @@ def test_text_nodes_get_wider_boxes(object_info):
     encode = estimate_size("CLIPTextEncode", object_info)
     decode = estimate_size("VAEDecode", object_info)
     assert encode[0] > decode[0]
+
+
+def test_estimate_size_caps_dynamic_widget_nodes():
+    """Nodes declaring dozens of optional widgets (dynamic concatenators etc.)
+    render only a few - the estimate must not produce meter-tall nodes."""
+    schema = {
+        "input": {
+            "required": {"count": ["INT", {"default": 2}]},
+            "optional": {
+                f"string_{i}": ["STRING", {"default": ""}] for i in range(1, 65)
+            },
+        },
+        "output": ["STRING"],
+        "output_name": ["concatenated"],
+    }
+    _w, h = estimate_size("MegaConcat", {"MegaConcat": schema})
+    assert h < 600, f"dynamic node estimated {h}px tall"
+
+
+def test_staged_layout_wraps_tall_columns(object_info):
+    """Many parallel same-stage nodes must wrap into side-by-side columns
+    instead of one very tall column (which forces a huge, mostly-empty group)."""
+    from comfy_draftsman.graph.layout import WRAP_TARGET_H, apply_staged_layout
+
+    wf = Workflow.new()
+    nodes = [wf.add_node("CLIPTextEncode", object_info=object_info) for _ in range(10)]
+    stage_of = {n.id: 2 for n in nodes}
+    boxes = apply_staged_layout(wf, object_info, stage_of)
+    _x, _y, width, height = boxes[2]
+    assert height <= WRAP_TARGET_H + max(n.size[1] for n in nodes), (
+        f"band is {height}px tall - columns did not wrap"
+    )
+    assert width > nodes[0].size[0], "wrapping should widen the band"
+    # wrapped columns must not overlap
+    items = list(_boxes(wf).items())
+    for i, (id_a, box_a) in enumerate(items):
+        for id_b, box_b in items[i + 1 :]:
+            assert not _overlaps(box_a, box_b), f"nodes {id_a} and {id_b} overlap"

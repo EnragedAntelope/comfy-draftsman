@@ -182,3 +182,60 @@ def test_models_group_title_with_lora(txt2img, object_info):
     assert any("lora" in g.title.lower() for g in model_groups), (
         f"expected LoRA in group title, got {[g.title for g in model_groups]}"
     )
+
+
+# --- classification of category-less utility nodes ---
+
+
+def test_classify_string_builders_as_prompts():
+    from comfy_draftsman.graph.annotate import classify
+    from comfy_draftsman.graph.model import Node
+
+    schema = {
+        "category": "custom/text",
+        "input": {"required": {"delimiter": ["STRING", {"default": ""}]}},
+        "output": ["STRING"],
+    }
+    node = Node(id=1, type="TextConcat")
+    assert classify(node, {"TextConcat": schema}) == "prompts"
+
+
+def test_classify_image_in_image_out_as_post():
+    from comfy_draftsman.graph.annotate import classify
+    from comfy_draftsman.graph.model import Node
+
+    schema = {
+        "category": "custom/overlay",
+        "input": {"required": {"image": ["IMAGE"], "text": ["STRING", {"default": ""}]}},
+        "output": ["IMAGE"],
+    }
+    node = Node(id=1, type="TextOverlay")
+    assert classify(node, {"TextOverlay": schema}) == "post"
+
+
+def test_group_bounds_shrink_to_fit_members(txt2img, object_info):
+    """Group boxes must tightly wrap their member nodes (+ note + padding),
+    never trapping large empty areas."""
+    wf, _ = txt2img
+    annotate(wf, object_info)
+    notes = {n.id: n for n in wf.nodes.values() if n.type == "MarkdownNote"}
+    real = [n for n in wf.nodes.values() if n.type not in ("Note", "MarkdownNote")]
+    for group in wf.groups:
+        gx, gy, gw, gh = group.bounding
+        inside = [
+            n
+            for n in list(real) + list(notes.values())
+            if gx <= n.pos[0]
+            and gy <= n.pos[1]
+            and n.pos[0] + n.size[0] <= gx + gw
+            and n.pos[1] + n.size[1] <= gy + gh
+        ]
+        assert inside, f"group '{group.title}' is empty"
+        extent_w = max(n.pos[0] + n.size[0] for n in inside) - min(n.pos[0] for n in inside)
+        extent_h = max(n.pos[1] + n.size[1] for n in inside) - min(n.pos[1] for n in inside)
+        assert gw <= extent_w + 2 * 30.0 + 1.0, (
+            f"group '{group.title}' is {gw - extent_w}px wider than its contents"
+        )
+        assert gh <= extent_h + 70.0 + 90.0 + 1.0, (
+            f"group '{group.title}' is {gh - extent_h}px taller than its contents"
+        )

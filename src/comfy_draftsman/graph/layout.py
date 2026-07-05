@@ -25,6 +25,14 @@ MIN_H = 60.0
 DEFAULT_W = 250.0
 TEXT_W = 400.0
 NOTE_TYPES = {"Note", "MarkdownNote"}
+# Dynamic nodes (text concatenators, switches...) declare dozens of optional
+# widgets in their schema but render only the handful in use; counting them
+# all would estimate meter-tall nodes and blow up group bounds.
+MAX_WIDGET_ROWS = 16
+# Wrap a stage band's node columns once they exceed this height, so a stage
+# with many parallel nodes stays roughly rectangular instead of one very tall
+# column next to a short pipeline row (= a group full of empty space).
+WRAP_TARGET_H = 900.0
 
 # widget names whose nodes want extra width for editing comfort
 _TEXTY_WIDGETS = {"text", "prompt", "wildcard_text", "populated_text", "string"}
@@ -50,7 +58,7 @@ def estimate_size(class_type: str, object_info: dict[str, Any]) -> tuple[float, 
     height = (
         HEADER_H
         + max(connection_count, output_count) * SLOT_H
-        + len(slots) * WIDGET_H
+        + min(len(slots), MAX_WIDGET_ROWS) * WIDGET_H
         + (90.0 if texty else 10.0)  # multiline text area
     )
     return (width, max(height, MIN_H))
@@ -190,14 +198,32 @@ def apply_staged_layout(
         sub_cols: dict[int, list[int]] = {}
         for nid in members:
             sub_cols.setdefault(sub_index[rank.get(nid, 0)], []).append(nid)
-        col_widths = []
+        # wrap each rank-column into height-limited visual columns: a stage
+        # with many parallel same-rank nodes should grow sideways, not into
+        # one tall column beside a short pipeline row
+        target_h = max(
+            WRAP_TARGET_H, max(wf.nodes[nid].size[1] for nid in members) + Y_GAP
+        )
+        columns: list[list[int]] = []
         for i in sorted(sub_cols):
             col = sorted(sub_cols[i], key=lambda nid: (rank.get(nid, 0), nid))
-            col_widths.append(max(wf.nodes[nid].size[0] for nid in col))
+            chunk: list[int] = []
+            chunk_h = 0.0
+            for nid in col:
+                node_h = wf.nodes[nid].size[1] + Y_GAP
+                if chunk and chunk_h + node_h > target_h:
+                    columns.append(chunk)
+                    chunk, chunk_h = [], 0.0
+                chunk.append(nid)
+                chunk_h += node_h
+            if chunk:
+                columns.append(chunk)
+        col_widths = [
+            max(wf.nodes[nid].size[0] for nid in col) for col in columns
+        ]
         band_x = x_cursor
         band_h = 0.0
-        for i in sorted(sub_cols):
-            col = sorted(sub_cols[i], key=lambda nid: (rank.get(nid, 0), nid))
+        for i, col in enumerate(columns):
             col_x = band_x + sum(col_widths[:i]) + i * (X_GUTTER / 2)
             y_cursor = origin[1]
             for nid in col:

@@ -113,10 +113,11 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
         "links": [
             f"#{ln.origin_id}[{ln.origin_slot}] -> #{ln.target_id}.{wf.nodes[ln.target_id].inputs[ln.target_slot].name}"
             for ln in sorted(wf.links.values(), key=lambda x: x.id)
-            if ln.target_id in wf.nodes
+            if ln.origin_id in wf.nodes
+            and ln.target_id in wf.nodes
             and ln.target_slot < len(wf.nodes[ln.target_id].inputs)
-            and ln.origin_id not in VIRTUAL_TYPES
-            and ln.target_id not in VIRTUAL_TYPES
+            and wf.nodes[ln.origin_id].type not in VIRTUAL_TYPES
+            and wf.nodes[ln.target_id].type not in VIRTUAL_TYPES
         ],
         "groups": [g.title for g in wf.groups],
     }
@@ -440,6 +441,13 @@ async def run_workflow(
     can SEE the result. Prove a workflow works before saving/delivering it."""
     wf = _wf(workflow_id)
     object_info = await _object_info()
+    errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
+    if errors:
+        return {
+            "status": "invalid",
+            "findings": errors,
+            "hint": "fix with edit_workflow (diagnose_workflow for missing node classes)",
+        }
     try:
         api = wf.to_api(object_info)
     except ValueError as e:
@@ -458,18 +466,40 @@ async def run_workflow(
 
 
 @mcp.tool(annotations=_WRITE_INSTANCE)
-async def save_workflow(workflow_id: str, name: str) -> dict[str, Any]:
+async def save_workflow(
+    workflow_id: str, name: str, allow_invalid: bool = False
+) -> dict[str, Any]:
     """Save the workflow (UI format, with all layout/groups/notes) into ComfyUI's
     workflow browser and to the session dir. Run organize_workflow first so the
-    saved artifact is readable. This is the deliverable."""
+    saved artifact is readable. This is the deliverable.
+
+    Validates against the live instance first and REFUSES to save if there are
+    validation errors (a broken deliverable is worse than no save) - fix them
+    with edit_workflow, or pass allow_invalid=True to save a known-broken draft."""
+    if ".." in name or any(sep in name for sep in ("/", "\\")):
+        return {"error": "name must be a plain filename - no path separators or '..'"}
     wf = _wf(workflow_id)
+    object_info = await _object_info()
+    findings = validate(wf, object_info)
+    errors = [f for f in findings if f["level"] == "error"]
+    if errors and not allow_invalid:
+        return {
+            "saved": False,
+            "error": (
+                "refusing to save: the workflow has validation errors that would "
+                "break for the user - fix them with edit_workflow, or pass "
+                "allow_invalid=True to save a known-broken draft anyway"
+            ),
+            "findings": errors,
+        }
     document = wf.to_ui()
     filename = await _client().save_userdata_workflow(name, document)
     local = _session().persist(workflow_id)
-    warnings = lint(wf, await _object_info())
+    warnings = lint(wf, object_info)
     return {
         "saved_to_comfyui": f"workflows/{filename} (visible in the ComfyUI workflow browser)",
         "local_copy": str(local),
+        "validation": findings,
         "lint": warnings,
         "note": "" if not warnings else "lint is not clean - consider organize_workflow before delivering",
     }

@@ -84,7 +84,7 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 **Correctness** — `validate_workflow` (live checks + closest-match suggestions), `diagnose_workflow` (validation + registry resolution of missing nodes), `port_workflow`
 
-**Execution & delivery** — `run_workflow` (render + preview image), `save_workflow` (lands in ComfyUI's workflow browser), `export_workflow_json`
+**Execution & delivery** — `run_workflow` (validates, renders, returns a preview image), `save_workflow` (validates first — refuses to save a broken workflow unless `allow_invalid=True` — then lands in ComfyUI's workflow browser), `export_workflow_json`
 
 **Ecosystem & knowledge** — `resolve_missing_nodes`, `search_node_packs`, `get_model_guidance`, `record_learning`
 
