@@ -23,7 +23,7 @@ from .comfy.registry import RegistryClient
 from .config import Config, load_config
 from .graph.annotate import annotate
 from .graph.lint import lint
-from .graph.model import Workflow
+from .graph.model import VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.validate import validate
 from .session import Session
@@ -108,11 +108,15 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
                 "widgets": n.widgets_values if isinstance(n.widgets_values, list) else dict(n.widgets_values),
             }
             for n in sorted(wf.nodes.values(), key=lambda x: x.id)
+            if n.type not in VIRTUAL_TYPES
         ],
         "links": [
             f"#{ln.origin_id}[{ln.origin_slot}] -> #{ln.target_id}.{wf.nodes[ln.target_id].inputs[ln.target_slot].name}"
             for ln in sorted(wf.links.values(), key=lambda x: x.id)
-            if ln.target_id in wf.nodes and ln.target_slot < len(wf.nodes[ln.target_id].inputs)
+            if ln.target_id in wf.nodes
+            and ln.target_slot < len(wf.nodes[ln.target_id].inputs)
+            and ln.origin_id not in VIRTUAL_TYPES
+            and ln.target_id not in VIRTUAL_TYPES
         ],
         "groups": [g.title for g in wf.groups],
     }
@@ -180,6 +184,13 @@ async def get_node_info(
     object_info = await _object_info()
     results: dict[str, Any] = {}
     for name in names:
+        if name in VIRTUAL_TYPES:
+            results[name] = {
+                "class_type": name,
+                "virtual": True,
+                "note": "UI-only display node, not in ComfyUI object_info",
+            }
+            continue
         try:
             results[name] = node_summary(object_info, name)
         except KeyError:

@@ -156,3 +156,29 @@ def test_lint_flags_orphan_node(txt2img, object_info):
     annotate(wf, object_info)
     findings = lint(wf, object_info)
     assert any(f["code"] == "orphan-node" for f in findings)
+
+
+def test_models_group_title_no_lora(txt2img, object_info):
+    """Workflow with no LoRA loader gets '🧠 Models' (no 'LoRA' in title)."""
+    wf, _ = txt2img
+    annotate(wf, object_info)
+    model_groups = [g for g in wf.groups if "model" in g.title.lower()]
+    assert model_groups, "no models group found"
+    for g in model_groups:
+        assert "lora" not in g.title.lower(), f"expected no LoRA in title, got '{g.title}'"
+        assert g.title == "🧠 Models"
+
+
+def test_models_group_title_with_lora(txt2img, object_info):
+    """Workflow with a LoRA loader gets '🧠 Models & LoRAs' title."""
+    wf, ids = txt2img
+    lora = wf.add_node("LoraLoader", object_info=object_info)
+    wf.connect(ids["ckpt"], "MODEL", lora.id, "model")
+    wf.connect(ids["ckpt"], "CLIP", lora.id, "clip")
+    wf.set_widget(lora.id, "lora_name", "SDXL\\dmd2_sdxl_4step_lora_fp16.safetensors", object_info)
+    annotate(wf, object_info)
+    model_groups = [g for g in wf.groups if "model" in g.title.lower()]
+    assert model_groups, "no models group found"
+    assert any("lora" in g.title.lower() for g in model_groups), (
+        f"expected LoRA in group title, got {[g.title for g in model_groups]}"
+    )
