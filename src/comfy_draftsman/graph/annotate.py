@@ -189,6 +189,7 @@ def _note_text(
     object_info: dict[str, Any],
     guidance: dict[str, Any] | None,
     members: list[Node],
+    title: str | None = None,
 ) -> str | None:
     g = guidance or {}
     family = g.get("display_name", "this model")
@@ -256,8 +257,8 @@ def _note_text(
         lines.append("👇 Load your source image/media here.")
     if not lines:
         return None
-    title = dict((k, t) for k, t, _ in STAGES)[stage]
-    return f"### {title}\n\n" + "\n\n".join(_wrap(line) for line in lines)
+    note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
+    return f"### {note_title}\n\n" + "\n\n".join(_wrap(line) for line in lines)
 
 
 def annotate(
@@ -297,10 +298,19 @@ def annotate(
         members_by_stage.setdefault(stage, []).append(wf.nodes[nid])
 
     for stage_index, (x, y, w_, h_) in sorted(band_boxes.items()):
-        key, title, color = STAGES[stage_index]
+        key, default_title, color = STAGES[stage_index]
         members = members_by_stage.get(stage_index, [])
-        top = y
-        text = _note_text(key, wf, object_info, guidance, members)
+        # Dynamic title for models stage: only mention LoRAs if a LoRA loader is present
+        title = default_title
+        if key == "models":
+            has_lora = any(
+                "lora" in n.type.lower()
+                and "loaders" in (object_info.get(n.type, {}).get("category") or "").lower()
+                for n in members
+            )
+            if not has_lora:
+                title = "\U0001f9e0 Models"
+        text = _note_text(key, wf, object_info, guidance, members, title=title)
         if text:
             note_w = max(min(w_, 380.0), 300.0)
             # frontend renders markdown at ~17px/line; blank separator lines
