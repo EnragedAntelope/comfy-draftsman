@@ -120,9 +120,9 @@ async def test_save_never_clobbers(live_server, live_client):
     finally:
         # userdata persists across test runs - clean up so the draftsman
         # suffix pool never exhausts on the test instance
-        for name in ("draftsman-itest-noclobber",) + tuple(
-            f"draftsman-itest-noclobber (draftsman{'' if i < 2 else f' {i}'})" for i in range(1, 21)
-        ):
+        candidates = ["draftsman-itest-noclobber", "draftsman-itest-noclobber (draftsman)"]
+        candidates += [f"draftsman-itest-noclobber (draftsman {i})" for i in range(2, 21)]
+        for name in candidates:
             await live_client._http.delete(
                 f"/api/userdata/{quote(f'workflows/{name}.json', safe='')}"
             )
