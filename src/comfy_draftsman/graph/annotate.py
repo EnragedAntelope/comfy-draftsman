@@ -63,10 +63,17 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
     return "sampling"
 
 
-def _feeds_input_named(wf: Workflow, node: Node, wanted: set[str], depth: int = 0) -> str | None:
-    """Follow output links (through conditioning shims) to a sampler input name."""
-    if depth > 4:
-        return None
+ZEROOUT_TYPE = "ConditioningZeroOut"
+
+
+def _reached_roles(
+    wf: Workflow, node: Node, depth: int = 0, via_zeroout: bool = False
+) -> set[tuple[str, bool]]:
+    """Sampler roles ('positive'/'negative') this node's conditioning reaches,
+    each tagged with whether the path passed through a ConditioningZeroOut."""
+    results: set[tuple[str, bool]] = set()
+    if depth > 5:
+        return results
     for out in node.outputs:
         for lid in out.links:
             link = wf.links.get(lid)
@@ -76,12 +83,29 @@ def _feeds_input_named(wf: Workflow, node: Node, wanted: set[str], depth: int = 
             if target is None or link.target_slot >= len(target.inputs):
                 continue
             input_name = target.inputs[link.target_slot].name.lower()
-            if input_name in wanted:
-                return input_name
-            found = _feeds_input_named(wf, target, wanted, depth + 1)
-            if found:
-                return found
-    return None
+            if input_name in ("positive", "negative"):
+                results.add((input_name, via_zeroout))
+            downstream_zeroed = via_zeroout or target.type == ZEROOUT_TYPE
+            results |= _reached_roles(wf, target, depth + 1, downstream_zeroed)
+    return results
+
+
+def _prompt_role(wf: Workflow, node: Node) -> str | None:
+    """Positive/negative for a text-encode node. A ConditioningZeroOut in the
+    path is the negative branch, so the text feeding it is the *positive* source
+    (this is the turbo/distilled pattern: positive prompt -> ZeroOut -> negative)."""
+    roles = _reached_roles(wf, node)
+    if not roles:
+        return None
+    direct = {role for role, zeroed in roles if not zeroed}
+    if "positive" in direct:  # prefer a real positive when a node feeds both
+        return "positive"
+    if "negative" in direct:
+        return "negative"
+    # only reaches a sampler through a ZeroOut -> it's the positive source
+    if any(role == "negative" and zeroed for role, zeroed in roles):
+        return "positive"
+    return "positive" if any(role == "positive" for role, _ in roles) else None
 
 
 def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> None:
@@ -89,11 +113,12 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> None:
         schema = object_info.get(node.type)
         if schema is None:
             continue
-        has_text_widget = node.input_by_name("text") is None and any(
-            s == "text" for s in _safe_slots(node, object_info)
-        )
+        if node.type == ZEROOUT_TYPE and node.title is None:
+            node.title = "🚫 Negative (zeroed)"
+            continue
+        has_text_widget = any(s == "text" for s in _safe_slots(node, object_info))
         if node.type == "CLIPTextEncode" or has_text_widget:
-            role = _feeds_input_named(wf, node, {"positive", "negative"})
+            role = _prompt_role(wf, node)
             if role == "positive":
                 node.title = "✅ Positive Prompt"
             elif role == "negative":
@@ -128,14 +153,26 @@ def _named_widgets(node: Node, object_info: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _wired_input(node: Node, name: str) -> bool:
+    """True if this widget has been converted to an input and has a link feeding
+    it - i.e. the value comes from upstream and is NOT hand-editable."""
+    slot = node.input_by_name(name)
+    return slot is not None and slot.link is not None
+
+
 def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]) -> None:
     for node in wf.nodes.values():
         stage = stage_of_key.get(node.id)
         slots = set(_safe_slots(node, object_info))
+        prompt_knobs = slots & {"text", "prompt", "wildcard_text"}
+        # a text/prompt knob that is wired from upstream isn't editable - don't
+        # paint it "touch me" green (that combination misleads a human reader)
+        editable_prompt_knob = stage == "prompts" and any(
+            not _wired_input(node, name) for name in prompt_knobs
+        )
         is_knob = (
             node.type in _INPUT_CLASSES
-            or (stage == "prompts"
-            and slots & {"text", "prompt", "wildcard_text"})
+            or editable_prompt_knob
             or node.type in ("EmptyLatentImage", "EmptySD3LatentImage")
         )
         if is_knob:
@@ -162,7 +199,23 @@ def _note_text(
         if notes.get("loaders"):
             lines.append(notes["loaders"])
     elif stage == "prompts":
-        lines.append("👇 Type what you want in the green Positive Prompt node.")
+        text_nodes = [
+            n for n in members if "text" in _safe_slots(n, object_info) or n.type == "CLIPTextEncode"
+        ]
+        any_editable = any(
+            not _wired_input(n, name)
+            for n in text_nodes
+            for name in ("text", "prompt", "wildcard_text")
+            if name in _safe_slots(n, object_info)
+        )
+        if any_editable:
+            lines.append("👇 Type what you want in the green Positive Prompt node.")
+        else:
+            lines.append(
+                "✍️ The prompt text here is built automatically from the upstream "
+                "green string nodes — edit those (word banks / inputs) to change the "
+                "result, not the prompt box (it's wired, so it can't be typed into)."
+            )
         if notes.get("conditioning"):
             lines.append(notes["conditioning"])
     elif stage == "sampling":
@@ -220,7 +273,7 @@ def annotate(
         wf.remove_node(nid)
     wf.groups = []
 
-    family = knowledge.detect_family(wf, object_info)
+    family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
     guidance = None
     if family:
         filenames = knowledge.model_filenames(wf, object_info)

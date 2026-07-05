@@ -159,24 +159,58 @@ def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
     return [filename for _, filename in _model_refs(wf, object_info)]
 
 
-def detect_family(wf, object_info: dict[str, Any]) -> str | None:
-    """Family detection from model filenames, disambiguated by loader topology.
+def _detect_index(learned_dir: Path | str | None) -> dict[str, dict[str, Any]]:
+    """Family -> {detect, loader} from the floor, overlaid with learned families.
+
+    Learned overlays can carry their own ``detect``/``loader`` (written via
+    record_learning with a detect block), so a model researched once becomes
+    self-detecting in later sessions without editing the shipped floor.
+    """
+    index: dict[str, dict[str, Any]] = {
+        name: copy.deepcopy(data) for name, data in _load_floor().items()
+    }
+    if learned_dir is not None:
+        directory = Path(learned_dir)
+        if directory.is_dir():
+            for path in directory.glob("*.yaml"):
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                family = raw.get("family", path.stem)
+                data = raw.get("data", {}) or {}
+                if family in index:
+                    deep_merge(index[family], data)
+                else:
+                    index[family] = {"family": family, **data}
+    return index
+
+
+def detect_family(
+    wf, object_info: dict[str, Any], learned_dir: Path | str | None = None
+) -> str | None:
+    """Family detection from model filenames, disambiguated by loader topology
+    and pattern specificity.
 
     Merge names lie ("...XLFluxPony...DMD" is an SDXL merge, not FLUX), so a
     filename pattern match alone scores 1; a match whose loader widget agrees
     with the family's loader style (ckpt_name for checkpoint families,
-    unet_name for split-loader families) scores 2 and wins.
+    unet_name for split-loader families) scores 2. Ties break on the length of
+    the matched pattern, so a specific pattern ("krea2") wins over a generic
+    substring of it ("krea") when two families share a loader topology.
     """
-    best_score, best_family = 0, None
+    best_key: tuple[int, int] = (0, 0)
+    best_family = None
     for widget_name, filename in _model_refs(wf, object_info):
-        for family, data in _load_floor().items():
+        for family, data in _detect_index(learned_dir).items():
             patterns = (data.get("detect") or {}).get("checkpoint_patterns", [])
-            if not _matches(filename, patterns):
+            matched = [p for p in patterns if _matches(filename, [p])]
+            if not matched:
                 continue
-            score = 1
             loader = data.get("loader")
-            if (widget_name == "ckpt_name" and loader == "checkpoint") or (widget_name in ("unet_name", "model_name") and loader == "unet_clip_vae"):
-                score += 1
-            if score > best_score:
-                best_score, best_family = score, family
+            loader_score = 1
+            if (widget_name == "ckpt_name" and loader == "checkpoint") or (
+                widget_name in ("unet_name", "model_name") and loader == "unet_clip_vae"
+            ):
+                loader_score = 2
+            key = (loader_score, max(len(p) for p in matched))
+            if key > best_key:
+                best_key, best_family = key, family
     return best_family

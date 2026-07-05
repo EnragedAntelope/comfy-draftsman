@@ -14,12 +14,18 @@ in the UI graph but are resolved away during API serialization.
 
 from __future__ import annotations
 
+import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import widgets as w
 
 VIRTUAL_TYPES = {"Note", "MarkdownNote", "PrimitiveNode", "Reroute"}
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 MODE_NORMAL = 0
 MODE_MUTE = 2
@@ -106,6 +112,10 @@ class Workflow:
         self.groups: list[Group] = []
         self.extra: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
+        # ComfyUI's UI schema wants a uuid at top-level "id"; an empty string
+        # trips its zod validator ("Invalid uuid at id"). Mint one per workflow
+        # and keep it stable across re-exports.
+        self.uuid: str = str(uuid.uuid4())
         self._next_node_id = 1
         self._next_link_id = 1
 
@@ -120,6 +130,11 @@ class Workflow:
         wf = cls()
         wf.extra = data.get("extra", {}) or {}
         wf.config = data.get("config", {}) or {}
+        # preserve an existing valid workflow uuid if the source has one;
+        # otherwise keep the freshly minted one from __init__
+        existing_id = data.get("id") or wf.extra.get("workflow_id")
+        if isinstance(existing_id, str) and _UUID_RE.match(existing_id):
+            wf.uuid = existing_id
         for raw in data.get("nodes", []):
             node = Node(
                 id=int(raw["id"]),
@@ -282,7 +297,12 @@ class Workflow:
                     slot.link = None
 
     def connect(
-        self, origin_id: int, origin_out: str | int, target_id: int, target_input: str
+        self,
+        origin_id: int,
+        origin_out: str | int,
+        target_id: int,
+        target_input: str,
+        object_info: dict[str, Any] | None = None,
     ) -> Link:
         origin = self.nodes[origin_id]
         target = self.nodes[target_id]
@@ -301,9 +321,17 @@ class Workflow:
         out_slot = origin.outputs[out_index]
         in_slot = target.input_by_name(target_input)
         if in_slot is None:
+            # a widget input (STRING/INT/FLOAT/...) not yet exposed as a socket:
+            # convert it to an input, exactly like the ComfyUI "convert widget to
+            # input" action. Keeps the widgets_values slot; the link overrides it.
+            in_slot = self._materialize_widget_input(target, target_input, object_info)
+        if in_slot is None:
+            widget_hint = ""
+            if object_info is None:
+                widget_hint = " (pass object_info to connect into widget inputs)"
             raise ValueError(
                 f"node {target_id} ({target.type}) has no input '{target_input}'; "
-                f"available: {[i.name for i in target.inputs]}"
+                f"available: {[i.name for i in target.inputs]}{widget_hint}"
             )
         if in_slot.type not in ("*", "COMBO") and out_slot.type != "*" and in_slot.type != out_slot.type:
             raise ValueError(
@@ -311,6 +339,26 @@ class Workflow:
                 f"{target.type}.{target_input} ({in_slot.type})"
             )
         return self._add_link(origin_id, out_index, target_id, target_input)
+
+    def _materialize_widget_input(
+        self, node: Node, name: str, object_info: dict[str, Any] | None
+    ) -> InputSlot | None:
+        """Expose a primitive/combo widget as a real input slot so a link can feed
+        it. Returns the new slot, or None if the name isn't a convertible widget."""
+        if object_info is None:
+            return None
+        schema = object_info.get(node.type)
+        if schema is None:
+            return None
+        for input_name, spec in w._iter_schema_inputs(schema):
+            if input_name != name or not w.is_widget_input(spec):
+                continue
+            kind = spec[0]
+            slot_type = "COMBO" if isinstance(kind, list) or kind == "COMBO" else str(kind)
+            slot = InputSlot(name=name, type=slot_type, widget_name=name)
+            node.inputs.append(slot)
+            return slot
+        return None
 
     def _add_link(
         self, origin_id: int, origin_slot: int, target_id: int, target_input: str
@@ -405,7 +453,7 @@ class Workflow:
                 raw["bgcolor"] = node.bgcolor
             nodes_out.append(raw)
         return {
-            "id": self.extra.get("workflow_id", ""),
+            "id": self.uuid,
             "revision": 0,
             "last_node_id": max(self.nodes, default=0),
             "last_link_id": max(self.links, default=0),

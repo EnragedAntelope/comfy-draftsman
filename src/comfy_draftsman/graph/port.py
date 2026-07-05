@@ -182,7 +182,7 @@ def _swap_loader_topology(wf, guidance, object_info, changes, flags) -> None:
                         f"could not rewire {target.type}.{input_name} (was checkpoint {out.type})"
                     )
                     continue
-                wf.connect(new_id, 0, link.target_id, input_name)
+                wf.connect(new_id, 0, link.target_id, input_name, object_info)
         try:
             ckpt_name = wf.get_widget(ckpt.id, "ckpt_name", object_info)
         except (ValueError, KeyError):
@@ -217,7 +217,22 @@ def port_workflow(
     object_info: dict[str, Any],
     learned_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    guidance = knowledge.get_guidance(target_family, learned_dir=learned_dir)
+    try:
+        guidance = knowledge.get_guidance(target_family, learned_dir=learned_dir)
+    except KeyError:
+        return {
+            "target_family": target_family,
+            "changes": [],
+            "flags": [],
+            "error": f"no knowledge for family '{target_family}'",
+            "families": knowledge.list_families(learned_dir),
+            "hint": (
+                "research this family's loader topology + sampling online, then "
+                "record_learning it (include a 'detect' block so it's recognized "
+                "next time). Re-run port_workflow afterwards, or wire it manually "
+                "with edit_workflow using get_model_guidance for settings."
+            ),
+        }
     changes: list[str] = []
     flags: list[str] = []
 

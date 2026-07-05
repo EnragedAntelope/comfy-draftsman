@@ -1,0 +1,56 @@
+family: krea2
+display_name: Krea-2
+# Krea-2 is a distinct architecture from FLUX.1-Krea: it uses a Qwen3-VL text
+# encoder (CLIPLoader type=krea2) and a Qwen-image VAE, wired as separate
+# UNET/CLIP/VAE loaders. The "krea2" pattern is more specific than FLUX's
+# generic "krea", so detection prefers this family for krea2 files.
+detect:
+  checkpoint_patterns: ["krea2", "krea_2", "krea-2"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["Qwen3-VL 4B fp8 (CLIPLoader, type=krea2)"]
+  vae: "qwen_image_vae.safetensors (or the Krea-2 real VAE)"
+loader_nodes:
+  model:
+    class: UNETLoader
+    file_widget: unet_name
+    file_patterns: ["krea2"]
+    widgets: {weight_dtype: default}
+    output: MODEL
+  clip:
+    class: CLIPLoader
+    file_widget: clip_name
+    file_patterns: ["qwen3vl", "qwen_3", "qwen3", "qwen"]
+    widgets: {type: krea2}
+    output: CLIP
+  vae:
+    class: VAELoader
+    file_widget: vae_name
+    file_patterns: ["qwen_image_vae", "krea"]
+    output: VAE
+sampling:
+  cfg: {min: 1.0, max: 1.0, default: 1.0}
+  steps: {min: 6, max: 12, default: 8}
+  samplers: [euler]
+  schedulers: [simple]
+resolutions: ["1024x1024", "1328x1328", "1216x832", "832x1216"]
+notes:
+  loaders: >-
+    Krea-2 loads as three separate parts: the diffusion model (UNETLoader), a
+    Qwen3-VL text encoder (CLIPLoader with type=krea2 - not clip_l/t5xxl), and a
+    Qwen-image VAE (VAELoader). It is NOT a FLUX checkpoint; there is no
+    DualCLIPLoader and no FluxGuidance node.
+  conditioning: >-
+    The turbo variant runs at CFG 1.0, so a text negative prompt does nothing -
+    the negative is produced by feeding the positive conditioning through a
+    ConditioningZeroOut node. Write your description in the positive prompt;
+    Krea-2 handles long natural-language prompts well.
+  sampling: >-
+    Turbo reference: 8 steps, CFG 1.0, euler/simple, denoise 1.0. This is a
+    distilled model - raising CFG above 1.0 degrades it. Increase steps only
+    slightly (to ~12) if you want a touch more detail.
+research: >-
+  Floor first written July 2026 from the official ComfyUI Krea-2 turbo template
+  and a live port. Krea-2 is new and iterating - confirm the exact recommended
+  steps/CFG, text-encoder file, and VAE against the current Krea/ComfyUI release
+  notes for the specific weights you have, and record_learning any refinements.

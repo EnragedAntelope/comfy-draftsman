@@ -103,6 +103,15 @@ class ComfyClient:
         response.raise_for_status()
         return filename
 
+    @staticmethod
+    def _collect_outputs(history: dict[str, Any]) -> list[dict[str, Any]]:
+        outputs: list[dict[str, Any]] = []
+        for node_id, node_output in (history.get("outputs") or {}).items():
+            for key in ("images", "gifs", "videos", "audio"):
+                for item in node_output.get(key, []) or []:
+                    outputs.append({**item, "node_id": node_id, "kind": key})
+        return outputs
+
     def _ws_url(self) -> str:
         scheme = "wss" if self.base_url.startswith("https") else "ws"
         host = self.base_url.split("://", 1)[1]
@@ -141,12 +150,16 @@ class ComfyClient:
                     )
                     if finished and data.get("prompt_id") == prompt_id:
                         break
-        history = await self.get_history(prompt_id)
+        # /history can lag the execution_success event by a beat; on a clean run
+        # with no outputs yet, re-poll briefly before trusting an empty list.
         outputs: list[dict[str, Any]] = []
-        for node_id, node_output in (history.get("outputs") or {}).items():
-            for key in ("images", "gifs", "videos", "audio"):
-                for item in node_output.get(key, []) or []:
-                    outputs.append({**item, "node_id": node_id, "kind": key})
+        for attempt in range(5):
+            history = await self.get_history(prompt_id)
+            outputs = self._collect_outputs(history)
+            if outputs or error or history.get("status", {}).get("completed") is False:
+                break
+            if attempt < 4:
+                await asyncio.sleep(0.2 * (attempt + 1))
         result: dict[str, Any] = {
             "status": "error" if error else "success",
             "prompt_id": prompt_id,

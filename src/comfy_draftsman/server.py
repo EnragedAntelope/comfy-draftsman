@@ -13,6 +13,7 @@ from typing import Any, Literal
 import yaml
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.utilities.types import Image
+from mcp.types import ToolAnnotations
 
 from . import knowledge
 from .comfy.catalog import node_summary
@@ -27,6 +28,15 @@ from .graph.port import port_workflow as port_engine
 from .graph.validate import validate
 from .session import Session
 
+# Tool annotations let clients reason about safety and, where supported,
+# auto-approve safe calls. Read tools that query the live instance are
+# read-only + open-world; session-local reads are read-only + closed-world.
+# See docs/PERMISSIONS.md for the recommended Claude Code allowlist.
+_READ_INSTANCE = ToolAnnotations(readOnlyHint=True, openWorldHint=True, idempotentHint=True)
+_READ_LOCAL = ToolAnnotations(readOnlyHint=True, openWorldHint=False, idempotentHint=True)
+_EDIT_LOCAL = ToolAnnotations(readOnlyHint=False, openWorldHint=False, destructiveHint=False)
+_WRITE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=False)
+
 mcp = FastMCP(
     "comfy-draftsman",
     instructions=(
@@ -35,9 +45,14 @@ mcp = FastMCP(
         "labeled workflow: run organize_workflow before save_workflow so a human gets "
         "groups, notes, and highlighted knobs. Ground truth is the live instance "
         "(search_nodes/get_node_info/list_models); templates (list_templates) are the "
-        "best starting points for current models. get_model_guidance returns tuned "
-        "settings per model family; when you research better settings online, persist "
-        "them with record_learning so future sessions benefit."
+        "best starting points for current models. get_node_info accepts a list of "
+        "class_types - batch your lookups in ONE call instead of one per node. "
+        "get_model_guidance returns tuned settings per model family; when you research "
+        "better settings online, persist them with record_learning (include a 'detect' "
+        "block for brand-new families so they're recognized next session). "
+        "When modernizing a workflow, if some nodes have no core/installed equivalent, "
+        "tell the user exactly what capability would be LOST before they choose "
+        "'core nodes only' vs installing a pack - don't drop features silently."
     ),
 )
 
@@ -108,7 +123,7 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def get_instance_info() -> dict[str, Any]:
     """ComfyUI version, OS, VRAM, queue length of the connected instance. Call first."""
     stats = await _client().get_system_stats()
@@ -128,30 +143,56 @@ async def get_instance_info() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
-async def search_nodes(query: str, category: str = "", limit: int = 25) -> list[dict[str, Any]]:
+@mcp.tool(annotations=_READ_INSTANCE)
+async def search_nodes(
+    query: str, category: str = "", limit: int = 25, detail: bool = False
+) -> list[dict[str, Any]]:
     """Search node classes installed on the instance (name/display-name/description).
 
     Use category to narrow (e.g. 'loaders', 'conditioning', 'sampling', 'ImpactPack').
-    Follow up with get_node_info before wiring an unfamiliar node.
+    Set detail=True to fold each hit's full input/output schema in-line (use a
+    specific query + small limit) so you can skip the follow-up get_node_info.
     """
-    return catalog_search(await _object_info(), query, category=category or None, limit=limit)
+    object_info = await _object_info()
+    results = catalog_search(object_info, query, category=category or None, limit=limit)
+    if detail:
+        for hit in results:
+            hit["schema"] = node_summary(object_info, hit["class_type"])
+    return results
 
 
-@mcp.tool()
-async def get_node_info(class_type: str) -> dict[str, Any]:
-    """Full input/output schema for one node class: slot names, types, widget
-    defaults/ranges, combo choices (truncated), tooltips."""
-    try:
-        return node_summary(await _object_info(), class_type)
-    except KeyError:
-        return {
-            "error": f"'{class_type}' is not installed on this instance",
-            "hint": "resolve_missing_nodes can find which pack provides it",
-        }
+@mcp.tool(annotations=_READ_INSTANCE)
+async def get_node_info(
+    class_type: str = "", class_types: list[str] | None = None
+) -> dict[str, Any]:
+    """Full input/output schema for node classes: slot names, types, widget
+    defaults/ranges, combo choices (truncated), tooltips.
+
+    BATCH your lookups: pass class_types=["A", "B", "C"] to fetch many in ONE
+    call (returns {class_type: schema}) instead of one call per node. A single
+    class_type=... still returns that one node's schema directly.
+    """
+    names = list(class_types or [])
+    if class_type:
+        names.insert(0, class_type)
+    if not names:
+        return {"error": "pass class_type=... or class_types=[...]"}
+    object_info = await _object_info()
+    results: dict[str, Any] = {}
+    for name in names:
+        try:
+            results[name] = node_summary(object_info, name)
+        except KeyError:
+            results[name] = {
+                "error": f"'{name}' is not installed on this instance",
+                "hint": "resolve_missing_nodes can find which pack provides it",
+            }
+    if class_types is None and class_type:  # single-lookup back-compat shape
+        return results[class_type]
+    return results
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def list_models(folder: str = "checkpoints") -> dict[str, Any]:
     """Model files installed on the instance. folder: checkpoints, loras, vae,
     diffusion_models, text_encoders, upscale_models, controlnet, embeddings, ..."""
@@ -161,7 +202,7 @@ async def list_models(folder: str = "checkpoints") -> dict[str, Any]:
     return {"folder": folder, "files": await _client().list_models(folder)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def list_templates(search: str = "") -> list[dict[str, Any]]:
     """ComfyUI's bundled workflow templates - the best starting points for current
     models (they ship with every release). Seed one via create_workflow(template=...)."""
@@ -187,7 +228,7 @@ async def list_templates(search: str = "") -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def create_workflow(title: str, template: str = "") -> dict[str, Any]:
     """Start a workflow: blank, or seeded from a bundled template (recommended for
     current model families - see list_templates). Returns workflow_id + node summary."""
@@ -200,7 +241,7 @@ async def create_workflow(title: str, template: str = "") -> dict[str, Any]:
     return _summary(workflow_id, wf)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def import_workflow(workflow_json: str, title: str = "imported") -> dict[str, Any]:
     """Import an existing workflow (UI format with nodes/links, or API format
     {id: {class_type, inputs}}). Use for beautifying/diagnosing/porting outside work."""
@@ -213,13 +254,13 @@ async def import_workflow(workflow_json: str, title: str = "imported") -> dict[s
     return _summary(workflow_id, wf)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_LOCAL)
 async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
     """Compact view of a session workflow: nodes (id/class/title/widgets), links, groups."""
     return _summary(workflow_id, _wf(workflow_id))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply batched edits. Each op is a dict with 'op' plus:
 
@@ -255,7 +296,13 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
                 from_output = op["from_output"]
                 if isinstance(from_output, str) and from_output.isdigit():
                     from_output = int(from_output)
-                wf.connect(int(op["from_node"]), from_output, int(op["to_node"]), op["to_input"])
+                wf.connect(
+                    int(op["from_node"]),
+                    from_output,
+                    int(op["to_node"]),
+                    op["to_input"],
+                    object_info,
+                )
                 applied.append(
                     f"connected #{op['from_node']}.{op['from_output']} -> #{op['to_node']}.{op['to_input']}"
                 )
@@ -275,7 +322,7 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
     return {"applied": applied, "summary": _summary(workflow_id, wf)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     """THE finishing step: auto-layout into pipeline stage bands, colored groups,
     human titles, green highlights on user-editable knobs, and markdown guidance
@@ -288,14 +335,14 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     return report
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def lint_workflow(workflow_id: str) -> list[dict[str, Any]]:
     """Readability/wiring lint: unlabeled prompts, missing groups/notes, orphan
     nodes, unconnected required inputs, overlapping nodes. Empty list = clean."""
     return lint(_wf(workflow_id), await _object_info())
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def validate_workflow(workflow_id: str) -> dict[str, Any]:
     """Validate against the LIVE instance: node classes installed, widget values in
     range, combo/model-file values actually present (with closest-match suggestions),
@@ -317,17 +364,45 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
     findings = validate(wf, await _object_info(refresh=True))
     missing = sorted({f["class_type"] for f in findings if f["code"] == "missing-node-class"})
     registry_result: dict[str, Any] = {}
+    capability_impact: list[dict[str, Any]] = []
     if missing:
         registry_result = await _registry().resolve_node_classes(missing)
+        resolved = registry_result.get("resolved", {})
+        for cls in missing:
+            pack = resolved.get(cls)
+            capability_impact.append(
+                {
+                    "class_type": cls,
+                    "provided_by": pack,
+                    "options": (
+                        f"install pack '{pack}' (runs third-party code) to keep this "
+                        "node's capability, OR replace it with a core/already-installed "
+                        "equivalent, OR drop it and lose what it does"
+                        if pack
+                        else "not found in the registry - find a core/installed "
+                        "equivalent, or dropping it loses what it does"
+                    ),
+                }
+            )
     return {
         "ok": not findings,
         "findings": findings,
         "missing_node_packs": registry_result,
-        "family": knowledge.detect_family(wf, await _object_info()),
+        "capability_impact": capability_impact,
+        "capability_notice": (
+            "For each missing node, tell the user WHAT FUNCTION is lost if it's dropped "
+            "and whether a core/installed equivalent exists, BEFORE they choose "
+            "'core nodes only' vs installing a pack. Never drop a feature silently."
+        )
+        if missing
+        else "",
+        "family": knowledge.detect_family(
+            wf, await _object_info(), learned_dir=_config().learned_dir
+        ),
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def port_workflow(workflow_id: str, target_family: str) -> dict[str, Any]:
     """Retarget a workflow to another model family (e.g. 'sdxl' -> 'flux'):
     swaps loader topology when needed, retunes CFG/steps/sampler/scheduler and
@@ -371,7 +446,7 @@ async def run_workflow(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE_INSTANCE)
 async def save_workflow(workflow_id: str, name: str) -> dict[str, Any]:
     """Save the workflow (UI format, with all layout/groups/notes) into ComfyUI's
     workflow browser and to the session dir. Run organize_workflow first so the
@@ -389,7 +464,7 @@ async def save_workflow(workflow_id: str, name: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_LOCAL)
 async def export_workflow_json(
     workflow_id: str, format: Literal["ui", "api"] = "ui"
 ) -> dict[str, Any]:
@@ -406,7 +481,7 @@ async def export_workflow_json(
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def resolve_missing_nodes(class_types: list[str]) -> dict[str, Any]:
     """Find which installable node packs provide these node class names (official
     Comfy Registry). Returns pack ids, repos, and install hints. Installing custom
@@ -414,14 +489,14 @@ async def resolve_missing_nodes(class_types: list[str]) -> dict[str, Any]:
     return await _registry().resolve_node_classes(class_types)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_INSTANCE)
 async def search_node_packs(query: str) -> list[dict[str, Any]]:
     """Search the Comfy Registry for node packs by capability (e.g. 'face detailer',
     'wildcards', 'video interpolation')."""
     return await _registry().search_packs(query)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_LOCAL)
 async def get_model_guidance(family: str = "", model_filename: str = "") -> dict[str, Any]:
     """Tuned settings for a model family: sampling (CFG/steps/samplers), native
     resolutions, technique blocks (face_detailer, hires_fix...), prompt style notes.
@@ -441,13 +516,17 @@ async def get_model_guidance(family: str = "", model_filename: str = "") -> dict
         }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_EDIT_LOCAL)
 async def record_learning(family: str, updates: dict[str, Any], source: str) -> dict[str, Any]:
     """Persist researched settings so FUTURE sessions start smarter. updates uses the
     guidance shape, e.g. {"sampling": {"cfg": {"default": 3.5}}} or
     {"techniques": {"face_detailer": {"denoise": 0.4, "cfg": 1.0}}} or
     {"notes": {"sampling": "..."}}. source = where you learned it (URL/model page).
-    Works for new families too - pass any family name."""
+
+    Works for brand-new families too - pass any family name. For a NEW family,
+    also include a "detect" block so the server RECOGNIZES it automatically next
+    session (otherwise it'll re-misdetect as a lookalike family):
+    {"detect": {"checkpoint_patterns": ["mymodel"]}, "loader": "unet_clip_vae"}."""
     path = knowledge.save_learning(_config().learned_dir, family, updates, source)
     return {"saved": str(path), "guidance_now": knowledge.get_guidance(family, learned_dir=_config().learned_dir)}
 
@@ -493,9 +572,12 @@ def modernize_workflow(problem: str = "an old workflow that no longer works") ->
 2. diagnose_workflow - every incompatibility with the live instance, with fixes:
    renamed/removed nodes, changed widget schemas (widget-count-drift), missing
    model files (closest installed suggestion), missing custom-node packs (registry
-   resolution + install hints).
-3. Apply fixes via edit_workflow. For missing packs, surface install choices to
-   the user (custom nodes execute third-party code).
+   resolution + install hints), and a capability_impact list for missing nodes.
+3. Apply fixes via edit_workflow. BEFORE choosing "core nodes only" vs installing
+   packs, spell out for the user exactly what each missing node DOES and what
+   capability is lost if it's dropped (use diagnose_workflow's capability_impact).
+   Get explicit confirmation - never silently drop a feature. Custom nodes execute
+   third-party code, so installing is always the user's call.
 4. To move to a newer model family (e.g. sdxl -> flux/krea): port_workflow, then
    review its flags - it retunes samplers/techniques and swaps loader topology
    mechanically, and tells you what needs judgment.

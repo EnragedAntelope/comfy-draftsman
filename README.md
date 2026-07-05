@@ -19,7 +19,7 @@ Every agent tool for ComfyUI can emit raw API-format JSON — a working but unre
 - **Diagnose & modernize** — hand it an old broken workflow: it reports every incompatibility against your live instance (renamed nodes, changed widget layouts, missing model files with closest-installed suggestions) and resolves missing custom nodes to installable packs via the official Comfy Registry.
 - **Port** — retarget across model families (`sdxl` → `flux`, ...): swaps loader topology (checkpoint ⇄ separate UNET/CLIP/VAE loaders) and rewires consumers, retunes CFG/steps/samplers *and* technique nodes (FaceDetailer settings are family-specific — there is no universal detailer config), swaps latent node classes, picks installed model files, and flags everything needing human judgment.
 - **Validate & prove** — structural + live validation, then an actual render with a returned preview image, before the workflow is ever delivered.
-- **Learn** — a two-layer knowledge system: a curated per-family floor (SD1.5/SDXL/SD3.5/FLUX/Chroma/Qwen-Image/Wan/LTX, variant-aware for turbo/lightning/DMD/distills) plus a **persistent learned overlay**: when the agent researches better settings for a new model, `record_learning` saves them so every future session starts smarter.
+- **Learn** — a two-layer knowledge system: a curated per-family floor (SD1.5/SDXL/SD3.5/FLUX/Krea-2/Chroma/Qwen-Image/Wan/LTX, variant-aware for turbo/lightning/DMD/distills) plus a **persistent learned overlay**: when the agent researches better settings for a new model, `record_learning` saves them so every future session starts smarter. A learned entry can carry its own `detect` block, so a brand-new model researched once becomes **self-detecting** next session instead of being mistaken for a lookalike family.
 - **Stay current** — ground truth is your running ComfyUI (`/object_info`, live templates, live model lists), never a bundled snapshot.
 
 ## Requirements
@@ -65,6 +65,16 @@ Then just ask your agent things like:
 | `DRAFTSMAN_SESSION_DIR` | `./.draftsman-sessions` | Where in-progress workflows persist |
 | `DRAFTSMAN_LEARNED_DIR` | `~/.comfy-draftsman/learned` | Persistent learned model knowledge |
 | `DRAFTSMAN_TIMEOUT` | `30` | HTTP timeout (seconds) |
+
+### Reducing permission prompts
+
+Building a workflow makes many tool calls (schema lookups, validation, layout), so
+your agent may ask to approve each one. Draftsman marks its read-only tools with MCP
+`readOnlyHint` annotations and batches schema lookups (`get_node_info` takes a list),
+but the actual prompting is your **client's** policy. To "approve once", add the
+read-only tools to your client's allowlist — see **[docs/PERMISSIONS.md](docs/PERMISSIONS.md)**
+for a copy-paste Claude Code `permissions.allow` block (and the tradeoffs of allowing
+the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
