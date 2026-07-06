@@ -29,6 +29,9 @@ def _combo_choices(spec: Any) -> list[Any] | None:
     kind = spec[0]
     if isinstance(kind, list):
         return kind
+    if w.is_dynamic_combo(spec):
+        # the main value must be one of the option keys
+        return [o.get("key") for o in w.dynamic_options(spec)]
     if kind == "COMBO":
         opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
         return opts.get("options", [])
@@ -54,7 +57,7 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
             )
             continue
 
-        slots = w.widget_slot_names(node.type, object_info)
+        slots = w.widget_slot_names(node.type, object_info, node.widgets_values)
         if isinstance(node.widgets_values, list) and len(node.widgets_values) != len(slots):
             # dynamic nodes (text concatenators, switches...) declare dozens of
             # optional widgets in their schema but the frontend serializes only
@@ -90,11 +93,9 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
                     )
                 )
 
-        specs = {
-            name: spec
-            for section in ("required", "optional")
-            for name, spec in schema.get("input", {}).get(section, {}).items()
-        }
+        # real widget slots for the current selection, incl. dotted sub-widgets
+        # of a dynamic combo's chosen option - so their values get validated too
+        specs = w.widget_specs(node.type, object_info, node.widgets_values)
         named = w.widgets_to_named(node.type, node.widgets_values, object_info)
         for name, value in named.items():
             if value is None:

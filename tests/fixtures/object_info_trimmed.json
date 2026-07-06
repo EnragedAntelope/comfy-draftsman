@@ -4233,5 +4233,310 @@
    "image loader"
   ],
   "essentials_category": "Basics"
+ },
+ "DA3Inference": {
+  "input": {
+   "required": {
+    "da3_model": [
+     "DA3_MODEL",
+     {}
+    ],
+    "image": [
+     "IMAGE",
+     {}
+    ],
+    "resolution": [
+     "INT",
+     {
+      "tooltip": "Resolution the model runs at (longest side, multiple of 14).\nLower = faster / less VRAM.\nHigher = more detail.\nOutput is upsampled back to the original size.",
+      "default": 504,
+      "min": 140,
+      "max": 2520,
+      "step": 14
+     }
+    ],
+    "resize_method": [
+     "COMBO",
+     {
+      "tooltip": "upper_bound_resize: scale so the longest side = resolution (caps memory, default).\nlower_bound_resize: scale so the shortest side = resolution (preserves more detail on tall/wide images, uses more memory).",
+      "default": "upper_bound_resize",
+      "multiselect": false,
+      "options": [
+       "upper_bound_resize",
+       "lower_bound_resize"
+      ]
+     }
+    ],
+    "mode": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "tooltip": "mono: single view image (works with any model variant).\nmultiview: all images processed together for geometric consistency + camera pose (for Small/Base models only).",
+      "options": [
+       {
+        "key": "mono",
+        "inputs": {
+         "required": {}
+        }
+       },
+       {
+        "key": "multiview",
+        "inputs": {
+         "required": {
+          "ref_view_strategy": [
+           "COMBO",
+           {
+            "tooltip": "Which view acts as the geometric anchor.\n- saddle_balanced: the view most 'average' across all others (best general choice).\n- saddle_sim_range: the view most visually distinct from the others.\n- first / middle: fixed positional picks.",
+            "default": "saddle_balanced",
+            "multiselect": false,
+            "options": [
+             "saddle_balanced",
+             "saddle_sim_range",
+             "first",
+             "middle"
+            ]
+           }
+          ],
+          "pose_method": [
+           "COMBO",
+           {
+            "tooltip": "How the camera field-of-view is estimated (for Small/Base models only).\n- cam_dec: learned from image features.\n- ray_pose: derived geometrically from the model's 3D ray output.\nAffects perspective correctness of the 3D output. Try both if results look distorted.",
+            "default": "cam_dec",
+            "multiselect": false,
+            "options": [
+             "cam_dec",
+             "ray_pose"
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "output": [
+   "DA3_GEOMETRY"
+  ],
+  "output_name": [
+   "da3_geometry"
+  ],
+  "category": "image/geometry estimation",
+  "display_name": "Run Depth Anything 3"
+ },
+ "DA3Render": {
+  "input": {
+   "required": {
+    "da3_geometry": [
+     "DA3_GEOMETRY",
+     {}
+    ],
+    "output": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "tooltip": "- depth: normalised greyscale depth image.\n- depth_colored: depth mapped through the Turbo colormap.\n- sky_mask: sky probability in [0, 1] (for Mono/Metric models only).\n- confidence: normalised depth confidence (for Small/Base models only).",
+      "options": [
+       {
+        "key": "depth",
+        "inputs": {
+         "required": {
+          "normalization": [
+           "COMBO",
+           {
+            "tooltip": "- v2_style: mean/std normalisation for perceptually balanced results (default).\n- min_max: stretches the full depth range to [0, 1] for maximum contrast.\n- raw: no scaling,preserves metric units for Metric model.",
+            "default": "v2_style",
+            "multiselect": false,
+            "options": [
+             "v2_style",
+             "min_max",
+             "raw"
+            ]
+           }
+          ],
+          "apply_sky_clip": [
+           "BOOLEAN",
+           {
+            "tooltip": "Clip sky-region depth to the 99th percentile of foreground depth before normalisation. Requires a sky key in the da3_geometry input (for Mono/Metric models only).",
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "depth_colored",
+        "inputs": {
+         "required": {
+          "normalization": [
+           "COMBO",
+           {
+            "tooltip": "- v2_style: mean/std normalisation for perceptually balanced results (default).\n- min_max: stretches the full depth range to [0, 1] for maximum contrast.\n- raw: no scaling,preserves metric units for Metric model.",
+            "default": "v2_style",
+            "multiselect": false,
+            "options": [
+             "v2_style",
+             "min_max",
+             "raw"
+            ]
+           }
+          ],
+          "apply_sky_clip": [
+           "BOOLEAN",
+           {
+            "tooltip": "Clip sky-region depth to the 99th percentile of foreground depth before normalisation. Requires a sky key in the da3_geometry input (for Mono/Metric models only).",
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "sky_mask",
+        "inputs": {
+         "required": {
+          "colored": [
+           "BOOLEAN",
+           {
+            "tooltip": "Apply the Turbo colormap to the sky mask.",
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "confidence",
+        "inputs": {
+         "required": {
+          "colored": [
+           "BOOLEAN",
+           {
+            "tooltip": "Apply the Turbo colormap to the confidence map.",
+            "default": false
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "category": "image/geometry estimation",
+  "display_name": "Render Depth Anything 3"
+ },
+ "SaveImageAdvanced": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {
+      "tooltip": "The images to save."
+     }
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "tooltip": "The prefix for the file to save. May include formatting tokens such as %date:yyyy-MM-dd% or %Empty Latent Image.width%.",
+      "default": "ComfyUI",
+      "multiline": false
+     }
+    ],
+    "format": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "tooltip": "The file format in which to save the image.",
+      "options": [
+       {
+        "key": "png",
+        "inputs": {
+         "required": {
+          "bit_depth": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "8-bit",
+            "multiselect": false,
+            "options": [
+             "8-bit",
+             "16-bit"
+            ]
+           }
+          ],
+          "input_color_space": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "sRGB",
+            "multiselect": false,
+            "options": [
+             "sRGB"
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "exr",
+        "inputs": {
+         "required": {
+          "bit_depth": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "32-bit float",
+            "multiselect": false,
+            "options": [
+             "32-bit float"
+            ]
+           }
+          ],
+          "input_color_space": [
+           "COMBO",
+           {
+            "tooltip": "Colorspace of the input tensor. The EXR is always written as scene-linear in the matching gamut.\nsRGB \u2014 input is sRGB-encoded Rec.709; the inverse sRGB EOTF is applied.\nHDR \u2014 input is HLG-encoded Rec.2020 (BT.2100); the inverse HLG OETF is applied to get scene-linear light.\nlinear \u2014 input is already scene-linear (Rec.709 primaries); written through unchanged. Use this for renderer/compositor output.",
+            "advanced": true,
+            "default": "sRGB",
+            "multiselect": false,
+            "options": [
+             "sRGB",
+             "HDR",
+             "linear"
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_name": [
+   "images"
+  ],
+  "category": "image",
+  "display_name": "Save Image (Advanced)"
  }
 }

@@ -30,7 +30,7 @@ from .graph.lint import lint
 from .graph.model import NOTE_TYPES, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.validate import validate
-from .graph.widgets import widget_slot_names
+from .graph.widgets import all_slot_names
 from .imaging import downscale_image
 from .session import Session
 
@@ -431,7 +431,9 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
                         "finds packs); graph unchanged"
                     )
                 else:
-                    slots = widget_slot_names(class_type, object_info)
+                    # accept any widget that exists under some dynamic-combo
+                    # selection; set_widget enforces option ordering at apply time
+                    slots = all_slot_names(class_type, object_info)
                     if bad := sorted(set(widgets) - set(slots)):
                         raise ValueError(
                             f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
@@ -612,25 +614,45 @@ async def run_workflow(
     timeout_seconds: float = 600,
     return_preview: bool = True,
     wait: bool = True,
+    allow_invalid: bool = False,
+    save_dir: str = "",
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
     node errors if it failed, output file refs, and an inline preview thumbnail so
     you can SEE the result (view_output fetches full size / other outputs).
     wait=False returns {status: queued, prompt_id} immediately - poll
-    get_run_status(prompt_id). Prove a workflow works before saving/delivering."""
+    get_run_status(prompt_id). Prove a workflow works before saving/delivering.
+
+    allow_invalid=True submits even when the local validator reports errors
+    (ComfyUI is the final judge; use it if a valid graph is being wrongly
+    blocked). save_dir (or, when empty, the configured COMFYUI_MOUNT_DIR)
+    relocates every finished image out of ComfyUI's output tree into a folder
+    the caller can reach, returning saved_paths - so a render is presentable in
+    one call without a separate save_output step."""
     wf = _wf(workflow_id)
     object_info = await _object_info()
-    errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
-    if errors:
-        return {
-            "status": "invalid",
-            "findings": errors,
-            "hint": "fix with edit_workflow (diagnose_workflow for missing node classes)",
-        }
+    if not allow_invalid:
+        errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
+        if errors:
+            return {
+                "status": "invalid",
+                "findings": errors,
+                "hint": "fix with edit_workflow (diagnose_workflow for missing node "
+                "classes), or run_workflow(allow_invalid=True) to submit anyway",
+            }
     try:
         api = wf.to_api(object_info)
     except ValueError as e:
         return {"status": "invalid", "error": str(e)}
+    # Where to relocate finished renders: an explicit save_dir, else the
+    # configured mount dir (auto-relocate). None -> leave outputs in ComfyUI.
+    dest_root: Path | None = None
+    if save_dir:
+        dest_root, dest_error = _resolve_dest(save_dir)
+        if dest_error:
+            return {"status": "invalid", "error": dest_error}
+    elif wait and _config().mount_dir is not None:
+        dest_root, _ = _resolve_dest("")  # resolves + creates the mount dir
     if not wait:
         tracker = _tracker()
         tracker.ensure_running()
@@ -647,6 +669,14 @@ async def run_workflow(
         result = await _client().run_and_wait(api, timeout=timeout_seconds)
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
+    if dest_root is not None and result["status"] == "success":
+        image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
+        saved, save_errors = await _relocate_outputs(_client(), image_items, dest_root)
+        if saved:
+            result["saved_paths"] = saved
+            result["dest_dir"] = str(dest_root)
+        if save_errors:
+            result["save_errors"] = save_errors
     if return_preview and result["status"] == "success":
         image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
         if image_items:
@@ -688,6 +718,129 @@ async def view_output(
     except ValueError as e:
         return {"error": str(e), "hint": "only image outputs can be viewed inline"}
     return Image(data=data, format=fmt)
+
+
+def _resolve_dest(dest_dir: str) -> tuple[Path | None, str | None]:
+    """Resolve+create the relocation directory. dest_dir empty -> the configured
+    COMFYUI_MOUNT_DIR. Returns (path, None) or (None, error)."""
+    root = Path(dest_dir) if dest_dir else _config().mount_dir
+    if root is None:
+        return None, (
+            "no destination: pass save_dir/dest_dir, or set COMFYUI_MOUNT_DIR so "
+            "outputs relocate to a folder the caller can reach"
+        )
+    try:
+        root = root.expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return None, f"destination directory unusable: {e}"
+    return root, None
+
+
+def _dedupe_path(path: Path) -> Path:
+    """`path`, or `path` with a numeric suffix if it already exists."""
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    for i in range(1, 10000):
+        candidate = parent / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return path
+
+
+def _safe_dest(root: Path, name: str) -> Path | None:
+    """Join a filename under root, refusing anything that escapes it."""
+    target = (root / Path(name).name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
+
+
+async def _relocate_outputs(
+    client: ComfyClient,
+    items: list[dict[str, Any]],
+    dest_root: Path,
+    dest_filename: str | None = None,
+    overwrite: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Fetch each output image's bytes and write them under dest_root. Returns
+    (saved_paths, errors)."""
+    saved: list[str] = []
+    errors: list[str] = []
+    for item in items:
+        filename = item.get("filename", "")
+        try:
+            data = await client.fetch_output(item)
+        except Exception as e:  # surface the fetch failure per file, keep going
+            errors.append(f"fetch {filename!r}: {e}")
+            continue
+        target = _safe_dest(dest_root, dest_filename or filename)
+        if target is None:
+            errors.append(f"unsafe destination name: {dest_filename or filename!r}")
+            continue
+        if not overwrite:
+            target = _dedupe_path(target)
+        try:
+            target.write_bytes(data)
+        except OSError as e:
+            errors.append(f"write {target}: {e}")
+            continue
+        saved.append(str(target))
+    return saved, errors
+
+
+@mcp.tool(annotations=_WRITE_INSTANCE)
+async def save_output(
+    prompt_id: str = "",
+    filename: str = "",
+    subfolder: str = "",
+    type: Literal["output", "temp", "input"] = "output",
+    dest_dir: str = "",
+    dest_filename: str = "",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Copy a finished render out of ComfyUI's output tree into a folder the
+    caller (e.g. a Claude Desktop / Cowork sandbox) can reach. ComfyUI's save
+    nodes only write inside its own output/ dir and reject absolute paths, so a
+    relocation step is needed before an image can be presented or edited.
+
+    Provide prompt_id (relocates every output image of that finished job) OR an
+    explicit filename (+subfolder/type, as reported in a run's outputs).
+    dest_dir defaults to the configured COMFYUI_MOUNT_DIR. dest_filename renames
+    a single saved image. Returns {saved_paths, dest_dir}."""
+    if not prompt_id and not filename:
+        return {"error": "provide prompt_id or filename - nothing to relocate otherwise"}
+    client = _client()
+    if prompt_id:
+        history = await client.get_history(prompt_id)
+        if not history:
+            return {"error": f"no finished job {prompt_id!r} in history (still running?)"}
+        items = [o for o in client._collect_outputs(history) if o.get("kind") == "images"]
+        if not items:
+            return {"error": f"job {prompt_id!r} produced no output images to relocate"}
+    else:
+        problem = _check_output_ref(filename, subfolder)
+        if problem:
+            return {"error": problem}
+        items = [{"filename": filename, "subfolder": subfolder, "type": type}]
+    if dest_filename and len(items) > 1:
+        return {
+            "error": "dest_filename can't rename a multi-image batch; relocate one "
+            "at a time (pass an explicit filename) to rename"
+        }
+    dest_root, dest_error = _resolve_dest(dest_dir)
+    if dest_error:
+        return {"error": dest_error}
+    saved, errors = await _relocate_outputs(
+        client, items, dest_root, dest_filename or None, overwrite
+    )
+    result: dict[str, Any] = {"saved_paths": saved, "dest_dir": str(dest_root)}
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def _history_error(history: dict[str, Any]) -> dict[str, Any] | None:

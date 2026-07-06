@@ -188,7 +188,7 @@ def _safe_slots(node: Node, object_info: dict[str, Any]) -> list[str]:
     from . import widgets as w
 
     try:
-        return w.widget_slot_names(node.type, object_info)
+        return w.widget_slot_names(node.type, object_info, node.widgets_values)
     except (ValueError, KeyError):
         return []
 

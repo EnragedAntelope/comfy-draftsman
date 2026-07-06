@@ -405,10 +405,17 @@ class Workflow:
                 raise ValueError(f"{node.type} has a single widget: 'text'")
             node.widgets_values = [value]
             return
-        slots = w.widget_slot_names(node.type, object_info)
+        slots = w.widget_slot_names(node.type, object_info, node.widgets_values)
         if input_name not in slots:
             real_widgets = [s for s in slots if not s.endswith(w.SYNTHETIC_SUFFIXES)]
             control_slots = [s for s in slots if s.endswith(w.CONTROL_SUFFIX)]
+            if input_name in w.all_slot_names(node.type, object_info):
+                # a sub-widget of a dynamic combo whose option isn't selected
+                raise ValueError(
+                    f"{node.type}: '{input_name}' is a sub-widget of a dynamic "
+                    "combo whose option isn't selected. Set its parent combo to "
+                    f"the option that owns it first. Active widgets: {real_widgets}"
+                )
             raise ValueError(
                 f"{node.type} has no widget '{input_name}'.\n"
                 f"Widgets: {real_widgets}.\n"
@@ -418,14 +425,14 @@ class Workflow:
         if not isinstance(node.widgets_values, list):
             node.widgets_values[input_name] = value
             return
-        if len(node.widgets_values) < len(slots):
-            # Dynamic nodes often serialize fewer values than the schema
-            # declares. Pad with schema defaults - never None: the ComfyUI
-            # frontend crashes on null string widgets when queueing a prompt
-            # ("Cannot read properties of null (reading 'replace')").
-            defaults = w.widget_defaults(node.type, object_info)
-            node.widgets_values.extend(defaults[len(node.widgets_values) :])
-        node.widgets_values[slots.index(input_name)] = value
+        # Round-trip through the named form so that setting a dynamic combo's
+        # main key rebuilds its sub-widget slots (seeded with the new option's
+        # defaults) exactly as the ComfyUI frontend does, and a short array gets
+        # padded with schema defaults - never None: the frontend crashes on null
+        # string widgets when queueing ("Cannot read properties of null").
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        named[input_name] = value
+        node.widgets_values = w.named_to_widgets(node.type, named, object_info)
 
     def get_widget(self, node_id: int, input_name: str, object_info: dict[str, Any]) -> Any:
         node = self.nodes[node_id]
@@ -516,7 +523,7 @@ class Workflow:
                     f"node {node.id}: class '{node.type}' is not available on this "
                     "ComfyUI instance (missing custom node?)"
                 )
-            named_widgets = w.widgets_to_named(node.type, node.widgets_values, object_info)
+            named_widgets = w.named_for_api(node.type, node.widgets_values, object_info)
             inputs: dict[str, Any] = {
                 k: v
                 for k, v in named_widgets.items()

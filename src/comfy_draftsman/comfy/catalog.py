@@ -59,6 +59,37 @@ def search_nodes(
     return [h for _, h in hits[:limit]]
 
 
+def _sub_widget_descriptors(parent: str, option: dict[str, Any]) -> list[dict[str, Any]]:
+    """Describe the conditional sub-widgets a dynamic-combo option reveals, with
+    their dotted set_widget names (e.g. 'output.normalization')."""
+    descriptors: list[dict[str, Any]] = []
+    inputs = (option or {}).get("inputs", {}) or {}
+    for section in ("required", "optional"):
+        for name, spec in (inputs.get(section) or {}).items():
+            if not w.is_widget_input(spec):
+                continue
+            opts = spec[1] if isinstance(spec, list | tuple) and len(spec) > 1 and isinstance(spec[1], dict) else {}
+            kind = spec[0]
+            desc: dict[str, Any] = {"name": f"{parent}.{name}"}
+            if w.is_dynamic_combo(spec):
+                desc["type"] = "COMBO"
+                desc["dynamic_combo"] = True
+                desc["choices"] = [o.get("key") for o in w.dynamic_options(spec)]
+                desc["default"] = w.dynamic_default_key(spec)
+            elif isinstance(kind, list):
+                desc["type"] = "COMBO"
+                desc["choices"] = kind[:MAX_COMBO_CHOICES]
+            elif kind == "COMBO":
+                desc["type"] = "COMBO"
+                desc["choices"] = opts.get("options", [])[:MAX_COMBO_CHOICES]
+            else:
+                desc["type"] = str(kind)
+            if "default" in opts:
+                desc["default"] = opts["default"]
+            descriptors.append(desc)
+    return descriptors
+
+
 def node_summary(object_info: dict[str, Any], class_type: str) -> dict[str, Any]:
     """One node's full slot schema, sized for an agent to wire it correctly."""
     schema = object_info[class_type]
@@ -83,6 +114,18 @@ def node_summary(object_info: dict[str, Any], class_type: str) -> dict[str, Any]
                 entry["choices"] = options[:MAX_COMBO_CHOICES]
                 if len(options) > MAX_COMBO_CHOICES:
                     entry["choices_truncated"] = len(options)
+            elif w.is_dynamic_combo(spec):
+                # a V3 dynamic combo: the main value is one of the option keys,
+                # and the selected key reveals dotted sub-widgets. Surface both
+                # so the agent can set_widget them (main first, then subs).
+                entry["type"] = "COMBO"
+                entry["dynamic_combo"] = True
+                entry["choices"] = [o.get("key") for o in w.dynamic_options(spec)]
+                entry["default"] = w.dynamic_default_key(spec)
+                entry["options"] = {
+                    o.get("key"): _sub_widget_descriptors(name, o)
+                    for o in w.dynamic_options(spec)
+                }
             else:
                 entry["type"] = str(kind)
             for key in ("default", "min", "max", "tooltip", "control_after_generate"):

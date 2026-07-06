@@ -25,6 +25,14 @@ def _default_learned_dir() -> Path:
     )
 
 
+def _default_mount_dir() -> Path | None:
+    # A folder the caller (e.g. a Claude Desktop / Cowork sandbox) can reach,
+    # where save_output relocates finished renders out of ComfyUI's output tree.
+    # Unset -> no default; save_output then needs an explicit dest_dir.
+    value = os.environ.get("COMFYUI_MOUNT_DIR")
+    return Path(value) if value else None
+
+
 @dataclass(frozen=True)
 class Config:
     """Runtime configuration, resolved once at server start."""
@@ -33,6 +41,7 @@ class Config:
     registry_url: str = field(default_factory=lambda: os.environ.get("COMFY_REGISTRY_URL", REGISTRY_URL).rstrip("/"))
     session_dir: Path = field(default_factory=_default_session_dir)
     learned_dir: Path = field(default_factory=_default_learned_dir)
+    mount_dir: Path | None = field(default_factory=_default_mount_dir)
     request_timeout: float = field(default_factory=lambda: float(os.environ.get("DRAFTSMAN_TIMEOUT", "30")))
 
 

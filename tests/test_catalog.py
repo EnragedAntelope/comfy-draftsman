@@ -68,3 +68,30 @@ def test_node_summary_truncates_giant_combos(object_info):
 def test_node_summary_unknown_class(object_info):
     with pytest.raises(KeyError):
         node_summary(object_info, "NopeNode")
+
+
+def test_node_summary_surfaces_dynamic_combo(object_info):
+    summary = node_summary(object_info, "DA3Render")
+    out = next(i for i in summary["inputs"] if i["name"] == "output")
+    # the V3 combo is a widget with discoverable option keys + a default
+    assert out["widget"] is True
+    assert out["dynamic_combo"] is True
+    assert out["type"] == "COMBO"
+    assert set(out["choices"]) >= {"depth", "depth_colored", "sky_mask", "confidence"}
+    assert out["default"] == "depth"
+    # each option lists its dotted sub-widgets so the agent can set them
+    depth_subs = {d["name"] for d in out["options"]["depth"]}
+    assert depth_subs == {"output.normalization", "output.apply_sky_clip"}
+    normalization = next(
+        d for d in out["options"]["depth"] if d["name"] == "output.normalization"
+    )
+    assert normalization["default"] == "v2_style"
+    assert "min_max" in normalization["choices"]
+
+
+def test_node_summary_dynamic_combo_default_from_first_option(object_info):
+    summary = node_summary(object_info, "DA3Inference")
+    mode = next(i for i in summary["inputs"] if i["name"] == "mode")
+    # no explicit top-level default -> first option key
+    assert mode["default"] == "mono"
+    assert mode["choices"] == ["mono", "multiview"]
