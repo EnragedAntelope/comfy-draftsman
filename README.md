@@ -78,11 +78,11 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
-**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info`, `list_models`, `list_templates`
+**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info`, `list_models` (per-folder, with `search` substring filtering), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
 
-**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (UI or API format), `inspect_workflow`, `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
+**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow`, `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
 
-**Correctness** — `validate_workflow` (live checks + closest-match suggestions), `diagnose_workflow` (validation + registry resolution of missing nodes), `port_workflow`
+**Correctness** — `validate_workflow` (live checks + closest-match suggestions), `diagnose_workflow` (validation + registry resolution of missing nodes), `port_workflow` (cross-family model ports like SDXL→Flux — missing-node repair is `diagnose_workflow`/`resolve_missing_nodes`, not this)
 
 **Execution & delivery** — `run_workflow` (validates, renders, returns a preview image), `save_workflow` (validates first — refuses to save a broken workflow unless `allow_invalid=True` — then lands in ComfyUI's workflow browser; never overwrites an existing workflow file unless `overwrite=True` — a taken name saves as `<name> (draftsman)` so your original is preserved), `export_workflow_json`
 

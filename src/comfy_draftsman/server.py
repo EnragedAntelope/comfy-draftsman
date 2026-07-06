@@ -49,6 +49,9 @@ mcp = FastMCP(
         "(search_nodes/get_node_info/list_models); templates (list_templates) are the "
         "best starting points for current models. get_node_info accepts a list of "
         "class_types - batch your lookups in ONE call instead of one per node. "
+        "To work on a workflow the user already saved in ComfyUI, use "
+        "list_workflows then import_workflow(name=...) - never ask them to paste "
+        "JSON that's already on the instance. "
         "get_model_guidance returns tuned settings per model family; when you research "
         "better settings online, persist them with record_learning (include a 'detect' "
         "block for brand-new families so they're recognized next session). "
@@ -222,13 +225,22 @@ async def get_node_info(
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
-async def list_models(folder: str = "checkpoints") -> dict[str, Any]:
-    """Model files installed on the instance. folder: checkpoints, loras, vae,
-    diffusion_models, text_encoders, upscale_models, controlnet, embeddings, ..."""
+async def list_models(folder: str = "checkpoints", search: str = "") -> dict[str, Any]:
+    """Model files installed on the instance. `folder` picks the model type:
+    checkpoints, loras, vae, diffusion_models, text_encoders, upscale_models,
+    controlnet, embeddings, ... (unknown folder -> the full available list).
+    `search` filters filenames (case-insensitive substring)."""
     folders = await _client().list_model_folders()
     if folder not in folders:
         return {"error": f"unknown folder '{folder}'", "available": folders}
-    return {"folder": folder, "files": await _client().list_models(folder)}
+    files = await _client().list_models(folder)
+    if search:
+        needle = search.lower()
+        files = [f for f in files if needle in f.lower()]
+    result = {"folder": folder, "count": len(files), "files": files}
+    if search:
+        result["search"] = search
+    return result
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
@@ -270,16 +282,50 @@ async def create_workflow(title: str, template: str = "") -> dict[str, Any]:
     return _summary(workflow_id, wf)
 
 
+@mcp.tool(annotations=_READ_INSTANCE)
+async def list_workflows(search: str = "") -> dict[str, Any]:
+    """Workflows already saved in ComfyUI's workflow browser (userdata). Use a
+    returned name with import_workflow(name=...) to load one WITHOUT pasting its
+    JSON. `search` filters names (case-insensitive substring)."""
+    names = [n[:-5] if n.endswith(".json") else n for n in await _client().list_userdata_workflows()]
+    if search:
+        needle = search.lower()
+        names = [n for n in names if needle in n.lower()]
+    result = {"count": len(names), "workflows": sorted(names)}
+    if search:
+        result["search"] = search
+    return result
+
+
 @mcp.tool(annotations=_EDIT_LOCAL)
-async def import_workflow(workflow_json: str, title: str = "imported") -> dict[str, Any]:
-    """Import an existing workflow (UI format with nodes/links, or API format
-    {id: {class_type, inputs}}). Use for beautifying/diagnosing/porting outside work."""
-    data = json.loads(workflow_json)
+async def import_workflow(
+    workflow_json: str = "", name: str = "", title: str = ""
+) -> dict[str, Any]:
+    """Import an existing workflow into the session. EITHER paste JSON as
+    `workflow_json` (UI format with nodes/links, or API format
+    {id: {class_type, inputs}}), OR pass `name` to load one straight from
+    ComfyUI's workflow browser (see list_workflows) - preferred for large files,
+    no pasting needed. Use for beautifying/diagnosing/porting outside work."""
+    if bool(workflow_json) == bool(name):
+        return {"error": "pass exactly one of workflow_json (pasted JSON) or name (see list_workflows)"}
+    if name:
+        try:
+            data = await _client().get_userdata_workflow(name)
+        except FileNotFoundError:
+            return {
+                "error": f"no workflow named {name!r} in ComfyUI's workflow browser",
+                "hint": "list_workflows shows what's available",
+            }
+        except ValueError as e:
+            return {"error": str(e)}
+        title = title or name.replace("\\", "/").rsplit("/", 1)[-1]
+    else:
+        data = json.loads(workflow_json)
     if "nodes" in data:
         wf = Workflow.from_ui(data)
     else:
         wf = Workflow.from_api(data, await _object_info())
-    workflow_id = _session().create(wf, title=title)
+    workflow_id = _session().create(wf, title=title or "imported")
     return _summary(workflow_id, wf)
 
 
@@ -434,10 +480,18 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     """THE finishing step: auto-layout into pipeline stage bands, colored groups,
     human titles, green highlights on user-editable knobs, and markdown guidance
     notes (model-family aware, two registers: 'touch this' vs 'leave alone').
-    Run after wiring is done and before save_workflow. Idempotent."""
+    Run after wiring is done and before save_workflow. Idempotent.
+
+    MUTATES the session workflow in place - the `applied` block in the result
+    summarizes the layout/group/note changes; inspect_workflow or
+    export_workflow_json shows the full reorganized graph."""
     wf = _wf(workflow_id)
     object_info = await _object_info()
     report = annotate(wf, object_info, learned_dir=_config().learned_dir)
+    report["note"] = (
+        "workflow layout updated in place; save_workflow persists it, "
+        "export_workflow_json shows the reorganized graph"
+    )
     report["lint"] = lint(wf, object_info)
     return report
 
@@ -511,11 +565,13 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=_EDIT_LOCAL)
 async def port_workflow(workflow_id: str, target_family: str) -> dict[str, Any]:
-    """Retarget a workflow to another model family (e.g. 'sdxl' -> 'flux'):
-    swaps loader topology when needed, retunes CFG/steps/sampler/scheduler and
-    technique nodes (FaceDetailer etc.) from family knowledge, swaps latent node
-    class, picks installed model files. Returns changes + flags for anything that
-    needs your judgment. Families: get_model_guidance / get_instance_info."""
+    """CROSS-FAMILY MODEL PORT ONLY (e.g. 'sdxl' -> 'flux'): swaps loader
+    topology when needed, retunes CFG/steps/sampler/scheduler and technique
+    nodes (FaceDetailer etc.) from family knowledge, swaps latent node class,
+    picks installed model files. NOT for fixing missing/uninstalled nodes -
+    that's diagnose_workflow + resolve_missing_nodes. Returns changes + flags
+    for anything that needs your judgment. Families: get_model_guidance /
+    get_instance_info."""
     wf = _wf(workflow_id)
     report = port_engine(wf, target_family, await _object_info(refresh=True), _config().learned_dir)
     report["validate"] = validate(wf, await _object_info())
@@ -649,8 +705,10 @@ async def export_workflow_json(
 @mcp.tool(annotations=_READ_INSTANCE)
 async def resolve_missing_nodes(class_types: list[str]) -> dict[str, Any]:
     """Find which installable node packs provide these node class names (official
-    Comfy Registry). Returns pack ids, repos, and install hints. Installing custom
-    nodes runs third-party code - surface the choice to the user."""
+    Comfy Registry). THIS is the tool for missing/uninstalled nodes (port_workflow
+    is for model-family moves, not missing nodes). Returns pack ids, repos, and
+    install hints. Installing custom nodes runs third-party code - surface the
+    choice to the user."""
     return await _registry().resolve_node_classes(class_types)
 
 

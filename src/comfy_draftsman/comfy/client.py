@@ -93,6 +93,38 @@ class ComfyClient:
         response = await self._http.post("/interrupt")
         response.raise_for_status()
 
+    @staticmethod
+    def _workflow_userdata_path(name: str) -> str:
+        """Relative userdata path for a workflow browser file, refusing traversal."""
+        clean = name.replace("\\", "/").strip("/")
+        if not clean or ".." in clean.split("/"):
+            raise ValueError(f"invalid workflow name: {name!r}")
+        filename = clean if clean.endswith(".json") else f"{clean}.json"
+        return f"workflows/{filename}"
+
+    async def list_userdata_workflows(self) -> list[str]:
+        """Workflow files in ComfyUI's workflow browser (userdata), incl. subdirs."""
+        response = await self._http.get(
+            "/api/userdata", params={"dir": "workflows", "recurse": "true", "split": "false"}
+        )
+        if response.status_code == 404:  # no workflows dir yet on a fresh instance
+            return []
+        response.raise_for_status()
+        return [p.replace("\\", "/") for p in response.json()]
+
+    async def get_userdata_workflow(self, name: str) -> dict[str, Any]:
+        """Load one workflow browser file by name (with or without .json).
+
+        Raises FileNotFoundError if it doesn't exist, ValueError on a name that
+        would escape the workflows directory.
+        """
+        path = self._workflow_userdata_path(name)
+        response = await self._http.get(f"/api/userdata/{quote(path, safe='')}")
+        if response.status_code == 404:
+            raise FileNotFoundError(name)
+        response.raise_for_status()
+        return response.json()
+
     async def save_userdata_workflow(
         self, name: str, document: dict[str, Any], overwrite: bool = False
     ) -> str:

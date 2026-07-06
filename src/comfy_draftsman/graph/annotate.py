@@ -148,13 +148,16 @@ def _prompt_role(wf: Workflow, node: Node) -> str | None:
     return "positive" if any(role == "positive" for role, _ in roles) else None
 
 
-def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> None:
+def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> int:
+    """Role-title prompt/loader nodes. Returns how many titles were written."""
+    titled = 0
     for node in wf.nodes.values():
         schema = object_info.get(node.type)
         if schema is None:
             continue
         if node.type == ZEROOUT_TYPE and node.title is None:
             node.title = "🚫 Negative (zeroed)"
+            titled += 1
             continue
         has_text_widget = any(s == "text" for s in _safe_slots(node, object_info))
         retitlable = node.title is None or node.title in ROLE_TITLES
@@ -163,8 +166,10 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> None:
             role = _prompt_role(wf, node)
             if role == "positive":
                 node.title = "✅ Positive Prompt"
+                titled += 1
             elif role == "negative":
                 node.title = "🚫 Negative Prompt"
+                titled += 1
         if "loaders" in (schema.get("category") or "") and node.title is None:
             filenames = [
                 v
@@ -175,6 +180,8 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> None:
                 stem = Path(filenames[0].replace("\\", "/")).stem
                 display = schema.get("display_name") or node.type
                 node.title = f"{display}: {stem[:32]}"
+                titled += 1
+    return titled
 
 
 def _safe_slots(node: Node, object_info: dict[str, Any]) -> list[str]:
@@ -202,7 +209,9 @@ def _wired_input(node: Node, name: str) -> bool:
     return slot is not None and slot.link is not None
 
 
-def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]) -> None:
+def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]) -> int:
+    """Highlight user-editable knobs green. Returns how many nodes were painted."""
+    painted = 0
     for node in wf.nodes.values():
         stage = stage_of_key.get(node.id)
         slots = set(_safe_slots(node, object_info))
@@ -219,6 +228,8 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
         )
         if is_knob:
             node.color, node.bgcolor = GREEN
+            painted += 1
+    return painted
 
 
 def _wrap(text: str, width: int = 58) -> str:
@@ -341,8 +352,9 @@ def annotate(
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}
     band_boxes = apply_staged_layout(wf, object_info, stage_of)
 
-    _title_nodes(wf, object_info)
-    _paint_knobs(wf, object_info, stage_of_key)
+    titled = _title_nodes(wf, object_info)
+    painted = _paint_knobs(wf, object_info, stage_of_key)
+    notes_added = 0
 
     members_by_stage: dict[int, list[Node]] = {}
     for nid, stage in stage_of.items():
@@ -383,6 +395,7 @@ def annotate(
             note.pos = [min_x, min_y - note_h - Y_GAP]
             note.color, note.bgcolor = NOTE_COLOR
             note.properties["draftsman"] = NOTE_MARKER
+            notes_added += 1
             top = min_y - note_h - Y_GAP
             max_x = max(max_x, min_x + note_w)
         pad = 30.0
@@ -403,4 +416,11 @@ def annotate(
         "family": family,
         "variant": (guidance or {}).get("variant"),
         "stages": {STAGES[i][0]: len(m) for i, m in sorted(members_by_stage.items())},
+        "applied": {
+            "layout": "staged pipeline bands (nodes repositioned)",
+            "groups": [g.title for g in wf.groups],
+            "guidance_notes_added": notes_added,
+            "nodes_retitled": titled,
+            "knobs_highlighted_green": painted,
+        },
     }
