@@ -6,7 +6,10 @@ counting only *widget* inputs (primitives / combos), and inserting synthetic
 slots the frontend adds:
 
 - ``control_after_generate`` (e.g. 'randomize'/'fixed') right after any input
-  whose schema options set ``control_after_generate: true``
+  whose schema options set ``control_after_generate: true`` — and ALSO after any
+  INT input literally named ``seed``/``noise_seed`` even without the flag: the
+  frontend adds the control widget by name for legacy (V1) nodes, so their
+  serialized widgets_values carry the extra slot despite the schema
 - an upload-button slot after inputs with ``image_upload: true``
 
 Usage: to set a KSampler's seed to randomize:
@@ -61,6 +64,18 @@ def _opts(spec: Any) -> dict[str, Any]:
 def is_dynamic_combo(spec: Any) -> bool:
     """True if this input spec is a V3 dynamic combo (COMFY_DYNAMICCOMBO_V3)."""
     return isinstance(spec, list | tuple) and bool(spec) and spec[0] == DYNAMIC_COMBO_TYPE
+
+
+def has_control_slot(name: str, spec: Any) -> bool:
+    """True if the frontend appends a control_after_generate widget slot after
+    this input: the schema opts ask for it, or (legacy name heuristic, matching
+    the frontend) it's an INT literally named seed/noise_seed. An explicit
+    ``control_after_generate: false`` opts out."""
+    opts = _opts(spec)
+    if "control_after_generate" in opts:
+        return bool(opts["control_after_generate"])
+    leaf = name.rsplit(".", 1)[-1]
+    return spec[0] == "INT" and leaf in ("seed", "noise_seed")
 
 
 def is_widget_input(spec: Any) -> bool:
@@ -142,7 +157,7 @@ def _entries(schema: dict[str, Any], key_for: KeyResolver) -> Iterator[tuple[str
         yield name, spec
         pos += 1
         opts = _opts(spec)
-        if opts.get("control_after_generate"):
+        if has_control_slot(name, spec):
             yield name + CONTROL_SUFFIX, None
             pos += 1
         if opts.get("image_upload"):
@@ -263,7 +278,7 @@ def all_slot_names(class_type: str, object_info: dict[str, Any]) -> list[str]:
             return
         add(name)
         opts = _opts(spec)
-        if opts.get("control_after_generate"):
+        if has_control_slot(name, spec):
             add(name + CONTROL_SUFFIX)
         if opts.get("image_upload"):
             add(name + UPLOAD_SUFFIX)

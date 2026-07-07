@@ -94,9 +94,9 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
-**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info`, `list_models` (per-folder, with `search` substring filtering), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
+**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
 
-**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow`, `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
+**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow` (for subgraph-packaged workflows — how newer bundled templates ship — it lists each subgraph's inner nodes and wiring so templates work as reference material, not just opaque wrappers), `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
 
 **Correctness** — `validate_workflow` (live checks + closest-match suggestions), `diagnose_workflow` (validation + registry resolution of missing nodes), `port_workflow` (cross-family model ports like SDXL→Flux — missing-node repair is `diagnose_workflow`/`resolve_missing_nodes`, not this)
 
@@ -109,47 +109,29 @@ the mutating tools like `run_workflow` / `save_workflow`).
 ## Run it and see the result
 
 Whether the agent just built a workflow or imported one you already had, running it
-puts the picture in the conversation. A blocking run returns output refs plus an
-inline thumbnail (real payload, abridged):
+puts the picture in the conversation. A real session looks like this:
 
-```jsonc
-run_workflow(workflow_id)
-// -> [{
-//   "status": "success",
-//   "prompt_id": "084f3e11-1563-4cc3-9abb-aa1bbf002599",
-//   "outputs": [{ "filename": "demo_00001_.png", "subfolder": "", "type": "output",
-//                 "node_id": "7", "kind": "images" }],
-//   "preview": "inline image is a <=768px thumbnail of demo_00001_.png - view_output(filename=..., max_dim=None) for full size or other outputs"
-// }, <inline image>]
-```
+> **You:** Run my "ZITx Zimage Turbo" workflow and show me what it makes.
+>
+> **Agent:** One of its model files was moved since it was saved — I've repointed
+> the checkpoint loader to the installed file. Rendering now… done in 9 seconds.
+> Here's the result:
+>
+> ![A render delivered straight into the conversation](docs/images/sample-render.jpg)
+>
+> The full-resolution file is `ZIT_00042_.png` in ComfyUI's output folder — want
+> me to copy it somewhere, tweak the prompt, or queue a batch of variations?
 
-Long render? Queue it in the background and watch live progress:
-
-```jsonc
-run_workflow(workflow_id, wait=false)
-// -> { "status": "queued", "prompt_id": "18421b53-...", "hint": "poll get_run_status(prompt_id) for progress and outputs" }
-
-get_run_status("18421b53-...")
-// -> { "status": "running", "node": "5", "step": 2, "total": 6, "percent": 33.3, "ws_connected": true }
-// ...and once it finishes:
-// -> { "status": "success", "outputs": [{ "filename": "demo_00002_.png", ... }],
-//      "hint": "view_output(filename=...) to see an image output" }
-```
-
-Then pull any output into the chat — downscaled by default, full resolution on demand:
-
-```jsonc
-view_output("demo_00002_.png")               // <=1024px, cheap to look at
-view_output("demo_00002_.png", max_dim=null) // full resolution
-```
-
-Inline previews are aggressively size-optimized (thumbnail + JPEG for opaque images)
-so iterating on a workflow doesn't flood the conversation; the files on disk are
-untouched originals.
+The agent *sees* the same image you do, so "make it warmer and less cluttered"
+works as a follow-up. Long renders queue in the background with live step
+progress; inline previews are size-optimized thumbnails (the files on disk are
+untouched originals), and `view_output` fetches full resolution on demand.
+With `COMFYUI_MOUNT_DIR` set, finished renders are also copied to a folder your
+agent can reach, so sandboxed clients can hand you the actual file.
 
 ## How it stays correct
 
-- The graph model round-trips ComfyUI's UI workflow format (schema 0.4) faithfully and serializes to API format with the fiddly bits handled: positional widget arrays (including `control_after_generate` slots), converted-widget connections, PrimitiveNode baking, Reroute tracing, mute/bypass semantics.
+- The graph model round-trips ComfyUI's UI workflow format (schema 0.4, including subgraph `definitions`) faithfully and serializes to API format with the fiddly bits handled: positional widget arrays (including `control_after_generate` slots — even the ones the frontend adds by *name* to legacy seed widgets with no schema flag), V3 dynamic-combo dotted keys, converted-widget connections, PrimitiveNode baking, Reroute tracing, mute/bypass semantics.
 - Everything is validated against the **live** `/object_info` — combo checks double as "is this model actually installed" checks.
 - The test suite includes protocol-level end-to-end tests that build, validate, organize, **render**, and save real workflows on a real ComfyUI instance.
 

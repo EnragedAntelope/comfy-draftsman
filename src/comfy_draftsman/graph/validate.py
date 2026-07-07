@@ -45,6 +45,23 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         schema = object_info.get(node.type)
         if schema is None:
+            subgraph = wf.subgraph_defs().get(node.type)
+            if subgraph is not None:
+                findings.append(
+                    _finding(
+                        "warning",
+                        "subgraph-instance",
+                        f"node #{node.id} is an instance of subgraph "
+                        f"'{subgraph.get('name', node.type)}' "
+                        f"({len(subgraph.get('nodes', []) or [])} inner nodes). Its "
+                        "internals aren't validated and run_workflow can't flatten "
+                        "it - inspect_workflow shows the inner nodes and wiring to "
+                        "rebuild from, or run it via the ComfyUI frontend",
+                        node.id,
+                        subgraph=subgraph.get("name"),
+                    )
+                )
+                continue
             findings.append(
                 _finding(
                     "error",

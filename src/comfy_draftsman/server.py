@@ -131,7 +131,53 @@ def _widget_preview(n) -> Any:
     return {k: _clip(v) for k, v in dict(n.widgets_values).items()}
 
 
+def _subgraph_summary(sg: dict[str, Any]) -> dict[str, Any]:
+    """Readable view of one subgraph definition: inner nodes with widget
+    previews, and inner wiring - enough to use the subgraph as reference or
+    rebuild it flat."""
+    nodes = {n["id"]: n for n in sg.get("nodes", []) or [] if "id" in n}
+
+    def link_str(ln: Any) -> str | None:
+        if isinstance(ln, dict):
+            oid, oslot, tid, tslot = (
+                ln.get("origin_id"), ln.get("origin_slot"),
+                ln.get("target_id"), ln.get("target_slot"),
+            )
+        else:
+            oid, oslot, tid, tslot = ln[1], ln[2], ln[3], ln[4]
+        target = nodes.get(tid)
+        tname = tslot
+        if target:
+            inputs = target.get("inputs", []) or []
+            if isinstance(tslot, int) and tslot < len(inputs):
+                tname = inputs[tslot].get("name", tslot)
+        # -10/-20 are the subgraph's own input/output boundary pseudo-nodes
+        left = f"#{oid}[{oslot}]" if oid in nodes else f"<subgraph input {oslot}>"
+        right = f"#{tid}.{tname}" if tid in nodes else f"<subgraph output {tslot}>"
+        return f"{left} -> {right}"
+
+    return {
+        "id": sg.get("id"),
+        "name": sg.get("name"),
+        "inputs": [i.get("name") for i in sg.get("inputs", []) or []],
+        "outputs": [o.get("name") for o in sg.get("outputs", []) or []],
+        "nodes": [
+            {
+                "id": nid,
+                "class_type": n.get("type"),
+                "title": n.get("title"),
+                "widgets": [_clip(v) for v in n.get("widgets_values") or []]
+                if isinstance(n.get("widgets_values"), list)
+                else n.get("widgets_values"),
+            }
+            for nid, n in sorted(nodes.items(), key=lambda kv: str(kv[0]))
+        ],
+        "links": [s for ln in sg.get("links", []) or [] if (s := link_str(ln))],
+    }
+
+
 def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
+    subgraphs = wf.subgraph_defs()
     return {
         "workflow_id": workflow_id,
         "title": _session().title(workflow_id),
@@ -144,9 +190,27 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
                 # notes/reroutes/primitives are UI-only: kept in the graph and
                 # saved, but never sent to /prompt
                 **({"virtual": True} if n.type in VIRTUAL_TYPES else {}),
+                **(
+                    {"subgraph": subgraphs[n.type].get("name", n.type)}
+                    if n.type in subgraphs
+                    else {}
+                ),
             }
             for n in sorted(wf.nodes.values(), key=lambda x: x.id)
         ],
+        # keep summaries light: every create/edit/import re-sends this. Full
+        # subgraph internals are folded in by inspect_workflow only.
+        **(
+            {
+                "subgraphs": {
+                    sid: f"{sg.get('name', sid)} ({len(sg.get('nodes', []) or [])} inner "
+                    "nodes; inspect_workflow shows internals)"
+                    for sid, sg in subgraphs.items()
+                }
+            }
+            if subgraphs
+            else {}
+        ),
         "links": [
             f"#{ln.origin_id}[{ln.origin_slot}] -> #{ln.target_id}.{wf.nodes[ln.target_id].inputs[ln.target_slot].name}"
             for ln in sorted(wf.links.values(), key=lambda x: x.id)
@@ -205,14 +269,22 @@ async def search_nodes(
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def get_node_info(
-    class_type: str = "", class_types: list[str] | None = None
+    class_type: str = "",
+    class_types: list[str] | None = None,
+    choices_filter: str = "",
+    max_choices: int = 0,
 ) -> dict[str, Any]:
     """Full input/output schema for node classes: slot names, types, widget
-    defaults/ranges, combo choices (truncated), tooltips.
+    defaults/ranges, combo choices, tooltips.
 
     BATCH your lookups: pass class_types=["A", "B", "C"] to fetch many in ONE
     call (returns {class_type: schema}) instead of one call per node. A single
     class_type=... still returns that one node's schema directly.
+
+    Long combo lists (fonts, model files...) are capped at 24 choices by
+    default; to browse the rest, pass choices_filter='substring'
+    (case-insensitive, applies to every combo of the node) and/or
+    max_choices=N to raise the cap.
     """
     names = list(class_types or [])
     if class_type:
@@ -230,7 +302,9 @@ async def get_node_info(
             }
             continue
         try:
-            results[name] = node_summary(object_info, name)
+            results[name] = node_summary(
+                object_info, name, choices_filter=choices_filter, max_choices=max_choices
+            )
         except KeyError:
             results[name] = {
                 "error": f"'{name}' is not installed on this instance",
@@ -348,8 +422,19 @@ async def import_workflow(
 
 @mcp.tool(annotations=_READ_LOCAL)
 async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
-    """Compact view of a session workflow: nodes (id/class/title/widgets), links, groups."""
-    return _summary(workflow_id, _wf(workflow_id))
+    """Compact view of a session workflow: nodes (id/class/title/widgets), links,
+    groups - plus full inner node/wiring detail for any subgraph definitions
+    (newer bundled templates package their graph as a subgraph)."""
+    wf = _wf(workflow_id)
+    summary = _summary(workflow_id, wf)
+    subgraphs = wf.subgraph_defs()
+    if subgraphs:
+        summary["subgraphs"] = [_subgraph_summary(sg) for sg in subgraphs.values()]
+        summary["subgraph_note"] = (
+            "subgraph internals are reference-only: edit_workflow ops and "
+            "run_workflow don't reach inside them; rebuild flat to modify"
+        )
+    return summary
 
 
 # edit_workflow op schemas: op -> (required keys, optional keys). Validated
@@ -647,12 +732,13 @@ async def run_workflow(
     # Where to relocate finished renders: an explicit save_dir, else the
     # configured mount dir (auto-relocate). None -> leave outputs in ComfyUI.
     dest_root: Path | None = None
+    mount_error: str | None = None
     if save_dir:
         dest_root, dest_error = _resolve_dest(save_dir)
         if dest_error:
             return {"status": "invalid", "error": dest_error}
     elif wait and _config().mount_dir is not None:
-        dest_root, _ = _resolve_dest("")  # resolves + creates the mount dir
+        dest_root, mount_error = _resolve_dest("")  # resolves + creates the mount dir
     if not wait:
         tracker = _tracker()
         tracker.ensure_running()
@@ -677,6 +763,10 @@ async def run_workflow(
             result["dest_dir"] = str(dest_root)
         if save_errors:
             result["save_errors"] = save_errors
+    elif mount_error and result["status"] == "success":
+        # COMFYUI_MOUNT_DIR is configured but unusable - say so instead of
+        # silently skipping the relocation the user asked for
+        result["save_errors"] = [mount_error]
     if return_preview and result["status"] == "success":
         image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
         if image_items:

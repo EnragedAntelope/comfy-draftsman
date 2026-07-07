@@ -90,8 +90,42 @@ def _sub_widget_descriptors(parent: str, option: dict[str, Any]) -> list[dict[st
     return descriptors
 
 
-def node_summary(object_info: dict[str, Any], class_type: str) -> dict[str, Any]:
-    """One node's full slot schema, sized for an agent to wire it correctly."""
+def _apply_choices(
+    entry: dict[str, Any],
+    options: list[Any],
+    choices_filter: str,
+    max_choices: int,
+) -> None:
+    """Attach a combo's choices to an input entry, filtered and capped. When the
+    list is cut, say how to see the rest (agents can't guess hidden entries)."""
+    total = len(options)
+    if choices_filter:
+        needle = choices_filter.lower()
+        options = [o for o in options if needle in str(o).lower()]
+    cap = max_choices if max_choices > 0 else MAX_COMBO_CHOICES
+    entry["choices"] = options[:cap]
+    if choices_filter:
+        entry["choices_matched"] = len(options)
+        entry["choices_total"] = total
+    if len(options) > cap:
+        entry["choices_truncated"] = len(options)
+        entry["choices_hint"] = (
+            f"showing {cap} of {len(options)}; re-call get_node_info with "
+            "choices_filter='substring' or a larger max_choices"
+        )
+
+
+def node_summary(
+    object_info: dict[str, Any],
+    class_type: str,
+    choices_filter: str = "",
+    max_choices: int = 0,
+) -> dict[str, Any]:
+    """One node's full slot schema, sized for an agent to wire it correctly.
+
+    choices_filter / max_choices control combo-choice listing: filter is a
+    case-insensitive substring over every combo input's choices; max_choices
+    raises the per-combo cap (default MAX_COMBO_CHOICES)."""
     schema = object_info[class_type]
     inputs = []
     for section in ("required", "optional"):
@@ -105,15 +139,10 @@ def node_summary(object_info: dict[str, Any], class_type: str) -> dict[str, Any]
             opts = spec[1] if isinstance(spec, list | tuple) and len(spec) > 1 and isinstance(spec[1], dict) else {}
             if isinstance(kind, list):
                 entry["type"] = "COMBO"
-                entry["choices"] = kind[:MAX_COMBO_CHOICES]
-                if len(kind) > MAX_COMBO_CHOICES:
-                    entry["choices_truncated"] = len(kind)
+                _apply_choices(entry, kind, choices_filter, max_choices)
             elif kind == "COMBO":
-                options = opts.get("options", [])
                 entry["type"] = "COMBO"
-                entry["choices"] = options[:MAX_COMBO_CHOICES]
-                if len(options) > MAX_COMBO_CHOICES:
-                    entry["choices_truncated"] = len(options)
+                _apply_choices(entry, opts.get("options", []), choices_filter, max_choices)
             elif w.is_dynamic_combo(spec):
                 # a V3 dynamic combo: the main value is one of the option keys,
                 # and the selected key reveals dotted sub-widgets. Surface both
@@ -133,7 +162,7 @@ def node_summary(object_info: dict[str, Any], class_type: str) -> dict[str, Any]
                     entry[key] = opts[key]
             if isinstance(entry.get("tooltip"), str) and len(entry["tooltip"]) > MAX_TOOLTIP_CHARS:
                 entry["tooltip"] = entry["tooltip"][:MAX_TOOLTIP_CHARS] + "…"
-            if opts.get("control_after_generate"):
+            if entry["widget"] and w.has_control_slot(name, spec):
                 entry["control_slot"] = f"{name}__control_after_generate"
             inputs.append(entry)
     out_names = schema.get("output_name") or []

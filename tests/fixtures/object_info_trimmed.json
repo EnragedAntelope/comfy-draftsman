@@ -4538,5 +4538,43 @@
   ],
   "category": "image",
   "display_name": "Save Image (Advanced)"
+ },
+ "DPRandomGenerator": {
+  "input": {
+   "required": {
+    "text": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": false
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "display": "number"
+     }
+    ],
+    "autorefresh": [
+     [
+      "Yes",
+      "No"
+     ],
+     {
+      "default": "No"
+     }
+    ]
+   }
+  },
+  "output": [
+   "STRING"
+  ],
+  "output_name": [
+   "STRING"
+  ],
+  "category": "Dynamic Prompts",
+  "display_name": "Random Generator",
+  "description": "Randomly generate a prompt from a wildcard template."
  }
 }

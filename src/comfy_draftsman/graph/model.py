@@ -115,6 +115,10 @@ class Workflow:
         self.groups: list[Group] = []
         self.extra: dict[str, Any] = {}
         self.config: dict[str, Any] = {}
+        # schema-1.0 "definitions" (subgraph packaging): kept verbatim so a
+        # subgraph workflow round-trips intact; wrapper nodes' type is the
+        # definition's uuid. See subgraph_defs().
+        self.definitions: dict[str, Any] = {}
         # ComfyUI's UI schema wants a uuid at top-level "id"; an empty string
         # trips its zod validator ("Invalid uuid at id"). Mint one per workflow
         # and keep it stable across re-exports.
@@ -133,6 +137,7 @@ class Workflow:
         wf = cls()
         wf.extra = data.get("extra", {}) or {}
         wf.config = data.get("config", {}) or {}
+        wf.definitions = data.get("definitions", {}) or {}
         # preserve an existing valid workflow uuid if the source has one;
         # otherwise keep the freshly minted one from __init__
         existing_id = data.get("id") or wf.extra.get("workflow_id")
@@ -439,6 +444,18 @@ class Workflow:
         named = w.widgets_to_named(node.type, node.widgets_values, object_info)
         return named.get(input_name)
 
+    # --- subgraphs ---
+
+    def subgraph_defs(self) -> dict[str, dict[str, Any]]:
+        """{definition uuid: subgraph definition} from the schema-1.0
+        "definitions" block. A node whose type equals one of these uuids is a
+        subgraph instance (opaque wrapper around the definition's inner graph)."""
+        return {
+            sg["id"]: sg
+            for sg in self.definitions.get("subgraphs", []) or []
+            if isinstance(sg, dict) and sg.get("id")
+        }
+
     # --- serialization ---
 
     def to_ui(self) -> dict[str, Any]:
@@ -481,6 +498,7 @@ class Workflow:
                 raw["bgcolor"] = node.bgcolor
             nodes_out.append(raw)
         return {
+            **({"definitions": self.definitions} if self.definitions else {}),
             "id": self.uuid,
             "revision": 0,
             "last_node_id": max(self.nodes, default=0),
@@ -519,6 +537,15 @@ class Workflow:
             if node.type in VIRTUAL_TYPES or node.mode in (MODE_MUTE, MODE_BYPASS):
                 continue
             if node.type not in object_info:
+                subgraph = self.subgraph_defs().get(node.type)
+                if subgraph is not None:
+                    raise ValueError(
+                        f"node {node.id} is an instance of subgraph "
+                        f"'{subgraph.get('name', node.type)}' - draftsman can't flatten "
+                        "subgraphs to API format yet. Rebuild the graph from the "
+                        "subgraph's internals (inspect_workflow lists its nodes and "
+                        "wiring), or run the workflow from the ComfyUI frontend."
+                    )
                 raise ValueError(
                     f"node {node.id}: class '{node.type}' is not available on this "
                     "ComfyUI instance (missing custom node?)"
