@@ -8,12 +8,54 @@ truncated.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..graph import widgets as w
 
 MAX_COMBO_CHOICES = 24
 MAX_TOOLTIP_CHARS = 160  # tooltips are rarely needed to wire a node correctly
+MAX_TRIGGER_TAGS = 15
+
+
+def metadata_digest(meta: dict[str, Any], max_tags: int = MAX_TRIGGER_TAGS) -> dict[str, Any]:
+    """Trim a safetensors __metadata__ dict to what matters for USING the model:
+    base-model/architecture keys and the top training tags by frequency (a
+    LoRA's trigger words live in ss_tag_frequency). Raw headers can be tens of
+    KB of per-image tag counts - never return them whole."""
+    out: dict[str, Any] = {}
+    for key in (
+        "ss_base_model_version",
+        "ss_sd_model_name",
+        "modelspec.architecture",
+        "modelspec.title",
+        "ss_network_module",
+        "ss_network_dim",
+        "ss_network_alpha",
+        "ss_output_name",
+        "ss_resolution",
+    ):
+        if meta.get(key):
+            out[key] = meta[key]
+    freq_raw = meta.get("ss_tag_frequency")
+    if freq_raw:
+        try:
+            data = json.loads(freq_raw) if isinstance(freq_raw, str) else freq_raw
+            counts: dict[str, int] = {}
+            for tags in data.values():  # {dataset_name: {tag: count}}
+                if isinstance(tags, dict):
+                    for tag, n in tags.items():
+                        counts[tag.strip()] = counts.get(tag.strip(), 0) + int(n)
+            top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:max_tags]
+            out["top_training_tags"] = [f"{tag} ({n})" for tag, n in top]
+        except (ValueError, TypeError, AttributeError):
+            pass
+    if not out:
+        out["note"] = (
+            "no recognizable training metadata; raw keys: "
+            + ", ".join(sorted(meta)[:20])
+        )
+    return out
 
 
 def search_nodes(

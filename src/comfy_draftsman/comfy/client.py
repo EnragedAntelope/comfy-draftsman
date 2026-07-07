@@ -65,6 +65,20 @@ class ComfyClient:
     async def list_models(self, folder: str) -> list[str]:
         return await self._get_json(f"/models/{folder}")
 
+    async def get_model_metadata(self, folder: str, filename: str) -> dict[str, Any]:
+        """Embedded safetensors __metadata__ via /view_metadata. ComfyUI 404s
+        for missing files, non-.safetensors, and headers without metadata."""
+        clean = filename.replace("\\", "/")
+        if clean.startswith("/") or ".." in clean.split("/"):
+            raise ValueError(f"invalid filename: {filename!r}")
+        response = await self._http.get(
+            f"/view_metadata/{folder}", params={"filename": filename}
+        )
+        if response.status_code == 404:
+            raise FileNotFoundError(filename)
+        response.raise_for_status()
+        return response.json()
+
     async def get_template_index(self) -> list[dict[str, Any]]:
         return await self._get_json("/templates/index.json")
 

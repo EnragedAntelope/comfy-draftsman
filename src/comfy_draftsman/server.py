@@ -19,7 +19,7 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ToolAnnotations
 
 from . import knowledge
-from .comfy.catalog import node_summary
+from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
 from .comfy.client import ComfyClient, ComfyValidationError
 from .comfy.progress import ProgressTracker
@@ -29,7 +29,7 @@ from .graph.annotate import annotate
 from .graph.lint import lint
 from .graph.model import NOTE_TYPES, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
-from .graph.validate import validate
+from .graph.validate import check_widget_value, validate
 from .graph.widgets import all_slot_names
 from .imaging import downscale_image
 from .session import Session
@@ -204,7 +204,7 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
             {
                 "subgraphs": {
                     sid: f"{sg.get('name', sid)} ({len(sg.get('nodes', []) or [])} inner "
-                    "nodes; inspect_workflow shows internals)"
+                    "nodes; runs flattened; inspect_workflow shows internals)"
                     for sid, sg in subgraphs.items()
                 }
             }
@@ -316,14 +316,29 @@ async def get_node_info(
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
-async def list_models(folder: str = "checkpoints", search: str = "") -> dict[str, Any]:
+async def list_models(
+    folder: str = "checkpoints", search: str = "", metadata_for: str = ""
+) -> dict[str, Any]:
     """Model files installed on the instance. `folder` picks the model type:
     checkpoints, loras, vae, diffusion_models, text_encoders, upscale_models,
     controlnet, embeddings, ... (unknown folder -> the full available list).
-    `search` filters filenames (case-insensitive substring)."""
+    `search` filters filenames (case-insensitive substring). `metadata_for`
+    (a .safetensors filename from this folder) returns its embedded training
+    metadata instead - base model + top trigger tags, key for using a LoRA."""
     folders = await _client().list_model_folders()
     if folder not in folders:
         return {"error": f"unknown folder '{folder}'", "available": folders}
+    if metadata_for:
+        try:
+            meta = await _client().get_model_metadata(folder, metadata_for)
+        except FileNotFoundError:
+            return {
+                "error": f"no embedded metadata for {metadata_for!r} in '{folder}' "
+                "(file not found, not .safetensors, or trained without metadata)"
+            }
+        except ValueError as e:
+            return {"error": str(e)}
+        return {"folder": folder, "file": metadata_for, "metadata": metadata_digest(meta)}
     files = await _client().list_models(folder)
     if search:
         needle = search.lower()
@@ -431,8 +446,9 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
     if subgraphs:
         summary["subgraphs"] = [_subgraph_summary(sg) for sg in subgraphs.values()]
         summary["subgraph_note"] = (
-            "subgraph internals are reference-only: edit_workflow ops and "
-            "run_workflow don't reach inside them; rebuild flat to modify"
+            "subgraph instances run FLATTENED - validate/run/export expand them "
+            "automatically; edit_workflow ops don't reach inside, rebuild flat "
+            "to modify internals"
         )
     return summary
 
@@ -442,10 +458,10 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
 # raw KeyError, and misspelled keys (widgets_values, node, ...) are rejected
 # instead of silently ignored.
 _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
-    "add_node": ({"class_type"}, {"title", "widgets"}),
+    "add_node": ({"class_type"}, {"title", "widgets", "force"}),
     "remove_node": ({"node_id"}, set()),
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, set()),
-    "set_widget": ({"node_id", "input", "value"}, set()),
+    "set_widget": ({"node_id", "input", "value"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
 }
@@ -478,7 +494,9 @@ def _check_op(index: int, op: dict[str, Any]) -> str:
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
-async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
+async def edit_workflow(
+    workflow_id: str, operations: list[dict[str, Any]], summary: bool = False
+) -> dict[str, Any]:
     """Apply batched edits. Each op is a dict with 'op' plus:
 
     - {"op": "add_node", "class_type": str, "title"?: str, "widgets"?: {name: value}}
@@ -492,10 +510,18 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
     (class_type "Note" or "MarkdownNote") are supported with a single widget
     'text'. Ops apply in order; a failing op stops the batch, reports what
     succeeded, and leaves the graph unchanged by the failing op.
+
+    Widget VALUES are checked against the live schema at write time (combo
+    choices, ranges, types) - an invalid value fails the op with suggestions;
+    add "force": true to a set_widget/add_node op to skip that check.
+
+    Result is a compact delta (applied ops + changed nodes); pass summary=true
+    or call inspect_workflow for the full graph.
     """
     wf = _wf(workflow_id)
     object_info = await _object_info()
     applied: list[str] = []
+    touched: set[int] = set()
     try:
         for index, op in enumerate(operations):
             kind = _check_op(index, op)
@@ -524,9 +550,19 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
                             f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
                             "graph unchanged"
                         )
+                    if not op.get("force"):
+                        for name, value in widgets.items():
+                            problem = check_widget_value(
+                                class_type, name, value, object_info
+                            )
+                            if problem:
+                                raise ValueError(
+                                    f"{class_type}: {problem}; graph unchanged"
+                                )
                 node = wf.add_node(class_type, object_info=object_info, title=op.get("title"))
                 for name, value in widgets.items():
                     wf.set_widget(node.id, name, value, object_info)
+                touched.add(node.id)
                 applied.append(f"added {node.type} as #{node.id}")
             elif kind == "remove_node":
                 wf.remove_node(int(op["node_id"]))
@@ -551,18 +587,31 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
                     op["to_input"],
                     object_info,
                 )
+                touched.update((int(op["from_node"]), int(op["to_node"])))
                 applied.append(
                     f"connected #{op['from_node']}.{op['from_output']} -> "
                     f"#{op['to_node']}.{op['to_input']}{replaced}"
                 )
             elif kind == "set_widget":
-                wf.set_widget(int(op["node_id"]), op["input"], op["value"], object_info)
+                node_id = int(op["node_id"])
+                node = wf.nodes[node_id]
+                if not op.get("force") and node.type not in NOTE_TYPES:
+                    problem = check_widget_value(
+                        node.type, op["input"], op["value"], object_info,
+                        node.widgets_values,
+                    )
+                    if problem:
+                        raise ValueError(f"{node.type} #{node_id}: {problem}")
+                wf.set_widget(node_id, op["input"], op["value"], object_info)
+                touched.add(node_id)
                 applied.append(f"set #{op['node_id']}.{op['input']} = {op['value']!r}")
             elif kind == "set_title":
                 wf.nodes[int(op["node_id"])].title = op["title"]
+                touched.add(int(op["node_id"]))
                 applied.append(f"titled #{op['node_id']}")
             elif kind == "set_mode":
                 wf.nodes[int(op["node_id"])].mode = int(op["mode"])
+                touched.add(int(op["node_id"]))
                 applied.append(f"mode #{op['node_id']} = {op['mode']}")
     except KeyError as e:
         return {
@@ -576,7 +625,25 @@ async def edit_workflow(workflow_id: str, operations: list[dict[str, Any]]) -> d
             "error": str(e),
             "hint": "get_node_info gives slot/widget names; the op schemas are in this tool's description",
         }
-    return {"applied": applied, "summary": _summary(workflow_id, wf)}
+    if summary:
+        return {"applied": applied, "summary": _summary(workflow_id, wf)}
+    # compact delta: re-sending the whole graph after every edit batch was the
+    # single biggest recurring token cost; inspect_workflow has the full view
+    return {
+        "applied": applied,
+        "nodes": len(wf.nodes),
+        "links": len(wf.links),
+        "changed": [
+            {
+                "id": n.id,
+                "class_type": n.type,
+                "title": n.title,
+                "widgets": _widget_preview(n),
+            }
+            for nid in sorted(touched)
+            if (n := wf.nodes.get(nid)) is not None
+        ],
+    }
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
@@ -633,38 +700,27 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
     if missing:
         registry_result = await _registry().resolve_node_classes(missing)
         resolved = registry_result.get("resolved", {})
-        for cls in missing:
-            pack = resolved.get(cls)
-            capability_impact.append(
-                {
-                    "class_type": cls,
-                    "provided_by": pack,
-                    "options": (
-                        f"install pack '{pack}' (runs third-party code) to keep this "
-                        "node's capability, OR replace it with a core/already-installed "
-                        "equivalent, OR drop it and lose what it does"
-                        if pack
-                        else "not found in the registry - find a core/installed "
-                        "equivalent, or dropping it loses what it does"
-                    ),
-                }
-            )
-    return {
+        capability_impact = [
+            {"class_type": cls, "provided_by": resolved.get(cls)} for cls in missing
+        ]
+    result: dict[str, Any] = {
         "ok": not findings,
         "findings": findings,
         "missing_node_packs": registry_result,
         "capability_impact": capability_impact,
-        "capability_notice": (
-            "For each missing node, tell the user WHAT FUNCTION is lost if it's dropped "
-            "and whether a core/installed equivalent exists, BEFORE they choose "
-            "'core nodes only' vs installing a pack. Never drop a feature silently."
-        )
-        if missing
-        else "",
         "family": knowledge.detect_family(
             wf, await _object_info(), learned_dir=_config().learned_dir
         ),
     }
+    if missing:
+        # stated once, not per missing node
+        result["capability_notice"] = (
+            "Per missing node: install its pack (runs third-party code), replace "
+            "it with a core/installed equivalent, or drop it and LOSE what it "
+            "does. Tell the user what function is lost BEFORE they choose - "
+            "never drop a feature silently."
+        )
+    return result
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
@@ -715,7 +771,9 @@ async def run_workflow(
     the caller can reach, returning saved_paths - so a render is presentable in
     one call without a separate save_output step."""
     wf = _wf(workflow_id)
-    object_info = await _object_info()
+    # refresh: combo choices embed the installed model files, so a stale cache
+    # can wave through (or wrongly block) model-name widgets
+    object_info = await _object_info(refresh=True)
     if not allow_invalid:
         errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
         if errors:
@@ -746,11 +804,7 @@ async def run_workflow(
             queued = await _client().queue_prompt(api, client_id=tracker.client_id)
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
-        return {
-            "status": "queued",
-            "prompt_id": queued["prompt_id"],
-            "hint": "poll get_run_status(prompt_id) for progress and outputs",
-        }
+        return {"status": "queued", "prompt_id": queued["prompt_id"]}
     try:
         result = await _client().run_and_wait(api, timeout=timeout_seconds)
     except ComfyValidationError as e:
@@ -1083,7 +1137,7 @@ async def save_workflow(
     if ".." in name or any(sep in name for sep in ("/", "\\")):
         return {"error": "name must be a plain filename - no path separators or '..'"}
     wf = _wf(workflow_id)
-    object_info = await _object_info()
+    object_info = await _object_info(refresh=True)
     findings = validate(wf, object_info)
     errors = [f for f in findings if f["level"] == "error"]
     if errors and not allow_invalid:

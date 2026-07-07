@@ -176,12 +176,31 @@ def _subgraph_doc():
                             "id": 3,
                             "type": "KSampler",
                             "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                            "inputs": [
+                                {"name": "model", "type": "MODEL", "link": None},
+                                {"name": "positive", "type": "CONDITIONING", "link": None},
+                                {"name": "negative", "type": "CONDITIONING", "link": None},
+                                {"name": "latent_image", "type": "LATENT", "link": None},
+                            ],
+                            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [9]}],
                         },
-                        {"id": 8, "type": "VAEDecode", "widgets_values": []},
+                        {
+                            "id": 8,
+                            "type": "VAEDecode",
+                            "widgets_values": [],
+                            "inputs": [
+                                {"name": "samples", "type": "LATENT", "link": 9},
+                                {"name": "vae", "type": "VAE", "link": None},
+                            ],
+                            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [16]}],
+                        },
                     ],
                     "links": [
                         {"id": 9, "origin_id": 3, "origin_slot": 0,
                          "target_id": 8, "target_slot": 0, "type": "LATENT"},
+                        # boundary wiring: -10 = subgraph input, -20 = subgraph output
+                        {"id": 16, "origin_id": 8, "origin_slot": 0,
+                         "target_id": -20, "target_slot": 0, "type": "IMAGE"},
                     ],
                 }
             ]
@@ -210,14 +229,24 @@ def test_validate_reports_subgraph_not_missing_class(oi):
     assert "subgraph-instance" in codes
     assert "missing-node-class" not in codes
     sub = next(f for f in findings if f["code"] == "subgraph-instance")
-    assert sub["level"] == "warning"
+    # round 10: instances validate FLATTENED, so the per-instance finding is
+    # informational, and inner-node findings carry subgraph provenance
+    assert sub["level"] == "info"
     assert "Text to Image (Qwen-Image)" in sub["message"]
+    inner = [f for f in findings if f.get("subgraph") == "Text to Image (Qwen-Image)" and f is not sub]
+    assert inner, "inner nodes should be validated (fixture KSampler has unconnected inputs)"
+    assert all(f["inner_node"].startswith("1:") for f in inner)
 
 
-def test_to_api_names_the_subgraph(oi):
+def test_to_api_flattens_the_subgraph(oi):
     wf = Workflow.from_ui(_subgraph_doc())
-    with pytest.raises(ValueError, match="subgraph 'Text to Image"):
-        wf.to_api(oi)
+    api = wf.to_api(oi)
+    # instance replaced by its inner KSampler+VAEDecode, wired through to SaveImage
+    classes = {entry["class_type"] for entry in api.values()}
+    assert {"KSampler", "VAEDecode", "SaveImage"} <= classes
+    save = next(e for e in api.values() if e["class_type"] == "SaveImage")
+    decode_id = next(k for k, e in api.items() if e["class_type"] == "VAEDecode")
+    assert save["inputs"]["images"] == [decode_id, 0]
 
 
 def test_subgraph_summary_exposes_internals():

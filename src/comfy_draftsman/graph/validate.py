@@ -12,7 +12,7 @@ import difflib
 from typing import Any
 
 from . import widgets as w
-from .model import VIRTUAL_TYPES, Workflow
+from .model import MODE_NORMAL, VIRTUAL_TYPES, Workflow
 
 
 def _finding(
@@ -38,7 +38,113 @@ def _combo_choices(spec: Any) -> list[Any] | None:
     return None
 
 
+def check_widget_value(
+    class_type: str,
+    input_name: str,
+    value: Any,
+    object_info: dict[str, Any],
+    widgets_values: Any = None,
+) -> str | None:
+    """Actionable error string if ``value`` is invalid for this widget, else
+    None. Used by edit ops to reject made-up values at WRITE time - validate()
+    catches the same problems later, but late feedback wastes a round trip.
+    Widget-NAME checks live in set_widget/add_node; unknown names pass here."""
+    if class_type not in object_info or input_name.endswith(w.SYNTHETIC_SUFFIXES):
+        return None
+    spec = w.widget_specs(class_type, object_info, widgets_values).get(input_name)
+    if spec is None:
+        return None
+    if value is None:
+        return (
+            f"'{input_name}' cannot be null - the ComfyUI editor crashes on null "
+            "widget values (empty string is fine)"
+        )
+    choices = _combo_choices(spec)
+    if choices:
+        if value in choices:
+            return None
+        close = difflib.get_close_matches(
+            str(value), [str(c) for c in choices], n=3, cutoff=0.4
+        )
+        listing = (
+            f"close matches: {close}" if close else f"e.g. {[str(c) for c in choices[:8]]}"
+        )
+        browse = (
+            f"; browse all {len(choices)} via get_node_info('{class_type}', "
+            "choices_filter=...)"
+            if len(choices) > 8
+            else ""
+        )
+        return (
+            f"'{input_name}' = {value!r} is not an available option on this "
+            f"instance - {listing}{browse}. Only listed values run; "
+            '"force": true overrides if you know better'
+        )
+    kind = spec[0]
+    if kind == "INT" and (isinstance(value, bool) or not isinstance(value, int)):
+        return f"'{input_name}' expects an integer, got {type(value).__name__} {value!r}"
+    if kind == "FLOAT" and (isinstance(value, bool) or not isinstance(value, int | float)):
+        return f"'{input_name}' expects a number, got {type(value).__name__} {value!r}"
+    if kind == "STRING" and not isinstance(value, str):
+        return f"'{input_name}' expects a string, got {type(value).__name__} {value!r}"
+    if kind == "BOOLEAN" and not isinstance(value, bool):
+        return f"'{input_name}' expects true/false, got {type(value).__name__} {value!r}"
+    opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        low, high = opts.get("min"), opts.get("max")
+        if (low is not None and value < low) or (high is not None and value > high):
+            return f"'{input_name}' = {value} is outside the allowed range [{low}, {high}]"
+    return None
+
+
 def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate a workflow; subgraph instances are flattened first so inner
+    nodes get the same checks, with findings carrying subgraph provenance."""
+    from .subgraph import flatten, has_subgraph_instances
+
+    if not has_subgraph_instances(wf):
+        return _validate_nodes(wf, object_info)
+    try:
+        flat, provenance = flatten(wf, object_info)
+    except ValueError as e:
+        findings = _validate_nodes(wf, object_info)
+        findings.append(
+            _finding(
+                "error",
+                "subgraph-flatten-failed",
+                f"could not flatten subgraph instances for validation/run: {e}",
+            )
+        )
+        return findings
+    findings = _validate_nodes(flat, object_info)
+    for f in findings:
+        origin = provenance.get(f.get("node_id", -1))
+        if origin:
+            f["subgraph"] = origin["subgraph"]
+            f["inner_node"] = origin["path"]
+            f["message"] += (
+                f" [inner node {origin['path']} of subgraph '{origin['subgraph']}' - "
+                "edit_workflow can't reach inside; rebuild flat to change it]"
+            )
+    defs = wf.subgraph_defs()
+    for node in wf.nodes.values():
+        sg = defs.get(node.type)
+        if sg is not None and node.mode == MODE_NORMAL:
+            findings.append(
+                _finding(
+                    "info",
+                    "subgraph-instance",
+                    f"node #{node.id} is an instance of subgraph "
+                    f"'{sg.get('name', node.type)}' - flattened automatically at "
+                    "validate/run time; its inner findings (if any) are listed above",
+                    node.id,
+                    subgraph=sg.get("name"),
+                )
+            )
+    return findings
+
+
+def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for node in wf.nodes.values():
         if node.type in VIRTUAL_TYPES:
@@ -47,16 +153,17 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
         if schema is None:
             subgraph = wf.subgraph_defs().get(node.type)
             if subgraph is not None:
+                # reached only for muted/bypassed instances (never executed) or
+                # when flattening failed - active instances validate flattened
                 findings.append(
                     _finding(
                         "warning",
                         "subgraph-instance",
                         f"node #{node.id} is an instance of subgraph "
                         f"'{subgraph.get('name', node.type)}' "
-                        f"({len(subgraph.get('nodes', []) or [])} inner nodes). Its "
-                        "internals aren't validated and run_workflow can't flatten "
-                        "it - inspect_workflow shows the inner nodes and wiring to "
-                        "rebuild from, or run it via the ComfyUI frontend",
+                        f"({len(subgraph.get('nodes', []) or [])} inner nodes), "
+                        "left unflattened here (muted/bypassed or malformed "
+                        "definition) - its internals aren't validated",
                         node.id,
                         subgraph=subgraph.get("name"),
                     )

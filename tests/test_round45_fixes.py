@@ -151,6 +151,7 @@ async def test_markdown_note_add_and_edit(wired):
                 "widgets": {"text": "# How this works"},
             }
         ],
+        summary=True,
     )
     assert "error" not in result, result
     (node_id,) = wf.nodes

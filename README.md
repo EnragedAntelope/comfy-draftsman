@@ -94,9 +94,9 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
-**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
+**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering; `metadata_for='file.safetensors'` returns a LoRA's embedded training metadata — base model and top trigger tags — so trigger words come from ground truth, not guesses), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
 
-**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow` (for subgraph-packaged workflows — how newer bundled templates ship — it lists each subgraph's inner nodes and wiring so templates work as reference material, not just opaque wrappers), `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
+**Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow` (for subgraph-packaged workflows — how newer bundled templates ship — it lists each subgraph's inner nodes and wiring), `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; widget **values** are checked against the live schema at write time, so a made-up sampler or model filename fails immediately with closest-match suggestions instead of at run time; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link; returns a compact delta — `summary=true` for the full graph), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
 
 **Correctness** — `validate_workflow` (live checks + closest-match suggestions), `diagnose_workflow` (validation + registry resolution of missing nodes), `port_workflow` (cross-family model ports like SDXL→Flux — missing-node repair is `diagnose_workflow`/`resolve_missing_nodes`, not this)
 
@@ -132,8 +132,10 @@ agent can reach, so sandboxed clients can hand you the actual file.
 ## How it stays correct
 
 - The graph model round-trips ComfyUI's UI workflow format (schema 0.4, including subgraph `definitions`) faithfully and serializes to API format with the fiddly bits handled: positional widget arrays (including `control_after_generate` slots — even the ones the frontend adds by *name* to legacy seed widgets with no schema flag), V3 dynamic-combo dotted keys, converted-widget connections, PrimitiveNode baking, Reroute tracing, mute/bypass semantics.
-- Everything is validated against the **live** `/object_info` — combo checks double as "is this model actually installed" checks.
-- The test suite includes protocol-level end-to-end tests that build, validate, organize, **render**, and save real workflows on a real ComfyUI instance.
+- **Subgraph-packaged workflows run.** Instances are flattened to API format the way the frontend does it at queue time (boundary rewiring, promoted `proxyWidgets` values, nested definitions), and `validate` checks the *inner* nodes too, with each finding tagged with its subgraph provenance.
+- Everything is validated against the **live** `/object_info` — combo checks double as "is this model actually installed" checks, refreshed right before every run/save.
+- The test suite includes protocol-level end-to-end tests that build, validate, organize, **render**, and save real workflows on a real ComfyUI instance — including a subgraph-packaged one.
+- Module map, data flow, and design gotchas: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Security notes
 

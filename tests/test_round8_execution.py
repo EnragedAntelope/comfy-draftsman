@@ -168,11 +168,7 @@ async def test_run_workflow_returns_downscaled_thumbnail(wired):
 async def test_run_workflow_wait_false_queues_under_tracker_id(wired):
     client, wf_id = wired
     result = await server.run_workflow(wf_id, wait=False)
-    assert result == {
-        "status": "queued",
-        "prompt_id": "p123",
-        "hint": "poll get_run_status(prompt_id) for progress and outputs",
-    }
+    assert result == {"status": "queued", "prompt_id": "p123"}
     assert client.queued_with == "tracker-client"
 
 

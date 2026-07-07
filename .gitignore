@@ -28,3 +28,7 @@ uv.lock
 Thumbs.db
 .idea/
 .vscode/
+
+# Internal work plans / agent worklogs (keep local; public TODOs live in docs/ARCHITECTURE.md)
+docs/superpowers/
+docs/plans/

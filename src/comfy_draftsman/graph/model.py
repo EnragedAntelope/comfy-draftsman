@@ -525,7 +525,14 @@ class Workflow:
         }
 
     def to_api(self, object_info: dict[str, Any]) -> dict[str, Any]:
-        """Serialize executable nodes to the /prompt API document."""
+        """Serialize executable nodes to the /prompt API document. Subgraph
+        instances are flattened first (mirroring the frontend's queue-time
+        expansion; see graph/subgraph.py)."""
+        from .subgraph import flatten, has_subgraph_instances
+
+        if has_subgraph_instances(self):
+            flat, _ = flatten(self, object_info)
+            return flat.to_api(object_info)
         resolved = self._resolve_link_origins()
         primitive_values = {
             n.id: (n.widgets_values[0] if n.widgets_values else None)
@@ -539,12 +546,14 @@ class Workflow:
             if node.type not in object_info:
                 subgraph = self.subgraph_defs().get(node.type)
                 if subgraph is not None:
+                    # active instances were flattened above; only reachable if
+                    # the definition is too malformed to expand
                     raise ValueError(
                         f"node {node.id} is an instance of subgraph "
-                        f"'{subgraph.get('name', node.type)}' - draftsman can't flatten "
-                        "subgraphs to API format yet. Rebuild the graph from the "
-                        "subgraph's internals (inspect_workflow lists its nodes and "
-                        "wiring), or run the workflow from the ComfyUI frontend."
+                        f"'{subgraph.get('name', node.type)}' that could not be "
+                        "flattened (malformed definition?). Rebuild the graph from "
+                        "the subgraph's internals (inspect_workflow lists its nodes "
+                        "and wiring), or run it from the ComfyUI frontend."
                     )
                 raise ValueError(
                     f"node {node.id}: class '{node.type}' is not available on this "

@@ -209,3 +209,56 @@ async def test_upload_image_roundtrip(live_server):
     )
     assert isinstance(back, Image)
     assert PILImage.open(io.BytesIO(back.data)).size == (32, 32)
+
+
+async def test_subgraph_workflow_runs_flattened(live_client):
+    """Round-10: a subgraph-packaged workflow (schema-1.0 definitions) renders
+    end-to-end - to_api flattens the instance the way the frontend would."""
+    object_info = await live_client.get_object_info()
+    inner = _build_txt2img(object_info, await _pick_checkpoint(live_client))
+    save = next(n for n in inner.nodes.values() if n.type == "SaveImage")
+    decode = next(n for n in inner.nodes.values() if n.type == "VAEDecode")
+    inner.remove_node(save.id)  # SaveImage lives OUTSIDE the subgraph
+    ui = inner.to_ui()
+    sg_id = "12345678-1234-4123-8123-123456789abc"
+    doc = {
+        "id": "11111111-2222-4333-8444-555555555555",
+        "revision": 0,
+        "nodes": [
+            {
+                "id": 100, "type": sg_id, "pos": [0, 0], "size": [200, 100],
+                "inputs": [], "widgets_values": [], "properties": {},
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [500]}],
+            },
+            {
+                "id": 101, "type": "SaveImage", "pos": [400, 0], "size": [300, 200],
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 500}],
+                "outputs": [], "widgets_values": ["draftsman_r10_subgraph"],
+            },
+        ],
+        "links": [[500, 100, 0, 101, 0, "IMAGE"]],
+        "groups": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": sg_id,
+                    "name": "TXT2IMG (draftsman itest)",
+                    "inputs": [],
+                    "outputs": [{"name": "IMAGE", "type": "IMAGE", "linkIds": [999]}],
+                    "nodes": ui["nodes"],
+                    "links": [*ui["links"], [999, decode.id, 0, -20, 0, "IMAGE"]],
+                }
+            ]
+        },
+        "config": {}, "extra": {}, "version": 0.4,
+    }
+    wf = Workflow.from_ui(doc)
+    findings = validate(wf, object_info)
+    assert [f for f in findings if f["level"] == "error"] == [], findings
+    assert any(f["code"] == "subgraph-instance" for f in findings)
+
+    api = wf.to_api(object_info)
+    assert "SaveImage" in {e["class_type"] for e in api.values()}
+    result = await live_client.run_and_wait(api, timeout=300)
+    assert result["status"] == "success", result
+    assert result["outputs"][0]["filename"].startswith("draftsman_r10_subgraph")
