@@ -9,10 +9,57 @@ this the engine behind both validate_workflow and diagnose_workflow.
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any
 
 from . import widgets as w
 from .model import MODE_NORMAL, VIRTUAL_TYPES, Workflow
+
+# A combo's option list is authoritative when we can trust the /object_info
+# snapshot: either it lists on-disk files (an "is this installed" check) or it
+# belongs to a core node (baked enums like sampler_name/scheduler). Third-party
+# nodes commonly repopulate their combos client-side (wildcard/LoRA/style
+# pickers), so a saved value absent from their snapshot isn't necessarily wrong.
+_FILE_COMBO_RE = re.compile(
+    r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|sft|vae|pkl|yaml|yml)$", re.IGNORECASE
+)
+
+
+def _looks_like_file_combo(choices: list[Any]) -> bool:
+    return any(
+        isinstance(c, str) and (_FILE_COMBO_RE.search(c) or "/" in c or "\\" in c)
+        for c in choices
+    )
+
+
+def _is_custom_node(class_type: str, object_info: dict[str, Any]) -> bool:
+    """True if this class comes from a third-party pack (python_module under
+    ``custom_nodes``) rather than core/bundled ComfyUI. Missing -> treated as
+    core (strict), so an unknown never silently relaxes validation."""
+    module = str((object_info.get(class_type) or {}).get("python_module") or "")
+    return module.startswith("custom_nodes")
+
+
+def _authoritative_combo(
+    class_type: str, choices: list[Any], object_info: dict[str, Any]
+) -> bool:
+    """Whether a combo-membership failure should block (error) rather than warn:
+    on-disk file listings always, and any combo on a core node."""
+    return _looks_like_file_combo(choices) or not _is_custom_node(class_type, object_info)
+
+
+def _step_aligned(value: float, min_val: float, step: float) -> bool:
+    """True if ``value`` sits on the widget's step grid. Accepts alignment to
+    origin 0 OR to ``min``: a schema often sets ``min`` to a tiny epsilon (e.g.
+    0.0001, meaning ">0") that would otherwise offset the whole grid and reject
+    every normal value. Tolerance is step-relative to survive float error."""
+    if step is None or step <= 0:
+        return True
+    for origin in {0.0, float(min_val or 0)}:
+        k = round((value - origin) / step)
+        if abs(origin + k * step - value) <= step * 1e-4:
+            return True
+    return False
 
 
 def _finding(
@@ -63,6 +110,12 @@ def check_widget_value(
     if choices:
         if value in choices:
             return None
+        # A value absent from a non-authoritative combo (a third-party node that
+        # populates its own list client-side: wildcard/LoRA/style picker) is most
+        # likely legitimate - don't reject the write. validate() still surfaces it
+        # as a non-blocking warning; core enums and file lists stay strict.
+        if not _authoritative_combo(class_type, choices, object_info):
+            return None
         close = difflib.get_close_matches(
             str(value), [str(c) for c in choices], n=3, cutoff=0.4
         )
@@ -97,8 +150,7 @@ def check_widget_value(
         step = opts.get("step")
         if step is not None and step > 0:
             min_val = opts.get("min", 0) or 0
-            remainder = (value - min_val) % step
-            if not (remainder < 1e-6 or abs(remainder - step) < 1e-6):
+            if not _step_aligned(value, min_val, step):
                 return f"'{input_name}' = {value} is not aligned to step {step} (min {min_val})"
     return None
 
@@ -199,7 +251,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             )
             continue
 
-        slots = w.widget_slot_names(node.type, object_info, node.widgets_values)
+        socket_names = {slot.name for slot in node.inputs}
+        slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
         if isinstance(node.widgets_values, list) and len(node.widgets_values) != len(slots):
             # dynamic nodes (text concatenators, switches...) declare dozens of
             # optional widgets in their schema but the frontend serializes only
@@ -237,8 +290,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
 
         # real widget slots for the current selection, incl. dotted sub-widgets
         # of a dynamic combo's chosen option - so their values get validated too
-        specs = w.widget_specs(node.type, object_info, node.widgets_values)
-        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        specs = w.widget_specs(node.type, object_info, node.widgets_values, socket_names)
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info, socket_names)
         for name, value in named.items():
             if value is None:
                 # the frontend runs string replacement over every widget value
@@ -265,18 +318,37 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             choices = _combo_choices(spec)
             if choices is not None and choices and value not in choices:
                 close = difflib.get_close_matches(str(value), [str(c) for c in choices], n=1, cutoff=0.4)
-                findings.append(
-                    _finding(
-                        "error",
-                        "invalid-combo-value",
-                        f"{node.type} #{node.id}: '{name}' = {value!r} is not available "
-                        + (f"- closest installed option: {close[0]!r}" if close else
-                           "- list options with get_node_info / list_models"),
-                        node.id,
-                        input=name,
-                        suggestion=close[0] if close else None,
+                if _authoritative_combo(node.type, choices, object_info):
+                    # on-disk listing or a core node's baked enum: genuinely wrong
+                    findings.append(
+                        _finding(
+                            "error",
+                            "invalid-combo-value",
+                            f"{node.type} #{node.id}: '{name}' = {value!r} is not available "
+                            + (f"- closest installed option: {close[0]!r}" if close else
+                               "- list options with get_node_info / list_models"),
+                            node.id,
+                            input=name,
+                            suggestion=close[0] if close else None,
+                        )
                     )
-                )
+                else:
+                    # third-party node that likely fills this combo client-side
+                    # (wildcard/LoRA/style picker): advisory, non-blocking -
+                    # ComfyUI is the final judge.
+                    findings.append(
+                        _finding(
+                            "warning",
+                            "combo-value-unlisted",
+                            f"{node.type} #{node.id}: '{name}' = {value!r} is not in this "
+                            "instance's schema options - fine if this custom node fills the "
+                            "list client-side (wildcard/LoRA/style picker); otherwise "
+                            "list options with get_node_info",
+                            node.id,
+                            input=name,
+                            suggestion=close[0] if close else None,
+                        )
+                    )
                 continue
             opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
             if isinstance(value, int | float) and not isinstance(value, bool):
@@ -295,8 +367,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 step = opts.get("step")
                 if step is not None and step > 0:
                     min_val = opts.get("min", 0) or 0
-                    remainder = (value - min_val) % step
-                    if not (remainder < 1e-6 or abs(remainder - step) < 1e-6):
+                    if not _step_aligned(value, min_val, step):
                         findings.append(
                             _finding(
                                 "warning",
@@ -309,10 +380,32 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         )
 
         for name, spec in schema.get("input", {}).get("required", {}).items():
-            if w.is_widget_input(spec):
+            # base widgets, and custom JS-widget inputs the node didn't serialize
+            # as a socket, are populated from widgets_values - not "unconnected"
+            if w.is_widget_input(spec) or w._is_custom_widget(name, spec, socket_names):
                 continue
             slot = node.input_by_name(name)
-            if slot is None or slot.link is None:
+            if slot is not None and slot.link is None and slot.widget_name:
+                # a custom-typed input the node exposes as a widget-backed slot
+                # (carries a `widget` marker): its value is pack-specific frontend
+                # JS state (e.g. LoraManager's autocomplete), not a plain scalar
+                # the raw /prompt API can send. Driving it headlessly would silently
+                # no-op the node's whole branch - so block loudly with the fix.
+                kind = spec[0] if isinstance(spec, list | tuple) and spec else spec
+                findings.append(
+                    _finding(
+                        "error",
+                        "js-widget-input",
+                        f"{node.type} #{node.id}: required input '{name}' (type "
+                        f"{kind}) is a custom widget its pack's frontend JS fills in "
+                        "the browser; the raw API can't, so a headless run would "
+                        "no-op this node's branch. Connect it, or swap this node for "
+                        "the pack's plain-STRING variant / a core equivalent",
+                        node.id,
+                        input=name,
+                    )
+                )
+            elif slot is None or slot.link is None:
                 findings.append(
                     _finding(
                         "error",

@@ -100,9 +100,46 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   proxyWidgets overrides — a warning is returned in the op result.
 - **Image-metadata metadata** — `view_output` returns a `meta` dict alongside
   images so text-only models can describe renders.
+- **Frontend-only behaviors are mirrored at submit (`to_api`/`run_workflow`), not
+  in the saved graph.** The raw `/prompt` backend never runs the JS the browser
+  does, so draftsman replays it for headless parity:
+  - *Custom JS-widget inputs:* a pack can declare an input whose type is a bespoke
+    string (`AUTOCOMPLETE_TEXT_LORAS`, `ZIPN_STYLE_GALLERY_BUTTON`) that its own
+    frontend renders as a widget, not a socket. Schema alone can't tell it from a
+    connection type, so it's recognized **per-instance**: an input the node did
+    *not* serialize in its `inputs` socket array can only be a widget
+    (`widgets._is_custom_widget`, gated on `socket_names`). Schema-only paths
+    (fresh-node defaults, `add_node`) stay conservative — never infer a custom
+    widget without instance context. When such an input is instead exposed as a
+    widget-backed slot (carries a `widget` marker) and its value is pack-specific
+    JS state (a dict/list, not a scalar), it genuinely can't be serialized to the
+    raw API — `validate` blocks it with a `js-widget-input` error (with the
+    remediation) rather than silently no-opping the branch. A generic tool cannot
+    replay a pack's client-side JS; the honest outcome is a loud, actionable stop.
+  - *`%date:FORMAT%` filename tokens:* substituted in `to_api` only (the saved UI
+    doc keeps the literal token for the browser). `.NET`-style tokens, longest
+    first (`yyyy` before `yy`). See `model._substitute_filename_tokens`.
+  - *Seed `control_after_generate`:* `run_workflow(roll_seeds=True)` re-rolls
+    randomize/increment/decrement seeds before submit and **persists** the new
+    value (so `inspect` reflects the run and increment advances). The API itself
+    never re-rolls — a fixed seed repeats forever otherwise.
+- **Combo-membership severity is confidence-gated.** A value absent from the
+  `/object_info` snapshot blocks (error) only for on-disk file listings or core
+  nodes (`python_module` not under `custom_nodes`); third-party nodes that
+  repopulate combos client-side (wildcard/LoRA/style pickers) get a non-blocking
+  warning. Keeps the "is this model installed" check strict without flooding on
+  client-populated pickers. `validate_workflow`/`diagnose_workflow` also cap
+  returned findings (errors always kept) for token discipline.
 
 ## Remaining TODOs
 
+None open. Recently closed:
+
+- **[DONE, round 12] Headless API-submission parity** — custom JS-widget input
+  serialization, `%date:%` token substitution, seed `control_after_generate`
+  re-roll, case-insensitive connect, epsilon-`min` step alignment, and
+  core-vs-custom combo severity (see Gotchas). All had been failing silently for
+  custom-node-heavy workflows driven through `run_workflow`.
 - **[DONE] Edit inside subgraph definitions** — flattening covers
   run/validate/export; targeted edits of definition internals are implemented
   (parsed into Workflow objects internally). Nested definitions (depth > 1)

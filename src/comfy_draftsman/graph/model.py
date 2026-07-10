@@ -17,11 +17,38 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from . import widgets as w
 
 VIRTUAL_TYPES = {"Note", "MarkdownNote", "PrimitiveNode", "Reroute"}
+
+# %date% / %date:FORMAT% filename-prefix tokens are substituted by a frontend
+# extension (pysssss / Custom-Scripts) before the browser submits; the backend
+# /prompt endpoint never processes them, so a headless run would pass the literal
+# token (illegal ':' on Windows) to the filesystem. Mirror the extension here at
+# API-serialization time. .NET-style tokens, longest-first so 'yyyy' beats 'yy'.
+_DATE_TOKEN_RE = re.compile(r"%date(?::([^%]*))?%")
+_DATE_TOKEN_MAP = (
+    ("yyyy", "%Y"), ("yy", "%y"), ("MM", "%m"), ("dd", "%d"),
+    ("hh", "%H"), ("mm", "%M"), ("ss", "%S"),
+)
+
+
+def _substitute_filename_tokens(value: str, now: datetime) -> str:
+    """Replace %date%/%date:FORMAT% tokens in a string with the current time.
+    Non-token strings are returned unchanged."""
+    if "%date" not in value:
+        return value
+
+    def _replace(match: re.Match[str]) -> str:
+        fmt = match.group(1) or "yyyy-MM-dd"
+        for token, directive in _DATE_TOKEN_MAP:
+            fmt = fmt.replace(token, now.strftime(directive))
+        return fmt
+
+    return _DATE_TOKEN_RE.sub(_replace, value)
 
 # UI-only annotation nodes: never in object_info, single 'text' widget
 NOTE_TYPES = {"Note", "MarkdownNote"}
@@ -344,7 +371,13 @@ class Workflow:
                 f"node {target_id} ({target.type}) has no input '{target_input}'; "
                 f"available: {[i.name for i in target.inputs]}{widget_hint}"
             )
-        if in_slot.type not in ("*", "COMBO") and out_slot.type != "*" and in_slot.type != out_slot.type:
+        # litegraph slot typing is case-insensitive (STRING == string), so compare
+        # upper-cased; '*'/'COMBO' stay wildcards
+        if (
+            in_slot.type.upper() not in ("*", "COMBO")
+            and out_slot.type != "*"
+            and in_slot.type.upper() != out_slot.type.upper()
+        ):
             raise ValueError(
                 f"type mismatch: {origin.type}.{out_slot.name} ({out_slot.type}) -> "
                 f"{target.type}.{target_input} ({in_slot.type})"
@@ -610,6 +643,7 @@ class Workflow:
             flat, _, _ = flatten(self, object_info)
             return flat.to_api(object_info)
         resolved = self._resolve_link_origins()
+        now = datetime.now()
         primitive_values = {
             n.id: (n.widgets_values[0] if n.widgets_values else None)
             for n in self.nodes.values()
@@ -635,9 +669,12 @@ class Workflow:
                     f"node {node.id}: class '{node.type}' is not available on this "
                     "ComfyUI instance (missing custom node?)"
                 )
-            named_widgets = w.named_for_api(node.type, node.widgets_values, object_info)
+            socket_names = {slot.name for slot in node.inputs}
+            named_widgets = w.named_for_api(
+                node.type, node.widgets_values, object_info, socket_names
+            )
             inputs: dict[str, Any] = {
-                k: v
+                k: (_substitute_filename_tokens(v, now) if isinstance(v, str) else v)
                 for k, v in named_widgets.items()
                 if not k.endswith(w.SYNTHETIC_SUFFIXES)
             }
@@ -654,6 +691,25 @@ class Workflow:
                     inputs[slot.name] = [str(origin_id), origin_slot]
             api[str(node.id)] = {"class_type": node.type, "inputs": inputs}
         return api
+
+    def apply_seed_control(self, object_info: dict[str, Any]) -> bool:
+        """Re-roll seed widgets per their control_after_generate mode (the
+        frontend does this between queues; the raw API never does). Mutates
+        widgets_values in place. Returns True if any seed changed."""
+        changed = False
+        for node in self.nodes.values():
+            if node.type not in object_info:
+                continue
+            new_values, node_changed = w.roll_seed_controls(
+                node.type,
+                node.widgets_values,
+                object_info,
+                socket_names={slot.name for slot in node.inputs},
+            )
+            if node_changed:
+                node.widgets_values = new_values
+                changed = True
+        return changed
 
     def _resolve_link_origins(self) -> dict[tuple[int, int], tuple[int, int]]:
         """Map (target_id, target_slot) -> real (origin_id, origin_slot), seeing

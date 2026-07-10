@@ -28,10 +28,14 @@ value-aware: pass the node's ``widgets_values`` so the right option expands.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable, Iterator
 from typing import Any
 
 PRIMITIVE_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN"}
+
+# ComfyUI seeds are unsigned 64-bit; the frontend randomizes within this range.
+MAX_SEED = 0xFFFFFFFFFFFFFFFF
 
 # V3 dynamic combo: a combo whose selected key ("options"[i].key) reveals that
 # option's conditional sub-widgets (options[i].inputs). Serialized flat in
@@ -79,7 +83,14 @@ def has_control_slot(name: str, spec: Any) -> bool:
 
 
 def is_widget_input(spec: Any) -> bool:
-    """True if this input spec renders as a widget (consumes a widgets_values slot)."""
+    """True if this input spec renders as a widget (consumes a widgets_values slot).
+
+    Primitives and combos only - schema-level truth. Custom nodes may also declare
+    an input whose type is a bespoke string (e.g. ``AUTOCOMPLETE_TEXT_LORAS``,
+    ``ZIPN_STYLE_GALLERY_BUTTON``) that the pack's own frontend JS renders as an
+    editable widget; those can't be told apart from a connection socket by schema
+    alone, so they are recognized per-instance via ``socket_names`` in the slot
+    walk (see ``_is_custom_widget``), not here."""
     if not isinstance(spec, list | tuple) or not spec:
         return False
     kind = spec[0]
@@ -91,6 +102,23 @@ def is_widget_input(spec: Any) -> bool:
     if kind in ("COMBO", DYNAMIC_COMBO_TYPE):  # V3-style COMBO / dynamic combo
         return True
     return kind in PRIMITIVE_TYPES
+
+
+def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bool:
+    """True if this input is a custom widget-like type the frontend JS renders as
+    a widget rather than a socket. Recognized only with instance context: a
+    custom-typed input that the node did NOT serialize as a socket
+    (``name not in socket_names``) can only be a JS widget (the frontend always
+    emits real connection sockets in the node's ``inputs`` array). Without
+    ``socket_names`` (schema/fresh context) we can't tell, so return False."""
+    if socket_names is None or is_widget_input(spec):
+        return False
+    if not isinstance(spec, list | tuple) or not spec:
+        return False
+    kind = spec[0]
+    if _opts(spec).get("forceInput"):
+        return False
+    return isinstance(kind, str) and kind != "*" and name not in socket_names
 
 
 # --- dynamic combo helpers ---------------------------------------------------
@@ -129,14 +157,18 @@ def _dynamic_sub_inputs(option: dict[str, Any] | None) -> Iterator[tuple[str, An
 # --- positional slot / value model -------------------------------------------
 
 
-def _entries(schema: dict[str, Any], key_for: KeyResolver) -> Iterator[tuple[str, Any]]:
+def _entries(
+    schema: dict[str, Any], key_for: KeyResolver, socket_names: set[str] | None = None
+) -> Iterator[tuple[str, Any]]:
     """Yield (slot_name, spec) over widget slots in positional order.
 
     ``spec`` is None for synthetic control/upload slots. A dynamic combo expands
     to its main slot (spec = the dynamic spec) immediately followed by the
     selected option's sub-widget slots, whose names are dotted
     (``parent.child``) and may recurse. ``key_for`` picks the selected key for
-    each dynamic combo from its dotted prefix / flat position.
+    each dynamic combo from its dotted prefix / flat position. ``socket_names``
+    (the node instance's declared input sockets) lets custom widget-like inputs
+    be counted - see ``_is_custom_widget``.
     """
     pos = 0
 
@@ -165,7 +197,7 @@ def _entries(schema: dict[str, Any], key_for: KeyResolver) -> Iterator[tuple[str
             pos += 1
 
     for name, spec in _iter_schema_inputs(schema):
-        if is_widget_input(spec):
+        if is_widget_input(spec) or _is_custom_widget(name, spec, socket_names):
             yield from walk(name, spec)
 
 
@@ -193,16 +225,23 @@ def _schema(class_type: str, object_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def widget_slot_names(
-    class_type: str, object_info: dict[str, Any], widgets_values: Any = None
+    class_type: str,
+    object_info: dict[str, Any],
+    widgets_values: Any = None,
+    socket_names: set[str] | None = None,
 ) -> list[str]:
     """Ordered widgets_values slot names for a node, including synthetic slots.
 
     Dynamic combos expand per ``widgets_values`` (the selected key picks which
     sub-widgets appear); without it, each dynamic combo expands to its default
-    option - matching a freshly created node.
+    option - matching a freshly created node. Pass ``socket_names`` (the node's
+    declared input sockets) so custom JS-widget inputs are counted.
     """
     schema = _schema(class_type, object_info)
-    return [name for name, _ in _entries(schema, _positional_resolver(widgets_values))]
+    return [
+        name
+        for name, _ in _entries(schema, _positional_resolver(widgets_values), socket_names)
+    ]
 
 
 def _default_for(spec: Any) -> Any:
@@ -242,7 +281,10 @@ def widget_defaults(
 
 
 def widget_specs(
-    class_type: str, object_info: dict[str, Any], widgets_values: Any = None
+    class_type: str,
+    object_info: dict[str, Any],
+    widgets_values: Any = None,
+    socket_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """{slot_name: spec} for the real (non-synthetic) widget slots, dynamic
     combos expanded per the current selection. Used to validate values,
@@ -250,7 +292,7 @@ def widget_specs(
     schema = _schema(class_type, object_info)
     return {
         name: spec
-        for name, spec in _entries(schema, _positional_resolver(widgets_values))
+        for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names)
         if spec is not None
     }
 
@@ -290,41 +332,104 @@ def all_slot_names(class_type: str, object_info: dict[str, Any]) -> list[str]:
 
 
 def widgets_to_named(
-    class_type: str, widgets_values: list[Any], object_info: dict[str, Any]
+    class_type: str,
+    widgets_values: list[Any],
+    object_info: dict[str, Any],
+    socket_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """Map a positional widgets_values array to {input_name: value}.
 
     Synthetic slots are included under their suffixed names; dynamic-combo
     sub-widgets under dotted names. A short or long array is tolerated (custom
     frontend versions drift): missing slots are omitted, extras ignored.
+    ``socket_names`` (the node's declared sockets) lets custom JS-widget inputs
+    be mapped too.
     """
     if isinstance(widgets_values, dict):  # some nodes serialize as dict already
         return dict(widgets_values)
     named: dict[str, Any] = {}
-    slots = widget_slot_names(class_type, object_info, widgets_values)
+    slots = widget_slot_names(class_type, object_info, widgets_values, socket_names)
     for slot, value in zip(slots, widgets_values or [], strict=False):
         named[slot] = value
     return named
 
 
 def named_for_api(
-    class_type: str, widgets_values: Any, object_info: dict[str, Any]
+    class_type: str,
+    widgets_values: Any,
+    object_info: dict[str, Any],
+    socket_names: set[str] | None = None,
 ) -> dict[str, Any]:
     """Named widget inputs for the /prompt API. Like widgets_to_named, but every
     dynamic-combo slot (the main key and its selected option's dotted
     sub-widgets) is guaranteed present - defaulted when an older save dropped
     it - so a graph containing V3 combos stays runnable. Regular optional
-    widgets are left as-is (dynamic nodes legitimately omit unused ones)."""
-    named = widgets_to_named(class_type, widgets_values, object_info)
+    widgets are left as-is (dynamic nodes legitimately omit unused ones).
+    ``socket_names`` lets custom JS-widget inputs (e.g. LoraManager's autocomplete
+    box) survive UI->API conversion instead of being dropped."""
+    named = widgets_to_named(class_type, widgets_values, object_info, socket_names)
     if isinstance(widgets_values, dict):
         return named
     schema = _schema(class_type, object_info)
-    for name, spec in _entries(schema, _positional_resolver(widgets_values)):
+    for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names):
         if spec is None or name in named:
             continue
         if is_dynamic_combo(spec) or "." in name:
             named[name] = _default_for(spec)
     return named
+
+
+def roll_seed_controls(
+    class_type: str,
+    widgets_values: Any,
+    object_info: dict[str, Any],
+    rng: random.Random | None = None,
+    socket_names: set[str] | None = None,
+) -> tuple[Any, bool]:
+    """Mirror the frontend's ``control_after_generate`` re-roll for one node.
+
+    The backend /prompt endpoint runs whatever literal seed is submitted; only
+    the browser bumps/randomizes the value between queues. So a headless run
+    leaves seeds fixed unless we roll them ourselves. For each seed widget whose
+    adjacent ``__control_after_generate`` slot is randomize/increment/decrement,
+    update the seed in place: randomize -> fresh int in [min, max]; increment/
+    decrement -> +/- step, clamped. Returns (new_values, changed)."""
+    if not isinstance(widgets_values, list):
+        return widgets_values, False
+    slots = widget_slot_names(class_type, object_info, widgets_values, socket_names)
+    specs = widget_specs(class_type, object_info, widgets_values, socket_names)
+    index = {name: i for i, name in enumerate(slots)}
+    values = list(widgets_values)
+    roller = rng or random
+    changed = False
+    for ctrl_name in slots:
+        if not ctrl_name.endswith(CONTROL_SUFFIX):
+            continue
+        seed_name = ctrl_name[: -len(CONTROL_SUFFIX)]
+        ci, si = index.get(ctrl_name), index.get(seed_name)
+        if ci is None or si is None or ci >= len(values) or si >= len(values):
+            continue
+        mode = values[ci]
+        if mode not in ("randomize", "increment", "decrement"):
+            continue
+        current = values[si]
+        if not isinstance(current, int) or isinstance(current, bool):
+            continue
+        opts = _opts(specs.get(seed_name))
+        low = int(opts.get("min") or 0)
+        high = min(int(opts.get("max") or MAX_SEED), MAX_SEED)
+        step = int(opts.get("step") or 1) or 1
+        if mode == "randomize":
+            new = roller.randint(low, high)
+        elif mode == "increment":
+            new = current + step
+        else:
+            new = current - step
+        new = max(low, min(high, new))
+        if new != current:
+            values[si] = new
+            changed = True
+    return values, changed
 
 
 def named_to_widgets(

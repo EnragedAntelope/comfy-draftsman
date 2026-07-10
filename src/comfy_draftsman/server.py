@@ -8,6 +8,7 @@ process, created lazily.
 from __future__ import annotations
 
 import base64
+import contextlib
 import difflib
 import json
 import os
@@ -128,6 +129,31 @@ def _wf(workflow_id: str) -> Workflow:
 
 def _clip(v: Any) -> Any:
     return v[:120] + "…" if isinstance(v, str) and len(v) > 120 else v
+
+
+_LEVEL_RANK = {"error": 0, "warning": 1, "info": 2}
+_FINDINGS_CAP = 40
+
+
+def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort findings most-severe first and cap the number returned to the model,
+    appending a marker if truncated. Every error is always kept - only lower
+    levels are trimmed - so nothing blocking is hidden and tokens stay bounded."""
+    ordered = sorted(findings, key=lambda f: _LEVEL_RANK.get(f.get("level"), 3))
+    if len(ordered) <= _FINDINGS_CAP:
+        return ordered
+    errors = [f for f in ordered if f.get("level") == "error"]
+    keep = max(_FINDINGS_CAP, len(errors))  # never drop an error to make room
+    capped = ordered[:keep]
+    capped.append(
+        {
+            "level": "info",
+            "code": "findings-truncated",
+            "message": f"…{len(ordered) - len(capped)} more finding(s) omitted; fix "
+            "the ones above first, then re-validate",
+        }
+    )
+    return capped
 
 
 def _widget_preview(n) -> Any:
@@ -862,7 +888,7 @@ async def validate_workflow(workflow_id: str) -> dict[str, Any]:
     findings = validate(_wf(workflow_id), await _object_info(refresh=True))
     return {
         "ok": not any(f["level"] == "error" for f in findings),
-        "findings": findings,
+        "findings": _cap_findings(findings),
     }
 
 
@@ -885,7 +911,7 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
         ]
     result: dict[str, Any] = {
         "ok": not findings,
-        "findings": findings,
+        "findings": _cap_findings(findings),
         "missing_node_packs": registry_result,
         "capability_impact": capability_impact,
         "family": knowledge.detect_family(
@@ -937,12 +963,19 @@ async def run_workflow(
     wait: bool = True,
     allow_invalid: bool = False,
     save_dir: str = "",
+    roll_seeds: bool = True,
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
     node errors if it failed, output file refs, and an inline preview thumbnail so
     you can SEE the result (view_output fetches full size / other outputs).
     wait=False returns {status: queued, prompt_id} immediately - poll
     get_run_status(prompt_id). Prove a workflow works before saving/delivering.
+
+    roll_seeds=True (default) mirrors the browser: any seed whose
+    control_after_generate is randomize/increment/decrement is re-rolled before
+    submit and the new value persisted (the raw /prompt API never does this, so
+    headless runs would otherwise repeat the same seed forever). Pass
+    roll_seeds=False for a deterministic re-run of the exact stored seeds.
 
     allow_invalid=True submits even when the local validator reports errors
     (ComfyUI is the final judge; use it if a valid graph is being wrongly
@@ -954,6 +987,12 @@ async def run_workflow(
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
+    if roll_seeds and wf.apply_seed_control(object_info):
+        # persist so inspect_workflow reflects what ran and increment/decrement
+        # advance across calls; best-effort (a read-only session dir shouldn't
+        # block the run)
+        with contextlib.suppress(OSError):
+            _session().persist(workflow_id)
     if not allow_invalid:
         errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
         if errors:
