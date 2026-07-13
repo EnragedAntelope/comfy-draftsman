@@ -288,19 +288,19 @@ async def test_view_output_rejects_traversal(wired):
 
 async def test_view_output_downscales_by_default(wired):
     result = await server.view_output("out_00001_.png")
-    image = result["image"]
+    image = result[1]
     assert isinstance(image, Image)
     assert max(PILImage.open(io.BytesIO(image.data)).size) == 1024
     result = await server.view_output("out_00001_.png")
-    image = result["image"]
+    image = result[1]
     assert isinstance(image, Image)
     assert max(PILImage.open(io.BytesIO(image.data)).size) == 1024
     result = await server.view_output("out_00001_.png")
-    image = result["image"]
+    image = result[1]
     assert isinstance(image, Image)
     assert max(PILImage.open(io.BytesIO(image.data)).size) == 1024
     result = await server.view_output("out_00001_.png")
-    image = result["image"]
+    image = result[1]
     assert isinstance(image, Image)
     assert max(PILImage.open(io.BytesIO(image.data)).size) == 1024
 
@@ -308,19 +308,19 @@ async def test_view_output_downscales_by_default(wired):
 async def test_view_output_full_size(wired):
     client, _ = wired
     result = await server.view_output("out_00001_.png", max_dim=None)
-    image = result["image"]
+    image = result[1]
     assert image.data == client.output_bytes
     client, _ = wired
     result = await server.view_output("out_00001_.png", max_dim=None)
-    image = result["image"]
+    image = result[1]
     assert image.data == client.output_bytes
     client, _ = wired
     result = await server.view_output("out_00001_.png", max_dim=None)
-    image = result["image"]
+    image = result[1]
     assert image.data == client.output_bytes
     client, _ = wired
     result = await server.view_output("out_00001_.png", max_dim=None)
-    image = result["image"]
+    image = result[1]
     assert image.data == client.output_bytes
 
 

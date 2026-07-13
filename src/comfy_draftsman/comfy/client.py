@@ -245,6 +245,11 @@ class ComfyClient:
         async with websockets.connect(self._ws_url(), max_size=32 * 1024 * 1024) as ws:
             queued = await self.queue_prompt(api_prompt, extra_data=extra_data)
             prompt_id = queued["prompt_id"]
+            # ComfyUI accepts a prompt (HTTP 200 + prompt_id) yet still returns
+            # node_errors for nodes it rejected at validation, executing only the
+            # rest of the graph. Capture them so a partial run isn't reported as a
+            # clean success with mysteriously-empty outputs.
+            partial_node_errors = queued.get("node_errors") or {}
             error: dict[str, Any] | None = None
             async with asyncio.timeout(timeout):
                 while True:
@@ -289,6 +294,8 @@ class ComfyClient:
                 "message": error.get("exception_message"),
                 "type": error.get("exception_type"),
             }
+        if partial_node_errors:
+            result["node_errors"] = partial_node_errors
         return result
 
     async def fetch_output(self, item: dict[str, Any]) -> bytes:

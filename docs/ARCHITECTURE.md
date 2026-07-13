@@ -98,8 +98,27 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   NotImplementedError.
 - **proxyWidgets** — removing an inner node may invalidate instance
   proxyWidgets overrides — a warning is returned in the op result.
-- **Image-metadata metadata** — `view_output` returns a `meta` dict alongside
-  images so text-only models can describe renders.
+- **FastMCP image returns must be a bare `Image` or a list element** — a dict
+  that *contains* an `Image` (e.g. `{"image": Image(...)}`) is repr'd into text
+  and never renders. `view_output` and `run_workflow`'s inline preview both
+  return the **list** form `[{"meta": {...}}, Image(...)]` (a sibling meta dict
+  carries dimensions/filename for text-only models). Never wrap an `Image` in a
+  dict.
+- **Partial-accept is not success.** ComfyUI can return **HTTP 200 with
+  `node_errors`** (not 400): it queues the prompt, executes the still-valid
+  subgraph, and drops the rejected nodes' branches. `queue_prompt` only *raises*
+  on 400, so those node_errors ride back inside the 200 body;
+  `run_and_wait` threads them onto the result and `run_workflow` downgrades
+  `status` to `"partial"` with a loud `warning` (and `wait=False` surfaces them
+  on the `queued` response). A run that touched only text-utility nodes in 51 ms
+  otherwise looks like a clean success with mysteriously-empty outputs.
+- **Big-int seeds survive save, not the host transport.** Python `json` keeps
+  arbitrary-precision ints, so `save_workflow`/`export` write seeds like
+  `17190566679778241971` exactly. If a seed reads back rounded
+  (`...43000`) in a tool *response*, that is the MCP host's JS-side
+  `JSON.parse` coercing >2^53 to a double — display-only, not in the saved
+  file. Draftsman does not (and cannot) fix the host's number handling; never
+  "correct" a seed to match a rounded readback.
 - **Frontend-only behaviors are mirrored at submit (`to_api`/`run_workflow`), not
   in the saved graph.** The raw `/prompt` backend never runs the JS the browser
   does, so draftsman replays it for headless parity:
@@ -111,11 +130,15 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
     (`widgets._is_custom_widget`, gated on `socket_names`). Schema-only paths
     (fresh-node defaults, `add_node`) stay conservative — never infer a custom
     widget without instance context. When such an input is instead exposed as a
-    widget-backed slot (carries a `widget` marker) and its value is pack-specific
-    JS state (a dict/list, not a scalar), it genuinely can't be serialized to the
-    raw API — `validate` blocks it with a `js-widget-input` error (with the
-    remediation) rather than silently no-opping the branch. A generic tool cannot
-    replay a pack's client-side JS; the honest outcome is a loud, actionable stop.
+    widget-backed slot (carries a `widget` marker) and is unconnected, its value
+    is treated as pack-specific JS state the raw API can't replay — `validate`
+    blocks it with a `js-widget-input` error (with the remediation) rather than
+    silently no-opping the branch (validate.py:388). This block is currently
+    value-agnostic (it fires whether the stored value is a dict/list or a plain
+    scalar); making it scalar-aware was deliberately not done because the live
+    server rejected hand-serialized scalar values anyway — see the OPEN TODO. A
+    generic tool cannot replay a pack's client-side JS; the honest outcome is a
+    loud, actionable stop.
   - *`%date:FORMAT%` filename tokens:* substituted in `to_api` only (the saved UI
     doc keeps the literal token for the browser). `.NET`-style tokens, longest
     first (`yyyy` before `yy`). See `model._substitute_filename_tokens`.
@@ -130,11 +153,50 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   warning. Keeps the "is this model installed" check strict without flooding on
   client-populated pickers. `validate_workflow`/`diagnose_workflow` also cap
   returned findings (errors always kept) for token discipline.
+- **Display/output nodes overflow `widgets_values` on purpose.** ShowText,
+  rgthree "Display Any", and preview nodes stash the text/data they display into
+  `widgets_values` beyond their declared schema widgets. A count *overflow* on a
+  node whose schema sets `output_node` is expected and suppressed (not
+  `widget-count-drift`); a shortfall, or any mismatch on a non-output node, still
+  reports.
 
 ## Remaining TODOs
 
-None open. Recently closed:
+Open:
 
+- **[OPEN] Widget-backed custom-JS inputs stay a loud stop, by design.** Packs
+  like LoraManager (`text` / `AUTOCOMPLETE_TEXT_LORAS`) and StyleStringInjector2
+  (`gallery` / `ZIPN_STYLE_GALLERY_BUTTON`) expose an input as a widget-backed
+  slot whose value is *pack-specific frontend JS state* (e.g. LoraManager's
+  effective lora text is resolved client-side from the `active:true` entries at
+  queue time). `validate` blocks these with `js-widget-input` (see Gotchas) and
+  `to_api` can't emit them. A generic "just emit the scalar" fix was
+  **considered and rejected**: on the live instance the server *rejected* a
+  hand-serialized `text` until it was rebuilt from the active entries, so
+  emitting a raw value would trade a loud, honest error for a silently-wrong
+  render. A real fix would need per-pack resolution logic (out of scope for a
+  generic tool); until then the honest stop stands. Workaround for a caller that
+  must run such a graph headlessly: connect the input to a plain-STRING source,
+  swap in the pack's plain-STRING node variant, or run it from the ComfyUI
+  frontend. (Code note: validate.py:388 currently blocks on any widget-backed
+  unconnected custom input regardless of value type; the surrounding docs' hint
+  at value-awareness is aspirational, not implemented — see above for why.)
+- **[MAYBE] `get_run_status` partial-run detection.** `run_workflow` now flags
+  partial execution from the submit-time `node_errors`, but a `wait=False` run
+  polled purely through `get_run_status` can't see them (they aren't in
+  `/history`). Could compare the submitted prompt's output nodes
+  (`history[prompt_id]["prompt"]`) against the produced `outputs` to flag a run
+  that dropped SaveImage/PreviewImage branches. Lower priority — the `wait=False`
+  queue response already carries `node_errors`.
+
+Recently closed:
+
+- **[DONE, round 13] Live-testing fixes** — `view_output` list-form image return
+  (was a dict-wrapped `Image` that never rendered); partial-accept `node_errors`
+  surfaced through `run_and_wait`/`run_workflow` (was a silent "success" with
+  empty outputs); `widget-count-drift` suppressed on display/output nodes;
+  big-int seed rounding traced to host transport (saved files are exact). See
+  Gotchas.
 - **[DONE, round 12] Headless API-submission parity** — custom JS-widget input
   serialization, `%date:%` token substitution, seed `control_after_generate`
   re-roll, case-insensitive connect, epsilon-`min` step alignment, and

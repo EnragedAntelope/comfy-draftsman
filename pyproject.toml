@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "comfy-draftsman"
-version = "0.4.1"
+version = "0.4.2"
 description = "Local-first MCP server that drafts, organizes, validates, and runs ComfyUI workflows - saved as clean, labeled, annotated UI-format graphs anyone can read."
 readme = "README.md"
 license = "MIT"

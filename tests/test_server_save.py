@@ -93,11 +93,13 @@ def view_wired(config, monkeypatch):
 
 
 async def test_view_output_returns_meta(view_wired):
-    """view_output returns a meta dict with image dimensions and ref info."""
+    """view_output returns list form: a meta dict plus a renderable Image block."""
     result = await server.view_output("test.png")
-    assert "meta" in result, "meta key must be present"
-    assert "image" in result, "image key must be present for vision models"
-    meta = result["meta"]
+    assert isinstance(result, list) and len(result) == 2
+    meta_block, image = result
+    from mcp.server.fastmcp.utilities.types import Image
+    assert isinstance(image, Image), "image block must be present for vision models"
+    meta = meta_block["meta"]
     assert meta["filename"] == "test.png"
     assert meta["width"] == 320
     assert meta["height"] == 200
@@ -109,7 +111,7 @@ async def test_view_output_returns_meta(view_wired):
 async def test_view_output_meta_with_custom_ref(view_wired):
     """view_output meta reflects the passed filename, subfolder, and type."""
     result = await server.view_output("result.png", subfolder="sub", type="temp")
-    meta = result["meta"]
+    meta = result[0]["meta"]
     assert meta["filename"] == "result.png"
     assert meta["subfolder"] == "sub"
     assert meta["type"] == "temp"

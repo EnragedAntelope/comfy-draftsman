@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.2 — Round 13: live-testing fixes
+
+A long custom-node-heavy testing session (krea2 speed optimization) surfaced a handful of correctness and noise issues in the execution/inspection path. None change the workflow model; all make what draftsman *reports* match what ComfyUI actually did.
+
+### Fixed
+
+- **Inline images now render (`view_output`)** — `view_output` returned a dict *containing* an `Image` object, which FastMCP serializes as a Python `repr` string (`<...Image object at 0x...>`) rather than an image content block, so the picture never displayed. It now returns the list form `[{"meta": {...}}, Image(...)]` — the same shape `run_workflow`'s preview already uses — so the render is actually visible while text-only models still get the dimensions/filename `meta`.
+- **Partial runs no longer masquerade as success (`run_workflow`)** — ComfyUI can return **HTTP 200 with `node_errors`** (not 400): it queues the prompt, runs the still-valid subgraph, and drops the rejected nodes' branches. Those node_errors were swallowed, so a run that executed only a few text-utility nodes in ~50 ms reported bare `status: success` with empty outputs. `run_and_wait` now threads the submit-time node_errors onto the result; `run_workflow` downgrades `status` to `"partial"` with a loud `warning`, and `wait=False` surfaces them on the `queued` response.
+- **Display-node validation noise removed** — `widget-count-drift` fired on nearly every ShowText / rgthree "Display Any" / preview node, which stash the text they display into `widgets_values` beyond their declared schema widgets. A count overflow on an `output_node` is now recognized as expected and suppressed; shortfalls and non-output-node mismatches still report.
+
+### Notes
+
+- **Big-int seeds** — confirmed that `save_workflow`/`export` preserve seeds `> 2^53` exactly (Python `json` keeps arbitrary-precision ints). A rounded seed in a tool *response* is the MCP host's JS-side `JSON.parse` coercing to a double (display-only, not in the saved file); draftsman intentionally does not alter seed values to match a rounded readback.
+- **Custom widget-backed JS inputs** (LoraManager `text`, StyleStringInjector2 `gallery`) remain a loud `js-widget-input` stop by design — a generic scalar-emit fix was considered and rejected because the live server rejected hand-serialized values that weren't rebuilt by the pack's own client-side JS. Tracked as an OPEN item in `docs/ARCHITECTURE.md`.
+
+### Changed
+
+- **Version bump** — `0.4.1` → `0.4.2`.
+
 ## 0.4.1 — Round 12: headless API-submission parity
 
 Live testing against a custom-node-heavy workflow surfaced gaps where a graph that runs in the browser could not be driven through `run_workflow`, because several behaviors are implemented by ComfyUI's frontend JS and the raw `/prompt` backend never performs them. draftsman now mirrors them at submit time (as it already mirrors subgraph flattening).

@@ -159,7 +159,7 @@ async def test_run_thumbnail_then_view_full_size(live_server, live_client):
     assert max(thumb.size) <= live_server.PREVIEW_MAX_DIM
 
     ref = payload["outputs"][0]
-    full = (await live_server.view_output(ref["filename"], ref["subfolder"], max_dim=None))["image"]
+    full = (await live_server.view_output(ref["filename"], ref["subfolder"], max_dim=None))[1]
     assert isinstance(full, Image)
     assert max(PILImage.open(io.BytesIO(full.data)).size) == 640  # render size
 
@@ -206,7 +206,7 @@ async def test_upload_image_roundtrip(live_server):
 
     back = (await live_server.view_output(
         result["uploaded"]["name"], result["uploaded"].get("subfolder", ""), type="input"
-    ))["image"]
+    ))[1]
     assert isinstance(back, Image)
     assert PILImage.open(io.BytesIO(back.data)).size == (32, 32)
 

@@ -954,6 +954,13 @@ async def port_workflow(workflow_id: str, target_family: str) -> dict[str, Any]:
 
 PREVIEW_MAX_DIM = 768  # inline previews are thumbnails; view_output serves full size
 
+_PARTIAL_RUN_WARNING = (
+    "ComfyUI accepted the prompt but REJECTED one or more nodes at queue time and "
+    "executed only the rest of the graph - expected outputs (images/video) may be "
+    "missing. Inspect node_errors, fix the offending nodes (diagnose_workflow / "
+    "edit_workflow), and re-run. Do NOT treat this as a complete render."
+)
+
 
 @mcp.tool(annotations=_WRITE_INSTANCE)
 async def run_workflow(
@@ -1026,12 +1033,25 @@ async def run_workflow(
             queued = await _client().queue_prompt(api, extra_data=extra_data, client_id=tracker.client_id)
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
-        return {"status": "queued", "prompt_id": queued["prompt_id"]}
+        response = {"status": "queued", "prompt_id": queued["prompt_id"]}
+        if queued.get("node_errors"):
+            response["node_errors"] = queued["node_errors"]
+            response["warning"] = _PARTIAL_RUN_WARNING
+        return response
     try:
         result = await _client().run_and_wait(api, timeout=timeout_seconds, extra_data=extra_data)
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
-    if dest_root is not None and result["status"] == "success":
+    # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
+    # relocating/previewing whatever DID render, but downgrade to "partial" so the
+    # dropped outputs aren't mistaken for a clean run.
+    node_errors = result.pop("node_errors", None)
+    ran_ok = result["status"] == "success"
+    if node_errors:
+        result["status"] = "partial"
+        result["node_errors"] = node_errors
+        result["warning"] = _PARTIAL_RUN_WARNING
+    if dest_root is not None and ran_ok:
         image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
         saved, save_errors = await _relocate_outputs(_client(), image_items, dest_root)
         if saved:
@@ -1039,11 +1059,11 @@ async def run_workflow(
             result["dest_dir"] = str(dest_root)
         if save_errors:
             result["save_errors"] = save_errors
-    elif mount_error and result["status"] == "success":
+    elif mount_error and ran_ok:
         # COMFYUI_MOUNT_DIR is configured but unusable - say so instead of
         # silently skipping the relocation the user asked for
         result["save_errors"] = [mount_error]
-    if return_preview and result["status"] == "success":
+    if return_preview and ran_ok:
         image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
         if image_items:
             data = await _client().fetch_output(image_items[0])
@@ -1083,17 +1103,21 @@ async def view_output(
         data, fmt, width, height = downscale_image(data, max_dim)
     except ValueError as e:
         return {"error": str(e), "hint": "only image outputs can be viewed inline"}
-    return {
-        "image": Image(data=data, format=fmt),
-        "meta": {
+    # FastMCP serializes an Image only as a standalone return or a list element -
+    # a dict *containing* an Image gets repr'd into text and never renders. Return
+    # the image block plus a sibling meta dict (same list form as run_workflow's
+    # preview) so text-only models still get the dimensions/filename.
+    return [
+        {"meta": {
             "filename": filename,
             "width": width,
             "height": height,
             "format": fmt,
             "subfolder": subfolder,
             "type": type,
-        },
-    }
+        }},
+        Image(data=data, format=fmt),
+    ]
 
 
 def _resolve_dest(dest_dir: str) -> tuple[Path | None, str | None]:

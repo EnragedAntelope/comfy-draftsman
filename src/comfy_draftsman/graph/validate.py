@@ -263,7 +263,13 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 if w.is_widget_input(spec)
             )
             dynamic_short = len(node.widgets_values) < len(slots) and optional_widgets >= 6
-            if dynamic_short:
+            # display/output nodes (ShowText, rgthree "Display Any", preview nodes)
+            # stash the text/data they show into widgets_values beyond their declared
+            # schema widgets - an overflow there is the norm, not schema drift.
+            display_overflow = len(node.widgets_values) > len(slots) and schema.get("output_node")
+            if display_overflow:
+                pass  # expected for display nodes - stay silent (pure noise otherwise)
+            elif dynamic_short:
                 findings.append(
                     _finding(
                         "info",
