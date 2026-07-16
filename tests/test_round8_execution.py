@@ -178,12 +178,13 @@ class RunClient:
     async def get_object_info(self, refresh: bool = False):
         return {}
 
-    async def queue_prompt(self, api, extra_data=None, client_id=None):
+    async def queue_prompt(self, api, extra_data=None, client_id=None, front=False):
         self.queued_with = client_id
         self.queued_extra_data = extra_data
+        self.queued_front = front
         return {"prompt_id": "p123"}
 
-    async def run_and_wait(self, api, timeout=600.0, extra_data=None):
+    async def run_and_wait(self, api, timeout=600.0, extra_data=None, front=False):
         self.run_extra_data = extra_data
         return {
             "status": "success",

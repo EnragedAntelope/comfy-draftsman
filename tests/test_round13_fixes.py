@@ -56,10 +56,13 @@ class PartialRunClient:
     async def get_object_info(self, refresh=False):
         return {}
 
-    async def queue_prompt(self, api, extra_data=None, client_id=None):
+    async def get_queue(self):
+        return {"queue_running": [], "queue_pending": []}
+
+    async def queue_prompt(self, api, extra_data=None, client_id=None, front=False):
         return {"prompt_id": "p1", "node_errors": self._node_errors}
 
-    async def run_and_wait(self, api, timeout=600.0, extra_data=None):
+    async def run_and_wait(self, api, timeout=600.0, extra_data=None, front=False):
         # run_and_wait threads the queue-time node_errors through onto the result
         return {"status": "success", "prompt_id": "p1", "outputs": [], "node_errors": self._node_errors}
 

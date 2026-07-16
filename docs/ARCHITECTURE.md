@@ -153,6 +153,23 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   warning. Keeps the "is this model installed" check strict without flooding on
   client-populated pickers. `validate_workflow`/`diagnose_workflow` also cap
   returned findings (errors always kept) for token discipline.
+- **Display nodes are layout companions, not outputs.** `organize_workflow`
+  treats Show Text-style and `PreviewImage`-style nodes as *companions*: they
+  inherit the stage of the node they display and are glued directly beneath it
+  (`annotate._companion_sources` + `apply_staged_layout(companion_of=...)`).
+  Grouping them into a distant Output band made readers trace wires across the
+  canvas to pair previews with samplers — the original layout complaint.
+  SaveImage-style disk writers are NOT companions. An unwired display node
+  falls back to its classified stage. Empty-latent canvas nodes classify as
+  `inputs` (they're the resolution knob), so all user-tweakable things sit on
+  the left edge.
+- **Front-of-queue is additive, never destructive.** `POST /prompt` accepts
+  `"front": true` — the prompt runs next after the current job; pending jobs
+  stay queued. `run_workflow(front=None)` (default) refuses to queue when ≥2
+  prompts are pending and returns `queue_busy` so the USER decides; it never
+  clears/interrupts anything. The check is best-effort (an unreachable
+  `/queue` never blocks a run) and happens before seeds are rolled, so a
+  gated run doesn't advance increment seeds.
 - **Display/output nodes overflow `widgets_values` on purpose.** ShowText,
   rgthree "Display Any", and preview nodes stash the text/data they display into
   `widgets_values` beyond their declared schema widgets. A count *overflow* on a
@@ -181,16 +198,14 @@ Open:
   frontend. (Code note: validate.py:388 currently blocks on any widget-backed
   unconnected custom input regardless of value type; the surrounding docs' hint
   at value-awareness is aspirational, not implemented — see above for why.)
-- **[MAYBE] `get_run_status` partial-run detection.** `run_workflow` now flags
-  partial execution from the submit-time `node_errors`, but a `wait=False` run
-  polled purely through `get_run_status` can't see them (they aren't in
-  `/history`). Could compare the submitted prompt's output nodes
-  (`history[prompt_id]["prompt"]`) against the produced `outputs` to flag a run
-  that dropped SaveImage/PreviewImage branches. Lower priority — the `wait=False`
-  queue response already carries `node_errors`.
-
 Recently closed:
 
+- **[DONE, round 14] Layout companions + queue etiquette** — display nodes
+  (Show Text / PreviewImage) glued beneath their source instead of a far-away
+  Output group; empty-latent canvas nodes moved to the Inputs band;
+  `run_workflow(front=...)` queue-busy gate and front-of-queue submits;
+  `get_run_status` partial-accept detection (the round-13 `[MAYBE]` — the
+  stored history entry's submitted prompt vs `outputs_to_execute`).
 - **[DONE, round 13] Live-testing fixes** — `view_output` list-form image return
   (was a dict-wrapped `Image` that never rendered); partial-accept `node_errors`
   surfaced through `run_and_wait`/`run_workflow` (was a silent "success" with

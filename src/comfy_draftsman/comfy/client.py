@@ -90,11 +90,15 @@ class ComfyClient:
         api_prompt: dict[str, Any],
         extra_data: dict[str, Any] | None = None,
         client_id: str | None = None,
+        front: bool = False,
     ) -> dict[str, Any]:
         # client_id override: non-blocking runs queue under the ProgressTracker's
         # id so ITS socket receives the per-prompt events (ComfyUI routes them
         # to the queuing client's socket only).
         payload: dict[str, Any] = {"prompt": api_prompt, "client_id": client_id or self.client_id}
+        if front:
+            # run next after the current job finishes; pending jobs stay queued
+            payload["front"] = True
         if extra_data:
             payload["extra_data"] = extra_data
         response = await self._http.post("/prompt", json=payload)
@@ -235,7 +239,11 @@ class ComfyClient:
         return f"{scheme}://{host}/ws?clientId={client_id or self.client_id}"
 
     async def run_and_wait(
-        self, api_prompt: dict[str, Any], timeout: float = 600.0, extra_data: dict[str, Any] | None = None
+        self,
+        api_prompt: dict[str, Any],
+        timeout: float = 600.0,
+        extra_data: dict[str, Any] | None = None,
+        front: bool = False,
     ) -> dict[str, Any]:
         """Queue a prompt and wait for completion via the /ws event stream.
 
@@ -243,7 +251,7 @@ class ComfyClient:
         history), "error"?}.
         """
         async with websockets.connect(self._ws_url(), max_size=32 * 1024 * 1024) as ws:
-            queued = await self.queue_prompt(api_prompt, extra_data=extra_data)
+            queued = await self.queue_prompt(api_prompt, extra_data=extra_data, front=front)
             prompt_id = queued["prompt_id"]
             # ComfyUI accepts a prompt (HTTP 200 + prompt_id) yet still returns
             # node_errors for nodes it rejected at validation, executing only the

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import knowledge
-from .layout import Y_GAP, apply_staged_layout
+from .layout import Y_GAP, apply_staged_layout, is_text_display
 from .model import Group, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
@@ -41,8 +41,17 @@ _POST_HINTS = ("detailer", "upscale", "facerestore", "interpolat", "rife", "segs
 _KNOB_WIDGETS = {"text", "prompt", "wildcard_text", "width", "height", "image"}
 
 
+def _is_canvas_node(class_type: str) -> bool:
+    """Empty-latent canvas nodes (EmptyLatentImage & family) - they ARE the
+    resolution knob, so they belong with the user-facing inputs on the left."""
+    name = class_type.lower()
+    return "empty" in name and "latent" in name
+
+
 def classify(node: Node, object_info: dict[str, Any]) -> str:
     if node.type in _INPUT_CLASSES:
+        return "inputs"
+    if _is_canvas_node(node.type):
         return "inputs"
     schema = object_info.get(node.type)
     name = node.type.lower()
@@ -75,6 +84,50 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
     if any(hint in name for hint in _POST_HINTS):
         return "post"
     return "sampling"
+
+
+def _is_display_companion(node: Node, object_info: dict[str, Any]) -> bool:
+    """Display-only nodes (Show Text, PreviewImage...) that exist to show what
+    another node produced. They must sit NEXT TO that node, not be swept into a
+    far-away Output group - a reader pairing six previews with six samplers by
+    following wires across the canvas is exactly the layout failure this fixes.
+    SaveImage-style disk writers are NOT companions; they are real outputs."""
+    if is_text_display(node.type):
+        return True
+    schema = object_info.get(node.type) or {}
+    return bool(schema.get("output_node")) and "preview" in node.type.lower()
+
+
+def _companion_sources(
+    wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]
+) -> dict[int, int]:
+    """companion node id -> the (non-companion) node it displays, resolved
+    through chains of display nodes; companions inherit their source's stage."""
+    direct: dict[int, int] = {}
+    for node in wf.nodes.values():
+        if node.id not in stage_of_key or not _is_display_companion(node, object_info):
+            continue
+        src = next(
+            (
+                wf.links[s.link].origin_id
+                for s in node.inputs
+                if s.link is not None and s.link in wf.links
+                and wf.links[s.link].origin_id in stage_of_key
+            ),
+            None,
+        )
+        if src is not None:
+            direct[node.id] = src
+    resolved: dict[int, int] = {}
+    for nid, src in direct.items():
+        seen = {nid}
+        while src in direct and src not in seen:  # ShowText fed by ShowText
+            seen.add(src)
+            src = direct[src]
+        if src not in seen:
+            resolved[nid] = src
+            stage_of_key[nid] = stage_of_key[src]
+    return resolved
 
 
 ZEROOUT_TYPE = "ConditioningZeroOut"
@@ -224,7 +277,7 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
         is_knob = (
             node.type in _INPUT_CLASSES
             or editable_prompt_knob
-            or node.type in ("EmptyLatentImage", "EmptySD3LatentImage")
+            or _is_canvas_node(node.type)
         )
         if is_knob:
             node.color, node.bgcolor = GREEN
@@ -316,7 +369,10 @@ def _note_text(
     elif stage == "output":
         lines.append("💾 Finished images land here (check the filename prefix).")
     elif stage == "inputs":
-        lines.append("👇 Load your source image/media here.")
+        if any(n.type in _INPUT_CLASSES for n in members):
+            lines.append("👇 Load your source image/media here.")
+        if any(_is_canvas_node(n.type) for n in members):
+            lines.append("👇 Set the image size (width / height / batch) here.")
     if not lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
@@ -349,8 +405,10 @@ def annotate(
         for node in wf.nodes.values()
         if node.type not in ("Note", "MarkdownNote")
     }
+    # display nodes follow whatever they display (stage + position)
+    companion_of = _companion_sources(wf, object_info, stage_of_key)
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}
-    band_boxes = apply_staged_layout(wf, object_info, stage_of)
+    band_boxes = apply_staged_layout(wf, object_info, stage_of, companion_of=companion_of)
 
     titled = _title_nodes(wf, object_info)
     painted = _paint_knobs(wf, object_info, stage_of_key)
@@ -381,6 +439,8 @@ def annotate(
             )
             if not has_lora:
                 title = "\U0001f9e0 Models"
+        elif key == "inputs" and all(_is_canvas_node(n.type) for n in members):
+            title = "📐 Image Size"
         text = _note_text(key, wf, object_info, guidance, members, title=title)
         top = min_y
         if text:
@@ -417,7 +477,8 @@ def annotate(
         "variant": (guidance or {}).get("variant"),
         "stages": {STAGES[i][0]: len(m) for i, m in sorted(members_by_stage.items())},
         "applied": {
-            "layout": "staged pipeline bands (nodes repositioned)",
+            "layout": "staged pipeline bands (nodes repositioned; preview/Show Text "
+            "nodes sit beside their source)",
             "groups": [g.title for g in wf.groups],
             "guidance_notes_added": notes_added,
             "nodes_retitled": titled,

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 — Round 14: readable layouts by default + queue etiquette
+
+User feedback from real sessions: the organized layout swept every Show Text and PreviewImage node into one far-away Output group (pairing six previews with six samplers meant tracing wires across the whole canvas), and a test render had to wait behind a long existing queue.
+
+### Changed
+
+- **Display nodes stay beside their source (`organize_workflow`)** — Show Text-style nodes and `PreviewImage`-style nodes are now *companions*: they inherit the pipeline stage of the node they display and are glued directly beneath it, so the preview for a sampler chain sits inside that chain and a wildcard's Show Text sits under the wildcard. Chains of display nodes resolve to the real source; an unwired preview keeps its old Output placement. SaveImage-style disk writers still group under Output — they are real outputs, not displays.
+- **Resolution is an input, not a sampler detail** — empty-latent canvas nodes (`EmptyLatentImage` & family) now classify into the leftmost **Inputs** band (titled `📐 Image Size` when that's all it holds), with a guidance note, so everything a user typically tweaks — source media, canvas size, models/LoRAs, prompts — reads left-to-right before the tuned machinery. They were previously buried in Sampling.
+
+### Added
+
+- **Front-of-queue runs without touching the queue (`run_workflow(front=...)`)** — `front` defaults to `None`: if ≥2 prompts are already pending, **nothing is queued** and `{status: "queue_busy"}` comes back with the pending count so the user can choose. `front=True` queues the run to go *next* after the current job — existing pending jobs are never deleted or interrupted — and `front=False` waits at the back of the line. Works for both `wait=True` and `wait=False` runs.
+- **`get_run_status` detects partial accepts** — a `wait=False` run polled through `get_run_status` can now see queue-time partial accepts: the stored history entry's full submitted prompt is compared against ComfyUI's `outputs_to_execute`, and output nodes dropped at queue time downgrade the status to `"partial"` with `dropped_output_nodes` and the usual warning. Closes the round-13 `[MAYBE]` TODO.
+
+### Notes
+
+- **Version bump** — `0.4.2` → `0.5.0` (layout defaults changed; new `front` run parameter).
+
 ## 0.4.2 — Round 13: live-testing fixes
 
 A long custom-node-heavy testing session (krea2 speed optimization) surfaced a handful of correctness and noise issues in the execution/inspection path. None change the workflow model; all make what draftsman *reports* match what ComfyUI actually did.

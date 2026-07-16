@@ -206,6 +206,7 @@ def apply_staged_layout(
     object_info: dict[str, Any],
     stage_of: dict[int, int],
     origin: tuple[float, float] = (0.0, 0.0),
+    companion_of: dict[int, int] | None = None,
 ) -> dict[int, tuple[float, float, float, float]]:
     """Lay nodes out in left-to-right stage bands (models | prompts | sampling | ...).
 
@@ -213,8 +214,21 @@ def apply_staged_layout(
     chains like checkpoint -> lora -> lora stay ordered. Bands are top-aligned,
     which leaves the space above every band free for the annotator's notes.
 
+    companion_of maps display nodes (Show Text, PreviewImage...) to the node
+    they visualize; a companion is glued directly beneath its source so the
+    reader never hunts for which sampler/wildcard produced which output.
+
     Returns {stage_index: (x, y, width, height)} bounding box per band.
     """
+    companion_of = {
+        nid: src
+        for nid, src in (companion_of or {}).items()
+        if nid in stage_of and src in stage_of and nid != src
+    }
+    companions: dict[int, list[int]] = {}
+    for nid, src in sorted(companion_of.items()):
+        companions.setdefault(src, []).append(nid)
+
     rank = _ranks(wf)
     for nid in stage_of:
         node = wf.nodes[nid]
@@ -223,39 +237,46 @@ def apply_staged_layout(
                 estimate_size(node.type, object_info, _node_widget_count(node))
             )
 
+    # bands hold cluster heads only; companions ride along with their source
     bands: dict[int, list[int]] = {}
     for nid, stage in sorted(stage_of.items()):
-        if wf.nodes[nid].type not in NOTE_TYPES:
+        if wf.nodes[nid].type not in NOTE_TYPES and nid not in companion_of:
             bands.setdefault(stage, []).append(nid)
+
+    def cluster(head: int) -> list[int]:
+        return [head, *companions.get(head, [])]
+
+    def cluster_h(head: int) -> float:
+        return sum(wf.nodes[nid].size[1] + Y_GAP for nid in cluster(head))
 
     boxes: dict[int, tuple[float, float, float, float]] = {}
     x_cursor = origin[0]
     for stage in sorted(bands):
-        members = bands[stage]
-        # sub-columns by global rank
-        sub_ranks = sorted({rank.get(nid, 0) for nid in members})
+        heads = bands[stage]
+        # sub-columns by global rank (of the cluster head)
+        sub_ranks = sorted({rank.get(nid, 0) for nid in heads})
         sub_index = {r: i for i, r in enumerate(sub_ranks)}
         sub_cols: dict[int, list[int]] = {}
-        for nid in members:
+        for nid in heads:
             sub_cols.setdefault(sub_index[rank.get(nid, 0)], []).append(nid)
         # wrap each rank-column into height-limited visual columns: a stage
         # with many parallel same-rank nodes should grow sideways, not into
         # one tall column beside a short pipeline row
         target_h = max(
-            WRAP_TARGET_H, max(wf.nodes[nid].size[1] for nid in members) + Y_GAP
+            WRAP_TARGET_H, max(cluster_h(head) for head in heads)
         )
         columns: list[list[int]] = []
         for i in sorted(sub_cols):
             col = sorted(sub_cols[i], key=lambda nid: (rank.get(nid, 0), nid))
             chunk: list[int] = []
             chunk_h = 0.0
-            for nid in col:
-                node_h = wf.nodes[nid].size[1] + Y_GAP
-                if chunk and chunk_h + node_h > target_h:
+            for head in col:
+                unit_h = cluster_h(head)
+                if chunk and chunk_h + unit_h > target_h:
                     columns.append(chunk)
                     chunk, chunk_h = [], 0.0
-                chunk.append(nid)
-                chunk_h += node_h
+                chunk.extend(cluster(head))
+                chunk_h += unit_h
             if chunk:
                 columns.append(chunk)
         col_widths = [

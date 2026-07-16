@@ -962,6 +962,12 @@ _PARTIAL_RUN_WARNING = (
 )
 
 
+"""When run_workflow finds this many (or more) prompts already pending and the
+caller didn't say where in line to go, it returns queue_busy instead of
+queuing, so the user can choose front-of-queue vs waiting."""
+_QUEUE_BUSY_THRESHOLD = 2
+
+
 @mcp.tool(annotations=_WRITE_INSTANCE)
 async def run_workflow(
     workflow_id: str,
@@ -971,6 +977,7 @@ async def run_workflow(
     allow_invalid: bool = False,
     save_dir: str = "",
     roll_seeds: bool = True,
+    front: bool | None = None,
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
     node errors if it failed, output file refs, and an inline preview thumbnail so
@@ -989,8 +996,29 @@ async def run_workflow(
     blocked). save_dir (or, when empty, the configured COMFYUI_MOUNT_DIR)
     relocates every finished image out of ComfyUI's output tree into a folder
     the caller can reach, returning saved_paths - so a render is presentable in
-    one call without a separate save_output step."""
+    one call without a separate save_output step.
+
+    front: None (default) checks the queue first - if >=2 prompts are already
+    pending, NOTHING is queued and {status: queue_busy} comes back so the user
+    can choose. front=True queues this run to go next (existing pending jobs are
+    untouched, never deleted); front=False waits at the back of the line."""
     wf = _wf(workflow_id)
+    if front is None:
+        # best-effort etiquette check; an unreachable /queue never blocks a run
+        with contextlib.suppress(Exception):
+            queue = await _client().get_queue()
+            pending = len(queue.get("queue_pending", []))
+            if pending >= _QUEUE_BUSY_THRESHOLD:
+                return {
+                    "status": "queue_busy",
+                    "queue_running": len(queue.get("queue_running", [])),
+                    "queue_pending": pending,
+                    "hint": (
+                        "nothing was queued - ASK THE USER how to proceed, then re-run "
+                        "with front=True to go next after the current job (pending jobs "
+                        "stay queued, untouched) or front=False to wait in line"
+                    ),
+                }
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
@@ -1030,7 +1058,9 @@ async def run_workflow(
         tracker = _tracker()
         tracker.ensure_running()
         try:
-            queued = await _client().queue_prompt(api, extra_data=extra_data, client_id=tracker.client_id)
+            queued = await _client().queue_prompt(
+                api, extra_data=extra_data, client_id=tracker.client_id, front=bool(front)
+            )
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
         response = {"status": "queued", "prompt_id": queued["prompt_id"]}
@@ -1039,7 +1069,9 @@ async def run_workflow(
             response["warning"] = _PARTIAL_RUN_WARNING
         return response
     try:
-        result = await _client().run_and_wait(api, timeout=timeout_seconds, extra_data=extra_data)
+        result = await _client().run_and_wait(
+            api, timeout=timeout_seconds, extra_data=extra_data, front=bool(front)
+        )
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
@@ -1271,7 +1303,27 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
         if error:
             result["error"] = error
         else:
-            result["hint"] = "view_output(filename=...) to see an image output"
+            # queue-time partial accept: node_errors aren't stored in /history,
+            # but the stored entry keeps both the FULL submitted prompt ([2]) and
+            # the validated outputs_to_execute ([4]) - output nodes present in
+            # the former but missing from the latter were dropped at queue time
+            entry = history.get("prompt") or []
+            if len(entry) > 4 and isinstance(entry[2], dict):
+                info = await _object_info()
+                executed = {str(x) for x in (entry[4] or [])}
+                dropped = [
+                    nid
+                    for nid, n in entry[2].items()
+                    if isinstance(n, dict)
+                    and (info.get(n.get("class_type")) or {}).get("output_node")
+                    and str(nid) not in executed
+                ]
+                if dropped:
+                    result["status"] = "partial"
+                    result["dropped_output_nodes"] = dropped
+                    result["warning"] = _PARTIAL_RUN_WARNING
+            if result["status"] == "success":
+                result["hint"] = "view_output(filename=...) to see an image output"
         return result
     queue = await client.get_queue()
     running = [entry[1] for entry in queue.get("queue_running", [])]

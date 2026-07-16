@@ -41,7 +41,7 @@ class RelocClient:
     async def get_object_info(self, refresh: bool = False):
         return {}
 
-    async def run_and_wait(self, api, timeout=600.0, extra_data=None):
+    async def run_and_wait(self, api, timeout=600.0, extra_data=None, front=False):
         return {
             "status": "success",
             "prompt_id": "p1",
