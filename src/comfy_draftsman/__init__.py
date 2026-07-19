@@ -1,3 +1,3 @@
 """comfy-draftsman: MCP server that drafts readable, annotated ComfyUI workflows."""
 
-__version__ = "0.4.2"
+__version__ = "0.6.0"

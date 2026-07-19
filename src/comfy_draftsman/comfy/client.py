@@ -35,6 +35,14 @@ class ComfyValidationError(Exception):
         super().__init__(f"{message}; node_errors={list(node_errors)}")
 
 
+class ComfyConnectionError(Exception):
+    """Couldn't reach the ComfyUI instance at all - down, wrong URL, or blocked.
+
+    Distinct from ComfyValidationError (reached it, prompt rejected): a raw httpx
+    ConnectError/timeout is opaque to an agent, so we turn it into an actionable
+    message naming the URL and the likely fixes."""
+
+
 class ComfyClient:
     def __init__(self, config: Config):
         self._config = config
@@ -46,8 +54,23 @@ class ComfyClient:
     async def close(self) -> None:
         await self._http.aclose()
 
+    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue a request, converting a failure-to-connect into a clear error.
+
+        Only transport-level failures (can't connect, DNS, connect timeout) become
+        ComfyConnectionError; an HTTP response - even a 4xx/5xx - is returned for
+        the caller's own raise_for_status/status handling."""
+        try:
+            return await self._http.request(method, path, **kwargs)
+        except httpx.RequestError as e:
+            raise ComfyConnectionError(
+                f"can't reach ComfyUI at {self.base_url}: {type(e).__name__}. "
+                "Is ComfyUI running and is COMFYUI_URL correct? A remote instance "
+                "must be started with --listen and reachable from this host."
+            ) from e
+
     async def _get_json(self, path: str) -> Any:
-        response = await self._http.get(path)
+        response = await self._send("GET", path)
         response.raise_for_status()
         return response.json()
 
@@ -71,8 +94,8 @@ class ComfyClient:
         clean = filename.replace("\\", "/")
         if clean.startswith("/") or ".." in clean.split("/"):
             raise ValueError(f"invalid filename: {filename!r}")
-        response = await self._http.get(
-            f"/view_metadata/{folder}", params={"filename": filename}
+        response = await self._send(
+            "GET", f"/view_metadata/{folder}", params={"filename": filename}
         )
         if response.status_code == 404:
             raise FileNotFoundError(filename)
@@ -101,7 +124,7 @@ class ComfyClient:
             payload["front"] = True
         if extra_data:
             payload["extra_data"] = extra_data
-        response = await self._http.post("/prompt", json=payload)
+        response = await self._send("POST", "/prompt", json=payload)
         if response.status_code == 400:
             body = response.json()
             raise ComfyValidationError(body.get("error", {}), body.get("node_errors", {}))
@@ -116,20 +139,20 @@ class ComfyClient:
         return await self._get_json("/queue")
 
     async def interrupt(self) -> None:
-        response = await self._http.post("/interrupt")
+        response = await self._send("POST", "/interrupt")
         response.raise_for_status()
 
     async def clear_queue(self) -> None:
-        response = await self._http.post("/queue", json={"clear": True})
+        response = await self._send("POST", "/queue", json={"clear": True})
         response.raise_for_status()
 
     async def delete_queue_items(self, prompt_ids: list[str]) -> None:
-        response = await self._http.post("/queue", json={"delete": prompt_ids})
+        response = await self._send("POST", "/queue", json={"delete": prompt_ids})
         response.raise_for_status()
 
     async def free(self, unload_models: bool = False, free_memory: bool = True) -> None:
-        response = await self._http.post(
-            "/free", json={"unload_models": unload_models, "free_memory": free_memory}
+        response = await self._send(
+            "POST", "/free", json={"unload_models": unload_models, "free_memory": free_memory}
         )
         response.raise_for_status()
 
@@ -145,8 +168,8 @@ class ComfyClient:
         form: dict[str, str] = {"type": image_type, "overwrite": "true" if overwrite else "false"}
         if subfolder:
             form["subfolder"] = subfolder
-        response = await self._http.post(
-            "/upload/image", files={"image": (name, data)}, data=form
+        response = await self._send(
+            "POST", "/upload/image", files={"image": (name, data)}, data=form
         )
         response.raise_for_status()
         return response.json()
@@ -167,8 +190,8 @@ class ComfyClient:
         }
         if subfolder:
             form["subfolder"] = subfolder
-        response = await self._http.post(
-            "/upload/mask", files={"image": (name, data)}, data=form
+        response = await self._send(
+            "POST", "/upload/mask", files={"image": (name, data)}, data=form
         )
         response.raise_for_status()
         return response.json()
@@ -184,8 +207,8 @@ class ComfyClient:
 
     async def list_userdata_workflows(self) -> list[str]:
         """Workflow files in ComfyUI's workflow browser (userdata), incl. subdirs."""
-        response = await self._http.get(
-            "/api/userdata", params={"dir": "workflows", "recurse": "true", "split": "false"}
+        response = await self._send(
+            "GET", "/api/userdata", params={"dir": "workflows", "recurse": "true", "split": "false"}
         )
         if response.status_code == 404:  # no workflows dir yet on a fresh instance
             return []
@@ -199,7 +222,7 @@ class ComfyClient:
         would escape the workflows directory.
         """
         path = self._workflow_userdata_path(name)
-        response = await self._http.get(f"/api/userdata/{quote(path, safe='')}")
+        response = await self._send("GET", f"/api/userdata/{quote(path, safe='')}")
         if response.status_code == 404:
             raise FileNotFoundError(name)
         response.raise_for_status()
@@ -214,7 +237,8 @@ class ComfyClient:
         surfaced here as FileExistsError so callers can pick another name.
         """
         filename = name if name.endswith(".json") else f"{name}.json"
-        response = await self._http.post(
+        response = await self._send(
+            "POST",
             f"/api/userdata/{quote(f'workflows/{filename}', safe='')}",
             params={"overwrite": "true" if overwrite else "false"},
             json=document,
@@ -307,7 +331,7 @@ class ComfyClient:
         return result
 
     async def fetch_output(self, item: dict[str, Any]) -> bytes:
-        response = await self._http.get("/view", params={
+        response = await self._send("GET", "/view", params={
             "filename": item.get("filename", ""),
             "subfolder": item.get("subfolder", ""),
             "type": item.get("type", "output"),

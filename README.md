@@ -84,6 +84,37 @@ Then just ask your agent things like:
 | `COMFY_API_KEY` | _(unset)_ | Comfy Org API key for partner/* nodes (Luma, Seedance, Kling, Runway); injected into the prompt payload's `extra_data` so headless queues authenticate |
 
 
+### Using with Claude Cowork / Code
+
+ComfyUI's save nodes only ever write inside ComfyUI's own `output/` tree, so a
+finished render has to be **copied out** before a sandboxed agent can open, edit,
+or show it to you. That copy lands in `COMFYUI_MOUNT_DIR` — and the one rule that
+makes it work is:
+
+> **`COMFYUI_MOUNT_DIR` must be a folder that *both* the draftsman server (next to
+> ComfyUI) and your agent's sandbox can see** — typically your Cowork/Code
+> workspace directory, or a subfolder of it.
+
+- **Set it to an absolute path.** The server runs with its own working directory
+  (MCP hosts often launch it from a system directory like `System32`), so a
+  relative `dest_dir`/`save_dir` would resolve somewhere invisible — draftsman now
+  **refuses** a relative path with a clear error rather than misplacing your render.
+- **Same machine (typical):** point it at your project folder, e.g.
+  `COMFYUI_MOUNT_DIR=I:\source\repos\my-project\renders` (Windows) or
+  `/home/you/project/renders`. `run_workflow` auto-relocates finished images there
+  and returns their `saved_paths`; the agent opens those paths directly.
+- **Check readiness first.** `get_instance_info` (call it first anyway) returns a
+  `relocation` block — `{"configured": true, "writable": true, "path": ...}` when
+  you're good to go, or a `hint` telling you to set `COMFYUI_MOUNT_DIR` when you're
+  not. `check_setup` is the dedicated doctor — it also confirms ComfyUI itself is
+  reachable and never raises — and the `draftsman://capabilities` resource reports
+  the same relocation status. If it's unset, the agent can ask you to configure it
+  **before** spending a render instead of after.
+
+Without `COMFYUI_MOUNT_DIR`, everything except handing you the finished file still
+works — you'd just pass an explicit absolute `save_dir=` per run, or fetch previews
+inline with `view_output`.
+
 ### Reducing permission prompts
 
 Building a workflow makes many tool calls (schema lookups, validation, layout), so
@@ -96,7 +127,7 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
-**Discovery** — `get_instance_info`, `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering; `metadata_for='file.safetensors'` returns a LoRA's embedded training metadata — base model and top trigger tags — so trigger words come from ground truth, not guesses), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
+**Discovery** — `get_instance_info` (version, VRAM, queue — and a `relocation` block reporting whether renders can be handed to a sandboxed client; call first), `check_setup` (one-shot doctor: ComfyUI reachable? renders relocatable? — never raises, so it's the first call when something's off), `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering; `metadata_for='file.safetensors'` returns a LoRA's embedded training metadata — base model and top trigger tags — so trigger words come from ground truth, not guesses), `list_templates`, `list_workflows` (what's already in ComfyUI's workflow browser)
 
 **Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow` (for subgraph-packaged workflows — how newer bundled templates ship — it lists each subgraph's inner nodes and wiring), `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; widget **values** are checked against the live schema at write time, so a made-up sampler or model filename fails immediately with closest-match suggestions instead of at run time; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link; returns a compact delta — `summary=true` for the full graph), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should pass through a Show Text node so the user sees the final text)
 
@@ -106,7 +137,7 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 **Ecosystem & knowledge** — `resolve_missing_nodes`, `search_node_packs`, `get_model_guidance`, `record_learning`
 
-**Prompts** — `build_workflow`, `modernize_workflow` (guided flows) · **Resources** — `draftsman://workflow-format`, `draftsman://knowledge/{family}`
+**Prompts** — `build_workflow`, `modernize_workflow` (guided flows) · **Resources** — `draftsman://workflow-format`, `draftsman://knowledge/{family}`, `draftsman://capabilities` (relocation readiness, background runs, partner-node key)
 
 ## Run it and see the result
 

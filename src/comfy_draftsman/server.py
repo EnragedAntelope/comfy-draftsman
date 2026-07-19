@@ -23,7 +23,7 @@ from mcp.types import ToolAnnotations
 from . import knowledge
 from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
-from .comfy.client import ComfyClient, ComfyValidationError
+from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
 from .comfy.progress import ProgressTracker
 from .comfy.registry import RegistryClient
 from .config import Config, load_config
@@ -50,8 +50,6 @@ _DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, 
 # The frontend normally injects this into the prompt payload's extra_data;
 # without it, headless MCP queues fail with "Unauthorized" on partner nodes.
 _COMFY_API_KEY = os.environ.get("COMFY_API_KEY", "")
-_WRITE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=False)
-_DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=True)
 
 mcp = FastMCP(
     "comfy-draftsman",
@@ -265,7 +263,10 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def get_instance_info() -> dict[str, Any]:
-    """ComfyUI version, OS, VRAM, queue length of the connected instance. Call first."""
+    """ComfyUI version, OS, VRAM, queue length, and render-relocation readiness of
+    the connected instance. Call first. The `relocation` block reports whether
+    COMFYUI_MOUNT_DIR is set and writable - if it isn't, renders can't be handed to
+    the user automatically, so surface that to them before spending a render."""
     stats = await _client().get_system_stats()
     queue = await _client().get_queue()
     devices = [
@@ -279,8 +280,66 @@ async def get_instance_info() -> dict[str, Any]:
         "devices": devices,
         "queue_running": len(queue.get("queue_running", [])),
         "queue_pending": len(queue.get("queue_pending", [])),
+        "relocation": _mount_status(),
         "knowledge_families": knowledge.list_families(_config().learned_dir),
     }
+
+
+@mcp.tool(annotations=_READ_INSTANCE)
+async def check_setup() -> dict[str, Any]:
+    """One-shot setup diagnostic for a fresh install or a sandboxed client (Cowork/
+    Desktop/Code): can I reach ComfyUI, can I hand finished renders back to the user
+    (COMFYUI_MOUNT_DIR), and is the partner-node key present. Unlike get_instance_info
+    this never raises - a down instance is reported as a failed check, not an error -
+    so run it first when a render can't be delivered or the instance seems unreachable.
+    Returns {ok, checks:[{name, ok, detail}], hint?}. `ok` is gated on ComfyUI being
+    reachable; relocation is a soft check (workflows still run, but auto-delivery needs
+    it) surfaced via `hint`."""
+    cfg = _config()
+    checks: list[dict[str, Any]] = []
+
+    # Hard requirement: can we talk to ComfyUI at all?
+    try:
+        stats = await _client().get_system_stats()
+        version = stats.get("system", {}).get("comfyui_version") or "unknown"
+        checks.append(
+            {"name": "comfyui", "ok": True, "detail": f"reachable at {cfg.comfyui_url} (v{version})"}
+        )
+        reachable = True
+    except ComfyConnectionError as e:
+        checks.append({"name": "comfyui", "ok": False, "detail": str(e)})
+        reachable = False
+    except Exception as e:  # reached it, but it answered oddly - still actionable
+        checks.append(
+            {"name": "comfyui", "ok": False, "detail": f"error talking to {cfg.comfyui_url}: {e}"}
+        )
+        reachable = False
+
+    # Soft requirement: can finished renders be relocated to a caller-reachable folder?
+    reloc = _mount_status()
+    checks.append(
+        {
+            "name": "relocation",
+            "ok": bool(reloc.get("writable")),
+            "detail": reloc.get("path") or reloc.get("error") or reloc.get("hint"),
+        }
+    )
+
+    # Informational: partner/* nodes (Luma, Kling, Runway, ...) need COMFY_API_KEY
+    checks.append(
+        {
+            "name": "partner_node_api_key",
+            "ok": True,
+            "detail": "set" if _COMFY_API_KEY else "unset (only needed for partner/* nodes)",
+        }
+    )
+
+    result: dict[str, Any] = {"ok": reachable, "checks": checks}
+    if not reachable:
+        result["hint"] = "fix ComfyUI connectivity first - the other checks assume it's up"
+    elif not reloc.get("writable"):
+        result["hint"] = reloc.get("hint") or reloc.get("error")
+    return result
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
@@ -1154,19 +1213,69 @@ async def view_output(
 
 def _resolve_dest(dest_dir: str) -> tuple[Path | None, str | None]:
     """Resolve+create the relocation directory. dest_dir empty -> the configured
-    COMFYUI_MOUNT_DIR. Returns (path, None) or (None, error)."""
+    COMFYUI_MOUNT_DIR. A relative path is refused: this server's cwd is NOT the
+    caller's (MCP hosts often launch it from a system dir like System32), so a
+    relative path would resolve somewhere invisible. Returns (path, None) or
+    (None, error)."""
     root = Path(dest_dir) if dest_dir else _config().mount_dir
     if root is None:
         return None, (
             "no destination: pass save_dir/dest_dir, or set COMFYUI_MOUNT_DIR so "
             "outputs relocate to a folder the caller can reach"
         )
+    root = root.expanduser()  # ~ expands to an absolute path; ./foo does not
+    if not root.is_absolute():
+        return None, (
+            f"destination must be an absolute path (got {str(root)!r}): the server's "
+            "working directory is not the agent's, so a relative path would resolve "
+            "somewhere invisible - pass an absolute save_dir/dest_dir (or set "
+            "COMFYUI_MOUNT_DIR to an absolute folder both sides can reach)"
+        )
     try:
-        root = root.expanduser().resolve()
+        root = root.resolve()
         root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return None, f"destination directory unusable: {e}"
     return root, None
+
+
+def _mount_status() -> dict[str, Any]:
+    """Relocation readiness for a sandboxed caller (Cowork/Desktop/Code). A render
+    can only be handed to the user if COMFYUI_MOUNT_DIR points at a folder BOTH
+    this server and the caller can see. We verify our half (configured, resolves,
+    writable via a probe file); the shared-view half is the operator's to set up.
+    Returned by get_instance_info and the draftsman://capabilities resource so an
+    agent can check up front instead of discovering it after a wasted render."""
+    mount = _config().mount_dir
+    if mount is None:
+        return {
+            "configured": False,
+            "writable": False,
+            "hint": (
+                "COMFYUI_MOUNT_DIR is unset: run_workflow(save_dir=...) / save_output "
+                "need an explicit absolute dest_dir, and renders can't be handed to the "
+                "user automatically. Ask the user to set COMFYUI_MOUNT_DIR to a folder "
+                "both ComfyUI's host and this agent can reach."
+            ),
+        }
+    root, error = _resolve_dest("")  # resolves + creates the configured mount dir
+    if error:
+        return {"configured": True, "writable": False, "path": str(mount), "error": error}
+    probe = root / ".draftsman-write-probe"
+    try:
+        probe.write_bytes(b"ok")
+        probe.read_bytes()
+    except OSError as e:
+        return {
+            "configured": True,
+            "writable": False,
+            "path": str(root),
+            "error": f"COMFYUI_MOUNT_DIR exists but isn't writable: {e}",
+        }
+    finally:
+        with contextlib.suppress(OSError):
+            probe.unlink()
+    return {"configured": True, "writable": True, "path": str(root)}
 
 
 def _dedupe_path(path: Path) -> Path:
@@ -1649,6 +1758,29 @@ def knowledge_resource(family: str) -> str:
     """Raw guidance YAML for a model family (floor + learned overlay merged)."""
     return yaml.safe_dump(
         knowledge.get_guidance(family, learned_dir=_config().learned_dir), sort_keys=False
+    )
+
+
+@mcp.resource("draftsman://capabilities")
+def capabilities_resource() -> str:
+    """What this draftsman process can do for a client right now: whether finished
+    renders can be relocated to a caller-reachable folder (the key question for a
+    sandboxed Cowork/Desktop client), background runs, and the partner-node API key.
+    Read this - or call get_instance_info - before a render you intend to show the
+    user, so a missing COMFYUI_MOUNT_DIR is caught before the render, not after."""
+    cfg = _config()
+    return json.dumps(
+        {
+            "comfyui_url": cfg.comfyui_url,
+            "relocation": _mount_status(),
+            # run_workflow(wait=False) queues in the background; poll get_run_status
+            "background_runs": True,
+            # partner/* nodes (Luma, Kling, Runway, ...) need COMFY_API_KEY set
+            "partner_node_api_key": bool(_COMFY_API_KEY),
+            "session_dir": str(cfg.session_dir),
+            "learned_dir": str(cfg.learned_dir),
+        },
+        indent=2,
     )
 
 
