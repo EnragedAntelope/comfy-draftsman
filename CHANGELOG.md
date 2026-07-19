@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 — Round 16: reuse beats rebuild — find a saved workflow by intent
+
+Asked to "make an image", an agent almost always builds from scratch even when a saved workflow already does exactly that — because `list_workflows` returns only filenames, so checking for a match means importing and inspecting each one, and it isn't worth the tokens. This round adds a discovery tool that does the matching server-side and hands back only a few compact, ranked candidates.
+
+### Added
+
+- **`find_workflow(intent)` tool** — describe the goal in words ("flux portrait at 1024 with a face detailer") and get back a few **ranked** matches, each a compact profile: model family, base model, resolution, feature tags (`lora` / `controlnet` / `detailer` / `upscale` / `inpaint` / `img2img` / …), and *why* it matched. Profiles are extracted straight from the saved JSON, so **hand-built workflows are covered too** — not just ones this tool authored. It returns summaries only, never full graphs; `import_workflow(name=...)` loads the one you pick. This keeps the token cost bounded no matter how large the workflow library is: the fetch-and-parse of every saved file happens server-side, and only the top handful of small profiles cross back to the agent.
+
+### Notes
+
+- Reuses the existing family detector, widget-name mapping, and userdata client (which already guards against path traversal); no new configuration. Saved files are fetched concurrently and each is profiled defensively — an unreadable or malformed file is skipped and reported in a `skipped` count rather than failing the call.
+- **Version bump** — `0.6.0` → `0.7.0`.
+
 ## 0.6.0 — Round 15: Cowork/Code delivery readiness up front
 
 A sandboxed client (Claude Cowork, Claude Desktop) can only be *handed* a finished render if `COMFYUI_MOUNT_DIR` points at a folder both this server and the caller can see. Until now that was discovered reactively — after spending a whole render — via a late error, and a natural relative `dest_dir` from an agent silently resolved against the server's own working directory (often `System32` on an MCP host). This round makes relocation readiness visible before the render, and turns the relative-path footgun into a clear refusal.

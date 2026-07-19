@@ -7,11 +7,13 @@ process, created lazily.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import difflib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,7 +34,7 @@ from .graph.lint import lint
 from .graph.model import NOTE_TYPES, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.validate import check_widget_value, validate
-from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names
+from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names, widgets_to_named
 from .imaging import downscale_image
 from .session import Session
 
@@ -493,6 +495,271 @@ async def list_workflows(search: str = "") -> dict[str, Any]:
     result = {"count": len(names), "workflows": sorted(names)}
     if search:
         result["search"] = search
+    return result
+
+
+# --------------------------------------------------------------------------
+# find_workflow: cheap "what do I already have that fits?" over saved workflows
+# --------------------------------------------------------------------------
+#
+# list_workflows returns only names, so an agent that wants to REUSE a saved
+# workflow would have to import+inspect each one - expensive enough that it just
+# rebuilds from scratch. find_workflow does the fetch+parse SERVER-side and hands
+# back only a handful of ranked, compact profiles (family, resolution, feature
+# tags), so the token cost to the caller is bounded no matter how large the
+# library is. It never returns full workflow JSON - import_workflow(name=...)
+# loads the one the agent picks.
+
+_FIND_CONCURRENCY = 8      # parallel userdata GETs; a big library shouldn't serialize
+_FIND_SCAN_CAP = 400       # hard ceiling on files profiled per call
+_FIND_PROMPT_HINT = 100    # chars of a positive prompt echoed back for context
+
+# A base-model value is identified by its widget NAME (positional widgets are
+# mapped to names via the live schema). Only the two unambiguous diffusion-model
+# widgets - so a VAE/CLIP/upscale filename (upscalers use "model_name") isn't
+# miscounted as the base model; upscalers surface as the "upscale" feature instead.
+_BASE_MODEL_WIDGETS = {"ckpt_name", "unet_name"}
+_MODEL_EXTS = (".safetensors", ".ckpt", ".sft", ".gguf", ".pt", ".pth", ".bin")
+
+# feature tag -> substrings matched against a node's (lowercased) class_type.
+# Custom nodes vary in prefix, so match on substring, not exact class name.
+_FEATURE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("lora", ("lora",)),
+    ("controlnet", ("controlnet",)),
+    ("ipadapter", ("ipadapter",)),
+    ("detailer", ("detailer", "facerestore", "facedetail")),
+    ("upscale", ("upscale",)),
+    ("inpaint", ("inpaint",)),
+    ("flux-guidance", ("fluxguidance",)),
+    ("video", ("vhs_", "animatediff", "svd_", "wanvideo")),
+)
+
+# intent words -> a feature the workflow actually has, so "fix the face" matches a
+# detailer and "hi-res" matches an upscale without the literal tag in the request.
+_INTENT_SYNONYMS: dict[str, frozenset[str]] = {
+    "detailer": frozenset({"detail", "detailer", "face", "adetailer"}),
+    "upscale": frozenset({"upscale", "upscaler", "hires", "highres", "enlarge", "4k", "2x"}),
+    "lora": frozenset({"lora", "loras"}),
+    "controlnet": frozenset({"controlnet", "control", "pose", "openpose", "depth", "canny"}),
+    "inpaint": frozenset({"inpaint", "inpainting", "mask"}),
+    "video": frozenset({"video", "animation", "animate", "motion"}),
+}
+
+# dropped from an intent before matching - too generic to discriminate.
+_FIND_STOPWORDS = frozenset(
+    {
+        "make", "create", "generate", "render", "want", "need", "using", "use",
+        "with", "and", "the", "for", "that", "this", "some", "image", "images",
+        "picture", "workflow", "please", "give", "get", "one",
+    }
+)
+
+
+def _basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication of non-empty strings."""
+    seen: dict[str, None] = {}
+    for it in items:
+        if it:
+            seen.setdefault(it, None)
+    return list(seen)
+
+
+def _intent_tokens(text: str) -> set[str]:
+    return {
+        t
+        for t in re.split(r"[^a-z0-9]+", text.lower())
+        if len(t) >= 2 and t not in _FIND_STOPWORDS
+    }
+
+
+def _profile_workflow(
+    name: str, data: dict[str, Any], object_info: dict[str, Any], learned_dir: Path
+) -> dict[str, Any]:
+    """Compact, searchable profile of one saved workflow, extracted straight from
+    its stored JSON (so hand-built graphs are covered too). May raise on a
+    malformed file; find_workflow skips those."""
+    wf = Workflow.from_ui(data)
+
+    # every class_type, including inside subgraph definitions, drives feature tags
+    class_types = [n.type for n in wf.nodes.values()]
+    for sg in wf.subgraph_defs().values():
+        class_types += [str(n.get("type", "")) for n in sg.get("nodes", []) or []]
+    lowered = [c.lower() for c in class_types if c]
+
+    base_models: list[str] = []
+    loras: list[str] = []
+    resolutions: list[str] = []
+    prompts: list[str] = []
+    for node in wf.nodes.values():
+        if object_info.get(node.type) is None:
+            continue  # unknown/custom node: features still counted via class_type
+        try:
+            named = widgets_to_named(node.type, node.widgets_values, object_info)
+        except Exception:
+            continue
+        for key, val in named.items():
+            if not isinstance(val, str) or not val:
+                continue
+            if "lora" in key and val.lower().endswith(_MODEL_EXTS):
+                loras.append(_basename(val))
+            elif key in _BASE_MODEL_WIDGETS:
+                base_models.append(_basename(val))
+        t = node.type.lower()
+        if "empty" in t and "latent" in t:  # the resolution knob
+            wv, hv = named.get("width"), named.get("height")
+            if isinstance(wv, (int, float)) and isinstance(hv, (int, float)):
+                resolutions.append(f"{int(wv)}x{int(hv)}")
+        if "textencode" in t:
+            txt = named.get("text")
+            if isinstance(txt, str) and txt.strip():
+                prompts.append(txt.strip())
+
+    features: list[str] = []
+    for tag, markers in _FEATURE_MARKERS:
+        if tag not in features and any(m in c for c in lowered for m in markers):
+            features.append(tag)
+    if "loadimage" in lowered and "vaeencode" in lowered and "inpaint" not in features:
+        features.append("img2img")
+
+    try:
+        family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
+    except Exception:
+        family = None
+
+    return {
+        "name": name,
+        "family": family,
+        "base_models": _dedupe(base_models),
+        "loras": _dedupe(loras),
+        "resolutions": _dedupe(resolutions),
+        "features": features,
+        "nodes": sum(1 for n in wf.nodes.values() if n.type not in VIRTUAL_TYPES),
+        "prompts": _dedupe(prompts),
+    }
+
+
+def _profile_haystack(p: dict[str, Any]) -> str:
+    parts = [p["name"], p.get("family") or ""]
+    parts += p["base_models"] + p["loras"] + p["resolutions"] + p["features"] + p["prompts"]
+    return " ".join(parts).lower()
+
+
+def _score_profile(p: dict[str, Any], tokens: set[str]) -> tuple[int, list[str]]:
+    """Heuristic relevance of a profile to the intent tokens: +1 per intent token
+    that appears anywhere in the profile, +2 when an intent word maps (via
+    synonyms) to a feature the workflow actually has. Returns (score, why)."""
+    haystack = _profile_haystack(p)
+    matched: set[str] = set()
+    score = 0
+    for tok in tokens:
+        if tok in haystack:
+            score += 1
+            matched.add(tok)
+    for tag in p["features"]:
+        syns = _INTENT_SYNONYMS.get(tag)
+        if syns and tokens & syns:
+            score += 2
+            matched.add(tag)
+    return score, sorted(matched)
+
+
+def _present_match(p: dict[str, Any], score: int, matched: list[str]) -> dict[str, Any]:
+    """The compact, token-frugal view returned to the caller - the useful bits for
+    deciding whether to reuse, never the full graph."""
+    out: dict[str, Any] = {"name": p["name"], "score": score, "matched": matched}
+    if p.get("family"):
+        out["family"] = p["family"]
+    if p["base_models"]:
+        out["base_models"] = p["base_models"]
+    if p["loras"]:
+        out["loras"] = p["loras"]
+    if p["resolutions"]:
+        out["resolution"] = ", ".join(p["resolutions"])
+    if p["features"]:
+        out["features"] = p["features"]
+    out["nodes"] = p["nodes"]
+    if p["prompts"]:
+        hint = p["prompts"][0]
+        out["prompt_hint"] = (
+            hint[:_FIND_PROMPT_HINT] + "…" if len(hint) > _FIND_PROMPT_HINT else hint
+        )
+    return out
+
+
+@mcp.tool(annotations=_READ_INSTANCE)
+async def find_workflow(intent: str, limit: int = 5) -> dict[str, Any]:
+    """Find saved workflows that already DO what you're about to build, so reuse
+    beats rebuilding from scratch. Describe the goal in words - model, subject,
+    resolution, extras - e.g. "flux portrait at 1024 with a face detailer", and get
+    back a few RANKED, compact matches: family, base model, resolution, feature tags
+    (detailer / upscale / lora / controlnet / inpaint / img2img), and why each
+    matched. Profiles are extracted from the saved JSON, so hand-built workflows are
+    covered too. Returns summaries only, never full graphs - load the one you want
+    with import_workflow(name=...). Prefer this over importing+inspecting each result
+    of list_workflows."""
+    intent = (intent or "").strip()
+    if not intent:
+        return {"error": "describe what you want, e.g. 'flux portrait with a face detailer at 1024'"}
+    names = [n[:-5] if n.endswith(".json") else n for n in await _client().list_userdata_workflows()]
+    if not names:
+        return {
+            "intent": intent,
+            "matches": [],
+            "scanned": 0,
+            "hint": "no saved workflows in ComfyUI's workflow browser yet",
+        }
+    object_info = await _object_info()
+    learned = _config().learned_dir
+    scan = names[:_FIND_SCAN_CAP]
+
+    sem = asyncio.Semaphore(_FIND_CONCURRENCY)
+
+    async def _load(nm: str) -> tuple[str, Any]:
+        async with sem:
+            try:
+                return nm, await _client().get_userdata_workflow(nm)
+            except Exception:
+                return nm, None  # unreachable/renamed/corrupt: skipped below
+
+    loaded = await asyncio.gather(*(_load(n) for n in scan))
+
+    tokens = _intent_tokens(intent)
+    ranked: list[tuple[int, dict[str, Any], list[str]]] = []
+    skipped = 0
+    for nm, data in loaded:
+        if not isinstance(data, dict):
+            skipped += 1
+            continue
+        try:
+            profile = _profile_workflow(nm, data, object_info, learned)
+        except Exception:
+            skipped += 1
+            continue
+        score, matched = _score_profile(profile, tokens)
+        if score > 0:
+            ranked.append((score, profile, matched))
+
+    # best score first; break ties toward the simpler (fewer-node) graph, then name
+    ranked.sort(key=lambda t: (-t[0], t[1]["nodes"], t[1]["name"].lower()))
+    matches = [_present_match(p, s, m) for s, p, m in ranked[: max(1, limit)]]
+
+    result: dict[str, Any] = {"intent": intent, "scanned": len(scan) - skipped, "matches": matches}
+    if skipped:
+        result["skipped"] = skipped
+    if len(names) > len(scan):
+        result["note"] = f"profiled the first {len(scan)} of {len(names)} saved workflows"
+    if matches:
+        result["hint"] = "import_workflow(name=...) loads a match into the session - no pasting"
+    else:
+        result["hint"] = (
+            "nothing clearly matched; try model/feature keywords "
+            "('flux', 'sdxl', 'detailer', 'upscale', 'inpaint', 'lora'), "
+            "or list_workflows to browse everything by name"
+        )
     return result
 
 
