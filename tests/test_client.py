@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from comfy_draftsman.comfy.client import ComfyClient
+from comfy_draftsman.comfy.client import ComfyClient, ComfyConnectionError
 
 BASE = "http://comfy.test"
 
@@ -12,6 +12,27 @@ BASE = "http://comfy.test"
 @pytest.fixture
 def client(config):
     return ComfyClient(config)
+
+
+@respx.mock
+async def test_connection_failure_is_actionable(client):
+    # A transport-level failure (instance down / wrong URL) becomes a clear,
+    # named error instead of a raw httpx.ConnectError the agent can't act on.
+    respx.get(f"{BASE}/system_stats").mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(ComfyConnectionError) as exc:
+        await client.get_system_stats()
+    message = str(exc.value)
+    assert "can't reach ComfyUI" in message
+    assert BASE in message
+
+
+@respx.mock
+async def test_http_error_status_is_not_masked_as_connection_error(client):
+    # A real HTTP response (even 500) is NOT a connection failure - it must still
+    # raise the normal HTTPStatusError so callers' status handling works.
+    respx.get(f"{BASE}/system_stats").mock(return_value=httpx.Response(500))
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_system_stats()
 
 
 @respx.mock

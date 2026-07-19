@@ -15,6 +15,7 @@ import json
 import pytest
 
 from comfy_draftsman import server
+from comfy_draftsman.comfy.client import ComfyConnectionError
 from comfy_draftsman.config import Config
 from comfy_draftsman.graph.model import Workflow
 from comfy_draftsman.session import Session
@@ -46,6 +47,14 @@ class StatsClient:
 
     async def get_queue(self):
         return {"queue_running": [], "queue_pending": []}
+
+
+class DownClient:
+    """A ComfyUI that can't be reached - get_system_stats raises the actionable
+    connection error the client now produces for transport failures."""
+
+    async def get_system_stats(self):
+        raise ComfyConnectionError(f"can't reach ComfyUI at {BASE}: ConnectError.")
 
 
 def _cfg(tmp_path, mount):
@@ -152,3 +161,44 @@ def test_capabilities_resource_is_json_with_relocation(monkeypatch, tmp_path):
     assert caps["background_runs"] is True
     assert caps["partner_node_api_key"] is False
     assert caps["comfyui_url"] == BASE
+
+
+# --- #4 check_setup doctor tool ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_setup_all_green(monkeypatch, tmp_path):
+    mount = tmp_path / "mount"
+    monkeypatch.setattr(server._State, "config", _cfg(tmp_path, mount))
+    monkeypatch.setattr(server._State, "client", StatsClient())
+    result = await server.check_setup()
+    assert result["ok"] is True
+    by_name = {c["name"]: c for c in result["checks"]}
+    assert by_name["comfyui"]["ok"] is True
+    assert by_name["relocation"]["ok"] is True
+    assert "hint" not in result
+
+
+@pytest.mark.asyncio
+async def test_check_setup_reachable_but_no_mount_is_soft(monkeypatch, tmp_path):
+    # ComfyUI up, mount unset: overall ok (workflows still run), but a hint nudges
+    # the user to configure relocation so renders can be delivered.
+    monkeypatch.setattr(server._State, "config", _cfg(tmp_path, None))
+    monkeypatch.setattr(server._State, "client", StatsClient())
+    result = await server.check_setup()
+    assert result["ok"] is True
+    by_name = {c["name"]: c for c in result["checks"]}
+    assert by_name["relocation"]["ok"] is False
+    assert "COMFYUI_MOUNT_DIR" in result["hint"]
+
+
+@pytest.mark.asyncio
+async def test_check_setup_unreachable_fails_hard(monkeypatch, tmp_path):
+    monkeypatch.setattr(server._State, "config", _cfg(tmp_path, tmp_path / "mount"))
+    monkeypatch.setattr(server._State, "client", DownClient())
+    result = await server.check_setup()
+    assert result["ok"] is False
+    by_name = {c["name"]: c for c in result["checks"]}
+    assert by_name["comfyui"]["ok"] is False
+    assert "can't reach ComfyUI" in by_name["comfyui"]["detail"]
+    assert "hint" in result

@@ -23,7 +23,7 @@ from mcp.types import ToolAnnotations
 from . import knowledge
 from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
-from .comfy.client import ComfyClient, ComfyValidationError
+from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
 from .comfy.progress import ProgressTracker
 from .comfy.registry import RegistryClient
 from .config import Config, load_config
@@ -50,8 +50,6 @@ _DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, 
 # The frontend normally injects this into the prompt payload's extra_data;
 # without it, headless MCP queues fail with "Unauthorized" on partner nodes.
 _COMFY_API_KEY = os.environ.get("COMFY_API_KEY", "")
-_WRITE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=False)
-_DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=True)
 
 mcp = FastMCP(
     "comfy-draftsman",
@@ -285,6 +283,63 @@ async def get_instance_info() -> dict[str, Any]:
         "relocation": _mount_status(),
         "knowledge_families": knowledge.list_families(_config().learned_dir),
     }
+
+
+@mcp.tool(annotations=_READ_INSTANCE)
+async def check_setup() -> dict[str, Any]:
+    """One-shot setup diagnostic for a fresh install or a sandboxed client (Cowork/
+    Desktop/Code): can I reach ComfyUI, can I hand finished renders back to the user
+    (COMFYUI_MOUNT_DIR), and is the partner-node key present. Unlike get_instance_info
+    this never raises - a down instance is reported as a failed check, not an error -
+    so run it first when a render can't be delivered or the instance seems unreachable.
+    Returns {ok, checks:[{name, ok, detail}], hint?}. `ok` is gated on ComfyUI being
+    reachable; relocation is a soft check (workflows still run, but auto-delivery needs
+    it) surfaced via `hint`."""
+    cfg = _config()
+    checks: list[dict[str, Any]] = []
+
+    # Hard requirement: can we talk to ComfyUI at all?
+    try:
+        stats = await _client().get_system_stats()
+        version = stats.get("system", {}).get("comfyui_version") or "unknown"
+        checks.append(
+            {"name": "comfyui", "ok": True, "detail": f"reachable at {cfg.comfyui_url} (v{version})"}
+        )
+        reachable = True
+    except ComfyConnectionError as e:
+        checks.append({"name": "comfyui", "ok": False, "detail": str(e)})
+        reachable = False
+    except Exception as e:  # reached it, but it answered oddly - still actionable
+        checks.append(
+            {"name": "comfyui", "ok": False, "detail": f"error talking to {cfg.comfyui_url}: {e}"}
+        )
+        reachable = False
+
+    # Soft requirement: can finished renders be relocated to a caller-reachable folder?
+    reloc = _mount_status()
+    checks.append(
+        {
+            "name": "relocation",
+            "ok": bool(reloc.get("writable")),
+            "detail": reloc.get("path") or reloc.get("error") or reloc.get("hint"),
+        }
+    )
+
+    # Informational: partner/* nodes (Luma, Kling, Runway, ...) need COMFY_API_KEY
+    checks.append(
+        {
+            "name": "partner_node_api_key",
+            "ok": True,
+            "detail": "set" if _COMFY_API_KEY else "unset (only needed for partner/* nodes)",
+        }
+    )
+
+    result: dict[str, Any] = {"ok": reachable, "checks": checks}
+    if not reachable:
+        result["hint"] = "fix ComfyUI connectivity first - the other checks assume it's up"
+    elif not reloc.get("writable"):
+        result["hint"] = reloc.get("hint") or reloc.get("error")
+    return result
 
 
 @mcp.tool(annotations=_READ_INSTANCE)

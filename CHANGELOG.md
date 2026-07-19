@@ -7,20 +7,27 @@ A sandboxed client (Claude Cowork, Claude Desktop) can only be *handed* a finish
 ### Added
 
 - **`get_instance_info` reports relocation readiness** — the "call first" tool now returns a `relocation` block (`configured` / `writable` / `path`, or an actionable `hint` when unset). An agent can see up front whether a render can be delivered to the user and, if not, ask them to set `COMFYUI_MOUNT_DIR` before wasting a render.
+- **`check_setup` diagnostic tool** — a one-shot doctor for a fresh install or a sandboxed client: is ComfyUI reachable, can renders be relocated to a caller-reachable folder, is the partner-node key present. Unlike `get_instance_info` it never raises — a down instance is a failed check, not an error — so it's the right first call when a render can't be delivered or the instance seems unreachable. `ok` is gated on ComfyUI being reachable; relocation is a soft check surfaced via `hint`.
 - **`draftsman://capabilities` resource** — a machine-readable snapshot of what the process can do right now: relocation status, background runs, and whether the partner-node API key (`COMFY_API_KEY`) is present. Same `relocation` block as `get_instance_info`, without a tool round-trip.
 - **Mount-dir write probe** — relocation readiness is verified, not assumed: the mount dir is resolved, created, and a probe file is written+read+removed, so a configured-but-unwritable mount is reported as `writable: false` with the OS error rather than failing mid-render.
 
 ### Fixed
 
 - **Relative `dest_dir` / `save_dir` is refused, not silently misplaced** — `run_workflow(save_dir=...)` and `save_output(dest_dir=...)` now reject a relative path with a clear error explaining that the server's working directory is not the agent's, so a relative path would land somewhere invisible. Absolute paths and `~`-expansions are unaffected. Previously a value like `./renders` resolved against the server's cwd (`System32` on Windows MCP hosts) and either failed opaquely or wrote out of sight.
+- **Unreachable-instance errors are now actionable** — every ComfyUI HTTP call routes through one wrapper that turns a transport-level failure (instance down, wrong `COMFYUI_URL`, DNS/connect timeout) into a `ComfyConnectionError` naming the URL and the likely fixes ("is ComfyUI running… a remote instance must be started with `--listen`"), instead of surfacing a raw `httpx.ConnectError` an agent can't reason about. A real HTTP response (even 4xx/5xx) is untouched — only failures-to-connect are reclassified.
+
+### Changed
+
+- **Version is single-sourced** — `pyproject.toml` now derives the version dynamically from `comfy_draftsman.__version__` (`[tool.hatch.version]`), so the two can no longer drift. This session found them already diverged: `__init__` sat at `0.4.2` while `pyproject` had moved to `0.5.0` (Round 14 bumped one, not the other). A packaging test guards the config.
+- **Removed a stray duplicate** of the `_WRITE_INSTANCE` / `_DESTRUCTIVE_INSTANCE` tool-annotation constants in `server.py` (defined twice, identically).
 
 ### Docs
 
-- **"Using with Claude Cowork / Code" README section** — explains the shared-folder requirement for `COMFYUI_MOUNT_DIR` (the server and the sandbox must see the same directory), the absolute-path rule, and how to check readiness via `get_instance_info`.
+- **"Using with Claude Cowork / Code" README section** — explains the shared-folder requirement for `COMFYUI_MOUNT_DIR` (the server and the sandbox must see the same directory), the absolute-path rule, and how to check readiness via `get_instance_info` / `check_setup`.
 
 ### Notes
 
-- **Version bump** — `0.5.0` → `0.6.0`. Also realigns `__init__.__version__`, which Round 14 left at `0.4.2` while `pyproject.toml` moved to `0.5.0`.
+- **Version bump** — `0.5.0` → `0.6.0` (now single-sourced from `__init__.__version__`).
 
 ## 0.5.0 — Round 14: readable layouts by default + queue etiquette
 
