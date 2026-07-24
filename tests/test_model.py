@@ -232,6 +232,61 @@ def test_from_api_reconstructs_graph(object_info):
     assert out["1"]["inputs"]["ckpt_name"] == "sd_xl_base_1.0.safetensors"
 
 
+def test_is_api_connection_discriminates_links_from_list_widgets():
+    """A 2-element list is a connection only when it references an existing node
+    with an integer slot; everything else is a literal widget value."""
+    ids = {"1", "2", "10"}
+    # real connections (string or int node id form)
+    assert Workflow._is_api_connection(["1", 0], ids)
+    assert Workflow._is_api_connection([2, 3], ids)
+    assert Workflow._is_api_connection(["10", 1], ids)
+    # literal 2-element widget values that must NOT be mistaken for wires
+    assert not Workflow._is_api_connection([512, 512], ids)  # no node "512"
+    assert not Workflow._is_api_connection(["alpha", "beta"], ids)  # slot not int
+    assert not Workflow._is_api_connection(["1", "0"], ids)  # slot is a string
+    assert not Workflow._is_api_connection([1, 2, 3], ids)  # wrong length
+    assert not Workflow._is_api_connection([True, False], ids)  # bools, not a link
+    assert not Workflow._is_api_connection("hi", ids)  # not a list
+    assert not Workflow._is_api_connection([{"a": 1}, 0], ids)  # unhashable first el
+
+
+def test_from_api_preserves_two_element_list_widget_value(object_info):
+    """A widget value that happens to be a 2-element list is preserved verbatim,
+    not turned into a bogus wire. The old length-2 heuristic dropped it from the
+    widgets AND tried to wire it (int('alpha') would crash the whole import)."""
+    ckpt = object_info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0][0]
+    api = {
+        "6": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "7": {
+            "class_type": "CLIPTextEncode",
+            # 'text' is a literal 2-string list; 'clip' is a real wire from #6
+            "inputs": {"text": ["alpha", "beta"], "clip": ["6", 1]},
+        },
+    }
+    wf = Workflow.from_api(api, object_info)
+    # the literal list survived as the text widget value
+    assert wf.get_widget(7, "text", object_info) == ["alpha", "beta"]
+    # exactly one link exists: the clip wire #6 -> #7, not a phantom 'text' wire
+    assert len(wf.links) == 1
+    link = next(iter(wf.links.values()))
+    assert link.origin_id == 6
+    assert link.target_id == 7
+    assert wf.nodes[7].input_by_name("clip").link == link.id
+    # and 'text' did NOT get materialized as an input slot
+    assert wf.nodes[7].input_by_name("text") is None
+
+
+def test_from_api_numeric_pair_widget_not_wired(object_info):
+    """A numeric 2-element pair whose first element isn't a node id stays a widget
+    value (previously silently dropped)."""
+    api = {
+        "3": {"class_type": "EmptyLatentImage", "inputs": {"width": [512, 512]}},
+    }
+    wf = Workflow.from_api(api, object_info)
+    assert wf.get_widget(3, "width", object_info) == [512, 512]
+    assert wf.links == {}
+
+
 def test_mode_mute_excluded_from_api(template, object_info):
     wf = Workflow.from_ui(template)
     wf.nodes[19].mode = 2  # mute the SaveImage

@@ -242,10 +242,35 @@ class Workflow:
         wf._next_link_id = max(wf.links, default=0) + 1
         return wf
 
+    @staticmethod
+    def _is_api_connection(value: Any, node_ids: set[str]) -> bool:
+        """True if an API-format input value is a LINK rather than a literal
+        widget value.
+
+        In API format a connection is exactly ``[source_node_id, output_slot]``:
+        a 2-element list whose first element names a node present in this prompt
+        and whose second is an integer slot index. A widget value that merely
+        *happens* to be a 2-element list (e.g. a coordinate pair like [512, 512],
+        or ["a", "b"]) is not a connection and must be preserved verbatim - the
+        old length-2 heuristic silently turned such values into bogus wires (and
+        int(value[0]) on a non-numeric first element could even crash the import).
+        Booleans are excluded because bool is a subclass of int.
+        """
+        return (
+            isinstance(value, list)
+            and len(value) == 2
+            and not isinstance(value[0], bool)
+            and isinstance(value[0], (str, int))
+            and str(value[0]) in node_ids
+            and isinstance(value[1], int)
+            and not isinstance(value[1], bool)
+        )
+
     @classmethod
     def from_api(cls, api: dict[str, Any], object_info: dict[str, Any]) -> Workflow:
         """Reconstruct an editable graph from an API-format prompt document."""
         wf = cls()
+        node_ids = set(api.keys())
         # first pass: create nodes with widget values
         for nid_str, entry in api.items():
             class_type = entry["class_type"]
@@ -256,16 +281,18 @@ class Workflow:
                 raw_widgets=[] if class_type not in object_info else None,
             )
             if class_type in object_info:
+                # only real connections are excluded from widgets; a literal
+                # list-valued widget (rare, but legal) is kept, not dropped
                 named = {
                     k: v
                     for k, v in entry.get("inputs", {}).items()
-                    if not isinstance(v, list)
+                    if not cls._is_api_connection(v, node_ids)
                 }
                 node.widgets_values = w.named_to_widgets(class_type, named, object_info)
         # second pass: connections
         for nid_str, entry in api.items():
             for input_name, value in entry.get("inputs", {}).items():
-                if isinstance(value, list) and len(value) == 2:
+                if cls._is_api_connection(value, node_ids):
                     origin_id, origin_slot = int(value[0]), int(value[1])
                     origin = wf.nodes.get(origin_id)
                     if origin is None:

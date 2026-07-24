@@ -3,11 +3,21 @@
 ## 0.7.1 — Repo audit remediation
 
 Correctness and hygiene fixes surfaced by a full-repo audit. No new tools or
-behavior changes to a well-formed workflow; the fixes turn two latent failure
-modes into early, actionable errors and tighten the developer tooling.
+behavior changes to a well-formed workflow; the fixes turn three latent failure
+modes into early, actionable errors (or preserved data) and tighten the
+developer tooling.
 
 ### Fixed
 
+- **API-format import no longer misreads a 2-element list widget value as a
+  wire.** `Workflow.from_api` decided "connection vs. literal value" purely by
+  list length, so a widget value that happens to be a 2-element list (e.g. a
+  coordinate pair `[512, 512]`) was dropped from the widgets *and* turned into a
+  bogus connection — and a non-numeric first element (`["a", "b"]`) crashed the
+  whole import on `int(...)`. It now treats a value as a link only when it is
+  `[existing_node_id, integer_slot]`, preserving genuine list-valued widgets.
+  Scope is limited to API-format import (the `name=`/UI-format path is
+  unaffected).
 - **Subgraph flatten no longer keeps a malformed inner link.** When an inner
   link's origin slot index exceeded the producing node's outputs,
   `graph/subgraph.py`'s expander recorded a "dropped" diagnostic but still
