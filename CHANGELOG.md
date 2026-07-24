@@ -1,5 +1,109 @@
 # Changelog
 
+## 0.8.0 — Full repo audit remediation
+
+A second full-repo audit, this time reproducing each defect by running the code
+before fixing it. Two of these were silent: one corrupted a saved workflow, the
+other refused to run a perfectly good one. Minor rather than patch because
+validation behavior changes and relocation gains a capability.
+
+### Fixed
+
+- **`set_widget` no longer destroys values on pack nodes with custom JS-widget
+  inputs.** `socket_names` — the per-instance signal that tells a pack's
+  JS-rendered widget (LoraManager's `AUTOCOMPLETE_TEXT_LORAS`,
+  StyleStringInjector2's `ZIPN_STYLE_GALLERY_BUTTON`) apart from a connection
+  socket — was threaded into `to_api`, `apply_seed_control` and `validate`, but
+  **not** into the write path. So the slot walk missed the custom widget and
+  `named_to_widgets` rebuilt a shorter array: setting *any* widget on such a
+  node dropped the pack's value and shifted the one being set into its slot.
+  Observed on a LoraManager-shaped node: `['<lora:foo:0.8>', 1.0]` →
+  `set_widget('strength', 2.0)` → `[2.0]`, with `to_api` then submitting
+  `lora_text=2.0`. `set_widget`, `get_widget`, `check_widget_value`,
+  `named_to_widgets` and subgraph widget promotion now all carry the node's real
+  socket set. Schema-only paths (fresh-node defaults, `add_node`) stay
+  conservative as before.
+- **Muted and bypassed nodes no longer block runs and saves.** `to_api` drops
+  mode-2/mode-4 nodes, but `validate` walked them anyway — so a muted branch (the
+  standard way to disable one) produced `unconnected-input` **errors**, and
+  `run_workflow` answered `status: invalid` / `save_workflow` refused, for a graph
+  whose prompt document didn't contain those nodes at all. Disabled nodes are now
+  reported once as `info` (`node-disabled`) and otherwise skipped.
+- **A bypassed dead-end is now caught (new `dead-input-source` error).** Bypass is
+  a passthrough, so a bypassed node with its own input unconnected forwards a
+  hole: `to_api` silently dropped the *consumer's* input and ComfyUI rejected the
+  prompt with nothing in validate pointing at it. The consumer now reports it,
+  naming the input — the bypass counterpart to `muted-input-source`.
+- **Video and audio renders can finally be handed to the caller.**
+  `save_output` and `run_workflow(save_dir=...)` filtered outputs to
+  `kind == "images"`, so a Wan / LTX / AnimateDiff result was permanently stuck
+  in ComfyUI's output tree and `save_output(prompt_id=...)` reported *"produced
+  no output images"* for a job that had produced a video. All kinds now relocate;
+  the inline preview stays image-only (it needs a decodable still).
+- **`run_workflow(save_dir=..., wait=False)` no longer silently ignores
+  `save_dir`.** It created the destination directory and then discarded it — the
+  response now carries `save_dir_ignored` naming the exact follow-up
+  `save_output(prompt_id=...)` call.
+- **The Comfy Registry degrades instead of crashing the tool.** A transport
+  failure raised a raw `httpx.ConnectError` out of `diagnose_workflow`, throwing
+  away the local validation findings it had already computed — on an offline or
+  firewalled host, which is a normal state for a local-first tool. It now raises
+  a named `RegistryUnavailableError` that the tools convert into a structured
+  `{error, hint}`, with the local findings intact.
+- **Import failures are actionable.** `import_workflow` leaked
+  `JSONDecodeError`, `KeyError: 'type'` and `invalid literal for int()` to the
+  caller; it now returns the standard `{error, hint}` shape, and `from_ui` names
+  exactly which node entry is malformed.
+- **API prompts with non-numeric node ids import instead of crashing.**
+  `from_api` did `int(node_id)` unconditionally. Non-numeric keys are now mapped
+  to fresh ids (original preserved in `properties['api_node_id']`), with
+  connections remapped to match.
+- **Session writes are atomic.** `persist` runs on every seed roll, so an
+  interrupted write was not hypothetical — and a half-written file made that
+  workflow id permanently unloadable behind an opaque decoder traceback. Writes
+  now go through a temp file + `os.replace`, and an unreadable file reads back as
+  a named `KeyError` explaining the fix.
+- **`organize_workflow` clears a stale "touch me" highlight.** `_paint_knobs`
+  only ever added green, so a prompt node that later got wired from upstream kept
+  telling the reader to type into a box they can't type into. Only draftsman's own
+  swatch is cleared; a colour a human picked is left alone.
+
+### Changed
+
+- **`detect_family` builds its knowledge index once per call** instead of once
+  per model reference — it globs the learned dir and parses every YAML in it, and
+  `find_workflow` calls it for each of up to 400 saved workflows.
+- **Registry lookups run concurrently** (bounded at 6): a diagnose on a workflow
+  with a dozen missing classes was a dozen serial round trips to a remote host.
+- **Mount readiness is cached against the configured path.**
+  `get_instance_info`, `check_setup` and the capabilities resource each wrote and
+  deleted a probe file on every call. `check_setup` still re-probes — it is the
+  tool you run precisely because something on disk changed.
+- **The model `folder` path segment is URL-quoted** in `list_models` /
+  `get_model_metadata`, matching every other path in the client.
+
+### Docs
+
+- `docs/PERMISSIONS.md` listed 16 read-only tools; the server annotates 18 —
+  `check_setup` and `find_workflow` were missing from the allowlist.
+- New ARCHITECTURE gotchas for the `socket_names` invariant, disabled-node
+  validation, and relocation scope.
+
+### Dev
+
+- New `tests/test_round17_audit.py` (25 tests) pinning each fix, plus video/audio
+  relocation and background-`save_dir` coverage in `test_output_relocation.py`.
+- CI now builds the wheel and imports the knowledge data from it (nothing
+  verified that `knowledge/families/*.yaml` actually shipped), and installs with
+  `--frozen` so the committed `uv.lock` is validated.
+
+### Audited, not changed
+
+- The lazy `_State` accessors in `server.py` are **not** subject to a
+  construct-twice race: they are synchronous, and a sync body cannot be preempted
+  mid-way by the event loop. An invariant comment now records that this is load
+  bearing — adding an `await` inside one would introduce the race.
+
 ## 0.7.2 — Cycle-safe auto-layout
 
 ### Fixed

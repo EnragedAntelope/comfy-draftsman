@@ -31,11 +31,13 @@ still ask:
   "permissions": {
     "allow": [
       "mcp__comfy-draftsman__get_instance_info",
+      "mcp__comfy-draftsman__check_setup",
       "mcp__comfy-draftsman__search_nodes",
       "mcp__comfy-draftsman__get_node_info",
       "mcp__comfy-draftsman__list_models",
       "mcp__comfy-draftsman__list_templates",
       "mcp__comfy-draftsman__list_workflows",
+      "mcp__comfy-draftsman__find_workflow",
       "mcp__comfy-draftsman__inspect_workflow",
       "mcp__comfy-draftsman__lint_workflow",
       "mcp__comfy-draftsman__validate_workflow",
@@ -58,7 +60,7 @@ this tool"** the next time Claude Code prompts for one — it writes the same ru
 
 | Tools | What they do | Recommendation |
 |---|---|---|
-| The 16 read-only tools above | Query the instance / inspect the session workflow / fetch an output image. No side effects. | **Allow** — safe to pre-approve. |
+| The 18 read-only tools above | Query the instance / inspect the session workflow / fetch an output image. No side effects. | **Allow** — safe to pre-approve. |
 | `create_workflow`, `import_workflow`, `edit_workflow`, `organize_workflow`, `port_workflow` | Modify the **in-memory** session workflow only (nothing on disk or the instance yet). | Optional — allow if you don't want to confirm every edit batch. |
 | `run_workflow` | **Queues a render** on your ComfyUI (uses the GPU); `wait=False` queues in the background. | Leave prompting, or allow if you're iterating fast. |
 | `upload_image` | **Writes** an image into ComfyUI's input folder. | Leave prompting. |

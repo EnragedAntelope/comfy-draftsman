@@ -170,6 +170,34 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   clears/interrupts anything. The check is best-effort (an unreachable
   `/queue` never blocks a run) and happens before seeds are rolled, so a
   gated run doesn't advance increment seeds.
+- **Muted/bypassed nodes are not validated, by design.** `to_api` drops mode-2
+  (mute) and mode-4 (bypass) nodes, so their own widget values and unconnected
+  inputs cannot break a run — and muting a branch is *the* standard way to
+  disable it. `validate` reports each disabled node once as `info`
+  (`node-disabled`) and checks nothing else about it; validating them anyway
+  produced blocking errors that refused `run_workflow`/`save_workflow` for a
+  graph whose prompt document didn't contain those nodes at all. What a disabled
+  node does to its *consumers* is still checked, on the active consumer:
+  `muted-input-source` (a mute never runs, leaving a dangling reference) and
+  `dead-input-source` (bypass is a passthrough, so a bypassed node with its own
+  input unconnected forwards a hole and `to_api` silently drops the consumer's
+  input).
+- **`socket_names` is required on every path that REBUILDS an existing node's
+  `widgets_values`.** A pack's custom JS-widget input is only recognizable
+  per-instance (`widgets._is_custom_widget`), so a slot walk without the node's
+  declared sockets misses that widget entirely — and `named_to_widgets` then
+  writes a *shorter* array, destroying the custom value and shifting every later
+  one up a slot. `set_widget`, `get_widget`, `check_widget_value`, `to_api`,
+  `apply_seed_control`, `_validate_nodes` and subgraph widget promotion all pass
+  it. Schema-only contexts (fresh-node defaults, `add_node`) deliberately do
+  **not** — never infer a custom widget without instance context.
+- **Relocation covers every output kind; the inline preview does not.**
+  `save_output` / `run_workflow(save_dir=...)` relocate images, gifs, videos and
+  audio alike (a video render is exactly as stuck inside ComfyUI's output tree),
+  but the inline thumbnail stays image-only because `downscale_image` needs a
+  decodable still. Relocation needs *finished* files, so `save_dir` does not
+  apply to `wait=False`; that returns `save_dir_ignored` naming the follow-up
+  `save_output(prompt_id=...)` rather than silently dropping the request.
 - **Display/output nodes overflow `widgets_values` on purpose.** ShowText,
   rgthree "Display Any", and preview nodes stash the text/data they display into
   `widgets_values` beyond their declared schema widgets. A count *overflow* on a
@@ -195,10 +223,26 @@ Open:
   generic tool); until then the honest stop stands. Workaround for a caller that
   must run such a graph headlessly: connect the input to a plain-STRING source,
   swap in the pack's plain-STRING node variant, or run it from the ComfyUI
-  frontend. (Code note: validate.py:388 currently blocks on any widget-backed
-  unconnected custom input regardless of value type; the surrounding docs' hint
-  at value-awareness is aspirational, not implemented — see above for why.)
+  frontend. (Code note: `validate` blocks on any widget-backed unconnected
+  custom input regardless of value type; the surrounding docs' hint at
+  value-awareness is aspirational, not implemented — see above for why.) Note
+  this is the *widget-backed slot* case only; a custom input the node did not
+  serialize as a socket at all is handled and now survives the write path too —
+  see the `socket_names` gotcha above.
+
 Recently closed:
+
+- **[DONE, round 17] Repo-audit remediation** — `set_widget` no longer destroys
+  a neighbouring widget's value on pack nodes with custom JS-widget inputs
+  (`socket_names` threaded through the whole write path); muted/bypassed nodes
+  no longer emit blocking validation errors, with the new `dead-input-source`
+  check covering what bypass actually breaks; relocation covers video/audio, not
+  just images; `save_dir` on a background run says so instead of no-opping; the
+  Comfy Registry degrades to a structured error instead of throwing away a
+  diagnose's local findings (and resolves concurrently); import parse failures
+  are actionable and API prompts with non-numeric node ids import; session
+  writes are atomic; `detect_family` stopped rebuilding its YAML index per
+  model reference. See the CHANGELOG for the full list.
 
 - **[DONE, round 14] Layout companions + queue etiquette** — display nodes
   (Show Text / PreviewImage) glued beneath their source instead of a far-away

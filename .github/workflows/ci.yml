@@ -17,11 +17,37 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # --frozen: fail if the committed uv.lock is stale rather than silently
+      # resolving something else than what a user installing from it would get
       - name: Install
-        run: uv sync --group dev
+        run: uv sync --frozen --group dev
       - name: Lint
         run: uv run ruff check .
       - name: Typecheck
         run: uv run mypy src
       - name: Test
         run: uv run pytest
+
+  # The package ships non-Python data (knowledge/families/*.yaml). Nothing in the
+  # test suite proves those land in the wheel - a build that quietly dropped them
+  # would still pass every test, then fail on a user's first get_model_guidance.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel
+        run: uv build
+      - name: Knowledge data is importable from the built wheel
+        shell: bash
+        run: |
+          wheel=$(ls dist/*.whl)
+          uv run --isolated --no-project --with "$wheel" python -c "
+          import comfy_draftsman, comfy_draftsman.knowledge as k
+          families = k.list_families()
+          print(comfy_draftsman.__version__, families)
+          assert 'flux' in families and 'sdxl' in families, families
+          assert k.get_guidance('flux')['sampling'], 'guidance YAML did not ship'
+          "
