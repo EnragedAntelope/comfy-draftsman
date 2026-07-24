@@ -372,6 +372,91 @@ def test_flatten_reports_missing_target_input(oi):
     assert "inner_node_id" in d
 
 
+def test_flatten_drops_link_with_out_of_range_origin_slot(oi):
+    """Inner-to-inner link whose origin_slot exceeds the producer's outputs is
+    DROPPED (not created with a dangling reference) and reported as a diagnostic."""
+    sg = {
+        "id": SG_ID,
+        "name": "DiagOrigin",
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "linkIds": [16]}],
+        "nodes": [
+            {
+                "id": 3,
+                "type": "KSampler",
+                "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                "inputs": [
+                    {"name": "model", "type": "MODEL", "link": None},
+                    {"name": "positive", "type": "CONDITIONING", "link": None},
+                    {"name": "negative", "type": "CONDITIONING", "link": None},
+                    {"name": "latent_image", "type": "LATENT", "link": None},
+                ],
+                # only one output (slot 0), but the inner link below uses slot 3
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [9]}],
+            },
+            {
+                "id": 8,
+                "type": "VAEDecode",
+                "widgets_values": [],
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": 9},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [16]}],
+            },
+        ],
+        "links": [
+            # inner-to-inner: KSampler slot 3 (out of range) -> VAEDecode.samples
+            {"id": 9, "origin_id": 3, "origin_slot": 3, "target_id": 8, "target_slot": 0, "type": "LATENT"},
+            {"id": 16, "origin_id": 8, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"},
+        ],
+    }
+    doc = {
+        "id": "11111111-2222-4333-8444-555555555555",
+        "revision": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": SG_ID,
+                "pos": [0, 0],
+                "size": [200, 100],
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "widgets_values": [],
+                "properties": {},
+            },
+            {
+                "id": 2,
+                "type": "SaveImage",
+                "pos": [400, 0],
+                "size": [300, 200],
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "widgets_values": ["ComfyUI"],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"]],
+        "groups": [],
+        "definitions": {"subgraphs": [sg]},
+        "config": {},
+        "extra": {},
+        "version": 0.4,
+    }
+    wf = Workflow.from_ui(doc)
+    flat, _prov, diagnostics = flatten(wf, oi)
+    assert any(
+        d["reason"] == "origin output slot does not exist" for d in diagnostics
+    )
+    # the malformed inner link must NOT survive: VAEDecode.samples stays unconnected,
+    # so no link references a non-existent output slot
+    decode = next(n for n in flat.nodes.values() if n.type == "VAEDecode")
+    assert decode.input_by_name("samples").link is None
+    for link in flat.links.values():
+        origin = flat.nodes.get(link.origin_id)
+        if origin is not None:
+            assert link.origin_slot < len(origin.outputs)
+
+
 def test_flatten_reports_output_boundary_dangler(oi):
     """Output-side boundary drop: boundary output has no producer -> diagnostic."""
     sg = {

@@ -106,7 +106,7 @@ def _ranks(wf: Workflow) -> dict[int, int]:
     """Longest-path rank per linked node; unlinked non-note nodes go to rank 0."""
     downstream: dict[int, list[int]] = {}
     indegree: dict[int, int] = {}
-    linked = set()
+    linked: set[int] = set()
     for link in wf.links.values():
         if link.origin_id not in wf.nodes or link.target_id not in wf.nodes:
             continue

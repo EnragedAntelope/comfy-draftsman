@@ -21,5 +21,7 @@ jobs:
         run: uv sync --group dev
       - name: Lint
         run: uv run ruff check .
+      - name: Typecheck
+        run: uv run mypy src
       - name: Test
         run: uv run pytest

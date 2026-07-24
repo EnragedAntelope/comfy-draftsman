@@ -152,6 +152,8 @@ class Workflow:
         self.uuid: str = str(uuid.uuid4())
         self._next_node_id = 1
         self._next_link_id = 1
+        # populated by subgraph_as_workflow; restored by update_subgraph
+        self._subgraph_meta: dict[str, Any] = {}
 
     # --- construction ---
 
@@ -347,15 +349,16 @@ class Workflow:
         if isinstance(origin_out, int):
             out_index = origin_out
         else:
-            out_index = next(
+            found = next(
                 (i for i, o in enumerate(origin.outputs) if o.name == origin_out),
                 None,
             )
-            if out_index is None:
+            if found is None:
                 raise ValueError(
                     f"node {origin_id} ({origin.type}) has no output '{origin_out}'; "
                     f"available: {[o.name for o in origin.outputs]}"
                 )
+            out_index = found
         out_slot = origin.outputs[out_index]
         in_slot = target.input_by_name(target_input)
         if in_slot is None:

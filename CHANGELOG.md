@@ -1,6 +1,42 @@
 # Changelog
 
-## 0.7.0 — Round 16: reuse beats rebuild — find a saved workflow by intent
+## 0.7.1 — Repo audit remediation
+
+Correctness and hygiene fixes surfaced by a full-repo audit. No new tools or
+behavior changes to a well-formed workflow; the fixes turn two latent failure
+modes into early, actionable errors and tighten the developer tooling.
+
+### Fixed
+
+- **Subgraph flatten no longer keeps a malformed inner link.** When an inner
+  link's origin slot index exceeded the producing node's outputs,
+  `graph/subgraph.py`'s expander recorded a "dropped" diagnostic but still
+  created the link, leaving a dangling `[origin_id, bad_slot]` reference in the
+  API prompt. It now drops the link (matching the target-slot-out-of-range path)
+  so the API document stays consistent.
+- **A required input fed by a muted node is caught before the run.** A `MODE_MUTE`
+  producer is skipped at execution and isn't traced through (unlike Reroute /
+  bypass), so a consumer's input serialized to a reference ComfyUI rejects — yet
+  `validate` reported the input as "connected" and passed. `validate` now emits a
+  `muted-input-source` error naming the muted node, so the failure is early and
+  actionable instead of a confusing run-time error on a graph that "validated".
+
+### Changed
+
+- **Graceful shutdown.** The server now closes its lazily-created ComfyUI and
+  Comfy Registry HTTP clients and stops the progress-tracker websocket loop on
+  exit (via a FastMCP `lifespan`), instead of leaking "unclosed client session"
+  warnings.
+- **`COMFY_API_KEY` moved onto `Config`.** It was the one setting read at import
+  time rather than through `load_config()`; centralizing it makes configuration
+  uniform and testable.
+
+### Dev
+
+- **Committed `uv.lock`** for reproducible dev/CI installs (unpinned transitive
+  dependencies before).
+- **Added `mypy` to the dev group and CI** (default mode over `src`, plus
+  `types-PyYAML`); the package now type-checks clean.
 
 Asked to "make an image", an agent almost always builds from scratch even when a saved workflow already does exactly that — because `list_workflows` returns only filenames, so checking for a match means importing and inspecting each one, and it isn't worth the tokens. This round adds a discovery tool that does the matching server-side and hands back only a few compact, ranked candidates.
 

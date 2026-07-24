@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from . import widgets as w
-from .model import MODE_NORMAL, VIRTUAL_TYPES, Workflow
+from .model import MODE_MUTE, MODE_NORMAL, VIRTUAL_TYPES, Workflow
 
 # A combo's option list is authoritative when we can trust the /object_info
 # snapshot: either it lists on-disk files (an "is this installed" check) or it
@@ -391,6 +391,34 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             if w.is_widget_input(spec) or w._is_custom_widget(name, spec, socket_names):
                 continue
             slot = node.input_by_name(name)
+            if slot is not None and slot.link is not None:
+                # Connected - but a MUTE (mode 2) producer is dropped entirely at
+                # run time (to_api skips it; _trace_origin sees through Reroute and
+                # bypass but not mute), leaving a dangling [muted_id, slot] reference
+                # ComfyUI rejects. Catch it here so the failure is early and named
+                # instead of a confusing run-time error on a graph that "validated".
+                link = wf.links.get(slot.link)
+                origin = (
+                    wf._trace_origin(link.origin_id, link.origin_slot, 0)
+                    if link is not None
+                    else None
+                )
+                src = wf.nodes.get(origin[0]) if origin is not None else None
+                if src is not None and src.mode == MODE_MUTE:
+                    findings.append(
+                        _finding(
+                            "error",
+                            "muted-input-source",
+                            f"{node.type} #{node.id}: required input '{name}' is fed by "
+                            f"muted node #{src.id} ({src.type}) - a muted node never "
+                            "runs, so the graph would fail at execution with a missing "
+                            f"input. Unmute #{src.id} (set_mode 0) or rewire '{name}' to "
+                            "an active source",
+                            node.id,
+                            input=name,
+                        )
+                    )
+                continue
             if slot is not None and slot.link is None and slot.widget_name:
                 # a custom-typed input the node exposes as a widget-backed slot
                 # (carries a `widget` marker): its value is pack-specific frontend

@@ -43,6 +43,10 @@ class Config:
     learned_dir: Path = field(default_factory=_default_learned_dir)
     mount_dir: Path | None = field(default_factory=_default_mount_dir)
     request_timeout: float = field(default_factory=lambda: float(os.environ.get("DRAFTSMAN_TIMEOUT", "30")))
+    # Comfy Org API key for partner/* nodes (Luma, Seedance, Kling, Runway). The
+    # frontend normally injects this into the prompt payload's extra_data; without
+    # it, headless MCP queues fail with "Unauthorized" on partner nodes.
+    comfy_api_key: str = field(default_factory=lambda: os.environ.get("COMFY_API_KEY", ""))
 
 
 def load_config() -> Config:

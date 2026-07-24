@@ -12,8 +12,9 @@ import base64
 import contextlib
 import difflib
 import json
-import os
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,13 +49,34 @@ _EDIT_LOCAL = ToolAnnotations(readOnlyHint=False, openWorldHint=False, destructi
 _WRITE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=False)
 _DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=True)
 
-# Comfy Org API key for partner/* nodes (Luma, Seedance, Kling, Runway).
-# The frontend normally injects this into the prompt payload's extra_data;
-# without it, headless MCP queues fail with "Unauthorized" on partner nodes.
-_COMFY_API_KEY = os.environ.get("COMFY_API_KEY", "")
+class _State:
+    config: Config | None = None
+    client: ComfyClient | None = None
+    registry: RegistryClient | None = None
+    session: Session | None = None
+    tracker: ProgressTracker | None = None
+
+
+@asynccontextmanager
+async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+    """Close the lazily-created HTTP clients and stop the progress tracker on
+    shutdown, so a clean exit doesn't leak 'unclosed client session' warnings or
+    leave the websocket reconnect loop running."""
+    try:
+        yield
+    finally:
+        if _State.tracker is not None:
+            with contextlib.suppress(Exception):
+                await _State.tracker.stop()
+        for handle in (_State.client, _State.registry):
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    await handle.close()
+
 
 mcp = FastMCP(
     "comfy-draftsman",
+    lifespan=_lifespan,
     instructions=(
         "Draft, repair, port, validate, run, and SAVE ComfyUI workflows against the "
         "user's local ComfyUI instance. The finished artifact is always an organized, "
@@ -70,14 +92,6 @@ mcp = FastMCP(
         "capability that would be LOST before dropping nodes - never silently."
     ),
 )
-
-
-class _State:
-    config: Config | None = None
-    client: ComfyClient | None = None
-    registry: RegistryClient | None = None
-    session: Session | None = None
-    tracker: ProgressTracker | None = None
 
 
 def _config() -> Config:
@@ -139,7 +153,7 @@ def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort findings most-severe first and cap the number returned to the model,
     appending a marker if truncated. Every error is always kept - only lower
     levels are trimmed - so nothing blocking is hidden and tokens stay bounded."""
-    ordered = sorted(findings, key=lambda f: _LEVEL_RANK.get(f.get("level"), 3))
+    ordered = sorted(findings, key=lambda f: _LEVEL_RANK.get(str(f.get("level")), 3))
     if len(ordered) <= _FINDINGS_CAP:
         return ordered
     errors = [f for f in ordered if f.get("level") == "error"]
@@ -332,7 +346,7 @@ async def check_setup() -> dict[str, Any]:
         {
             "name": "partner_node_api_key",
             "ok": True,
-            "detail": "set" if _COMFY_API_KEY else "unset (only needed for partner/* nodes)",
+            "detail": "set" if cfg.comfy_api_key else "unset (only needed for partner/* nodes)",
         }
     )
 
@@ -1378,8 +1392,8 @@ async def run_workflow(
     elif wait and _config().mount_dir is not None:
         dest_root, mount_error = _resolve_dest("")  # resolves + creates the mount dir
     extra_data: dict[str, Any] | None = None
-    if _COMFY_API_KEY:
-        extra_data = {"api_key_comfy_org": _COMFY_API_KEY}
+    if _config().comfy_api_key:
+        extra_data = {"api_key_comfy_org": _config().comfy_api_key}
     if not wait:
         tracker = _tracker()
         tracker.ensure_running()
@@ -1528,6 +1542,7 @@ def _mount_status() -> dict[str, Any]:
     root, error = _resolve_dest("")  # resolves + creates the configured mount dir
     if error:
         return {"configured": True, "writable": False, "path": str(mount), "error": error}
+    assert root is not None  # _resolve_dest returns a path whenever error is None
     probe = root / ".draftsman-write-probe"
     try:
         probe.write_bytes(b"ok")
@@ -1640,7 +1655,7 @@ async def save_output(
             "at a time (pass an explicit filename) to rename"
         }
     dest_root, dest_error = _resolve_dest(dest_dir)
-    if dest_error:
+    if dest_error or dest_root is None:
         return {"error": dest_error}
     saved, errors = await _relocate_outputs(
         client, items, dest_root, dest_filename or None, overwrite
@@ -1691,7 +1706,7 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
                     nid
                     for nid, n in entry[2].items()
                     if isinstance(n, dict)
-                    and (info.get(n.get("class_type")) or {}).get("output_node")
+                    and (info.get(str(n.get("class_type"))) or {}).get("output_node")
                     and str(nid) not in executed
                 ]
                 if dropped:
@@ -1744,6 +1759,7 @@ async def upload_image(
         data = path.read_bytes()
         name = name or path.name
     else:
+        assert image_base64 is not None  # exactly-one guard above ensures this
         try:
             data = base64.b64decode(image_base64, validate=True)
         except Exception as e:
@@ -2043,7 +2059,7 @@ def capabilities_resource() -> str:
             # run_workflow(wait=False) queues in the background; poll get_run_status
             "background_runs": True,
             # partner/* nodes (Luma, Kling, Runway, ...) need COMFY_API_KEY set
-            "partner_node_api_key": bool(_COMFY_API_KEY),
+            "partner_node_api_key": bool(cfg.comfy_api_key),
             "session_dir": str(cfg.session_dir),
             "learned_dir": str(cfg.learned_dir),
         },

@@ -6,6 +6,7 @@ independently implemented.
 """
 
 import base64
+import dataclasses
 import io
 
 import httpx
@@ -252,8 +253,14 @@ async def test_run_workflow_skips_preview_on_undecodable_output(wired):
     assert result["status"] == "success"
 
 
+def _with_api_key(monkeypatch, key):
+    monkeypatch.setattr(
+        server._State, "config", dataclasses.replace(server._State.config, comfy_api_key=key)
+    )
+
+
 async def test_run_workflow_injects_comfy_api_key_when_set(monkeypatch, wired):
-    monkeypatch.setattr(server, "_COMFY_API_KEY", "secret-key")
+    _with_api_key(monkeypatch, "secret-key")
     client, wf_id = wired
     result = await server.run_workflow(wf_id, wait=False)
     assert result == {"status": "queued", "prompt_id": "p123"}
@@ -261,7 +268,7 @@ async def test_run_workflow_injects_comfy_api_key_when_set(monkeypatch, wired):
 
 
 async def test_run_workflow_wait_injects_comfy_api_key_when_set(monkeypatch, wired):
-    monkeypatch.setattr(server, "_COMFY_API_KEY", "secret-key")
+    _with_api_key(monkeypatch, "secret-key")
     client, wf_id = wired
     result = await server.run_workflow(wf_id, return_preview=False)
     assert result["status"] == "success"

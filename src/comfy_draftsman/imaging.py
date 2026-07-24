@@ -30,7 +30,7 @@ def downscale_image(data: bytes, max_dim: int | None) -> tuple[bytes, str, int, 
     isn't a decodable image (e.g. a video file listed under an image output).
     """
     try:
-        img = PILImage.open(io.BytesIO(data))
+        img: PILImage.Image = PILImage.open(io.BytesIO(data))
         src_format = (img.format or "png").lower()
         needs_resize = max_dim and max(img.size) > max_dim
     except Exception as e:
@@ -45,6 +45,7 @@ def downscale_image(data: bytes, max_dim: int | None) -> tuple[bytes, str, int, 
     ):
         return data, src_format, img.width, img.height
     if needs_resize:
+        assert max_dim is not None  # needs_resize is only true when max_dim is set
         img.thumbnail((max_dim, max_dim), PILImage.Resampling.LANCZOS)
     buf = io.BytesIO()
     if has_alpha:

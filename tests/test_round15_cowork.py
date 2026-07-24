@@ -58,7 +58,9 @@ class DownClient:
 
 
 def _cfg(tmp_path, mount):
-    return Config(comfyui_url=BASE, session_dir=tmp_path / "s", mount_dir=mount)
+    return Config(
+        comfyui_url=BASE, session_dir=tmp_path / "s", mount_dir=mount, comfy_api_key=""
+    )
 
 
 # --- #2 relative dest_dir is refused ----------------------------------------
@@ -155,7 +157,6 @@ async def test_get_instance_info_flags_missing_mount(monkeypatch, tmp_path):
 def test_capabilities_resource_is_json_with_relocation(monkeypatch, tmp_path):
     mount = tmp_path / "mount"
     monkeypatch.setattr(server._State, "config", _cfg(tmp_path, mount))
-    monkeypatch.setattr(server, "_COMFY_API_KEY", "")
     caps = json.loads(server.capabilities_resource())
     assert caps["relocation"]["configured"] is True
     assert caps["background_runs"] is True

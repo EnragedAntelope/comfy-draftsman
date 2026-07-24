@@ -93,7 +93,7 @@ def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
     if not any(n.type in NOTE_TYPES for n in wf.nodes.values()):
         findings.append(_finding("no-notes", "no guidance notes for human readers"))
 
-    linked_ids = set()
+    linked_ids: set[int] = set()
     for link in wf.links.values():
         linked_ids.update((link.origin_id, link.target_id))
 

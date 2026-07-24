@@ -170,7 +170,7 @@ def _swap_loader_topology(wf, guidance, object_info, changes, flags) -> None:
         # rewire every consumer of the checkpoint's outputs
         for out in ckpt.outputs:
             role = role_for_output.get(out.type)
-            new_id = replacements.get(role)
+            new_id = replacements.get(role) if role is not None else None
             for link_id in list(out.links):
                 link = wf.links.get(link_id)
                 if link is None:
@@ -204,7 +204,7 @@ def _retune_techniques(wf, guidance, object_info, changes) -> None:
             for key, value in settings.items():
                 if key in ("note",):
                     continue
-                widget_name = _TECHNIQUE_KEY_MAP.get(key, key)
+                widget_name = str(_TECHNIQUE_KEY_MAP.get(key, key))
                 before = len(changes)
                 _set_if_valid(wf, node.id, widget_name, value, object_info, changes)
                 if len(changes) > before:

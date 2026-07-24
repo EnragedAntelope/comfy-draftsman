@@ -166,6 +166,7 @@ def _expand(
                 "reason": "origin output slot does not exist",
                 "dropped_to": target_id,
             })
+            return
         lid = flat._next_link_id
         flat._next_link_id += 1
         flat.links[lid] = Link(lid, origin_id, origin_slot, target_id, target_slot, ltype)

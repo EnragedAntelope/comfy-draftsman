@@ -166,3 +166,57 @@ def test_step_absent_no_flag(object_info):
     wf.set_widget(sampler.id, "seed", 42, object_info)
     findings = validate(wf, object_info)
     assert not any(f["code"] == "step-misaligned" for f in findings)
+
+
+def test_muted_producer_feeding_required_input_is_flagged(object_info):
+    """A required input wired to a MUTE (mode 2) node validated 'connected' but the
+    run failed on a dangling reference; validate now flags it up front."""
+    from comfy_draftsman.graph.model import MODE_MUTE, MODE_NORMAL
+
+    wf = Workflow.new()
+    ckpt = wf.add_node("CheckpointLoaderSimple", object_info=object_info)
+    choices = object_info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    wf.set_widget(ckpt.id, "ckpt_name", choices[0], object_info)
+    sampler = wf.add_node("KSampler", object_info=object_info)
+    wf.connect(ckpt.id, "MODEL", sampler.id, "model")
+
+    # connected to an active source -> no muted finding
+    assert not any(f["code"] == "muted-input-source" for f in validate(wf, object_info))
+
+    ckpt.mode = MODE_MUTE
+    findings = validate(wf, object_info)
+    muted = [f for f in findings if f["code"] == "muted-input-source"]
+    assert muted, findings
+    m = next(f for f in muted if f["input"] == "model")
+    assert m["level"] == "error"
+    assert m["node_id"] == sampler.id
+    # 'model' is wired, so it must NOT also be reported as unconnected
+    assert not any(
+        f["code"] == "unconnected-input" and f["node_id"] == sampler.id and f["input"] == "model"
+        for f in findings
+    )
+
+    ckpt.mode = MODE_NORMAL
+    assert not any(f["code"] == "muted-input-source" for f in validate(wf, object_info))
+
+
+def test_muted_source_seen_through_reroute(object_info):
+    """The mute is detected even when the link reaches the sampler via a Reroute."""
+    from comfy_draftsman.graph.model import MODE_MUTE, InputSlot, OutputSlot
+
+    wf = Workflow.new()
+    ckpt = wf.add_node("CheckpointLoaderSimple", object_info=object_info)
+    choices = object_info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    wf.set_widget(ckpt.id, "ckpt_name", choices[0], object_info)
+    reroute = wf.add_node("Reroute", raw_widgets=[])
+    reroute.inputs.append(InputSlot(name="", type="*"))
+    reroute.outputs.append(OutputSlot(name="", type="*"))
+    sampler = wf.add_node("KSampler", object_info=object_info)
+    wf.connect(ckpt.id, "MODEL", reroute.id, "")
+    wf.connect(reroute.id, 0, sampler.id, "model")
+
+    ckpt.mode = MODE_MUTE
+    findings = validate(wf, object_info)
+    assert any(
+        f["code"] == "muted-input-source" and f["node_id"] == sampler.id for f in findings
+    ), findings
