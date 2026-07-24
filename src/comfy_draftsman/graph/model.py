@@ -173,8 +173,20 @@ class Workflow:
         if isinstance(existing_id, str) and _UUID_RE.match(existing_id):
             wf.uuid = existing_id
         for raw in data.get("nodes", []):
+            if not isinstance(raw, dict) or "id" not in raw or "type" not in raw:
+                raise ValueError(
+                    f"malformed node entry {str(raw)[:80]!r}: every UI-format node "
+                    "needs an 'id' and a 'type'"
+                )
+            try:
+                node_id = int(raw["id"])
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"node id {raw['id']!r} is not a number - UI-format workflows "
+                    "use integer node ids"
+                ) from e
             node = Node(
-                id=int(raw["id"]),
+                id=node_id,
                 type=raw["type"],
                 pos=_as_pair(raw.get("pos", [0, 0])),
                 size=_as_pair(raw.get("size", [270, 100])),
@@ -268,18 +280,34 @@ class Workflow:
 
     @classmethod
     def from_api(cls, api: dict[str, Any], object_info: dict[str, Any]) -> Workflow:
-        """Reconstruct an editable graph from an API-format prompt document."""
+        """Reconstruct an editable graph from an API-format prompt document.
+
+        Node ids are usually numeric strings, but a prompt exported by a newer
+        frontend (or hand-written) can key nodes by an arbitrary string. The UI
+        graph model needs int ids, so non-numeric keys are mapped to fresh ints
+        and the original is kept in ``properties['api_node_id']`` rather than
+        crashing the whole import on ``int()``.
+        """
         wf = cls()
         node_ids = set(api.keys())
+        id_map = cls._api_id_map(node_ids)
         # first pass: create nodes with widget values
         for nid_str, entry in api.items():
+            if not isinstance(entry, dict) or "class_type" not in entry:
+                raise ValueError(
+                    f"node {nid_str!r} is not a valid API-format entry: expected "
+                    '{"class_type": ..., "inputs": {...}} - is this actually a '
+                    "UI-format workflow (it would have a top-level 'nodes' list)?"
+                )
             class_type = entry["class_type"]
             node = wf.add_node(
                 class_type,
                 object_info=object_info if class_type in object_info else None,
-                node_id=int(nid_str),
+                node_id=id_map[nid_str],
                 raw_widgets=[] if class_type not in object_info else None,
             )
+            if str(id_map[nid_str]) != nid_str:
+                node.properties["api_node_id"] = nid_str
             if class_type in object_info:
                 # only real connections are excluded from widgets; a literal
                 # list-valued widget (rare, but legal) is kept, not dropped
@@ -293,7 +321,7 @@ class Workflow:
         for nid_str, entry in api.items():
             for input_name, value in entry.get("inputs", {}).items():
                 if cls._is_api_connection(value, node_ids):
-                    origin_id, origin_slot = int(value[0]), int(value[1])
+                    origin_id, origin_slot = id_map[str(value[0])], int(value[1])
                     origin = wf.nodes.get(origin_id)
                     if origin is None:
                         continue
@@ -301,11 +329,30 @@ class Workflow:
                         origin.outputs.append(
                             OutputSlot(name=f"out_{len(origin.outputs)}", type="*")
                         )
-                    target = wf.nodes[int(nid_str)]
+                    target = wf.nodes[id_map[nid_str]]
                     if target.input_by_name(input_name) is None:
                         target.inputs.append(InputSlot(name=input_name, type="*"))
-                    wf._add_link(origin_id, origin_slot, int(nid_str), input_name)
+                    wf._add_link(origin_id, origin_slot, id_map[nid_str], input_name)
         return wf
+
+    @staticmethod
+    def _api_id_map(node_ids: set[str]) -> dict[str, int]:
+        """API node key -> int node id. Numeric keys keep their value; anything
+        else gets a fresh id above the numeric ones, so a prompt mixing both
+        never collides."""
+        mapping: dict[str, int] = {}
+        numeric = {}
+        for key in node_ids:
+            try:
+                numeric[key] = int(key)
+            except (TypeError, ValueError):
+                continue
+        mapping.update(numeric)
+        next_id = max(numeric.values(), default=0) + 1
+        for key in sorted(node_ids - numeric.keys()):
+            mapping[key] = next_id
+            next_id += 1
+        return mapping
 
     # --- editing ---
 
@@ -473,7 +520,12 @@ class Workflow:
                 raise ValueError(f"{node.type} has a single widget: 'text'")
             node.widgets_values = [value]
             return
-        slots = w.widget_slot_names(node.type, object_info, node.widgets_values)
+        # instance context: a custom JS-widget input is only recognizable from
+        # the sockets this node actually serialized (widgets._is_custom_widget).
+        # Without it the slot walk misses that widget, so the round-trip below
+        # would drop its value and shift every later one up a slot.
+        socket_names = {slot.name for slot in node.inputs}
+        slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
         if input_name not in slots:
             real_widgets = [s for s in slots if not s.endswith(w.SYNTHETIC_SUFFIXES)]
             control_slots = [s for s in slots if s.endswith(w.CONTROL_SUFFIX)]
@@ -498,13 +550,22 @@ class Workflow:
         # defaults) exactly as the ComfyUI frontend does, and a short array gets
         # padded with schema defaults - never None: the frontend crashes on null
         # string widgets when queueing ("Cannot read properties of null").
-        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        named = w.widgets_to_named(
+            node.type, node.widgets_values, object_info, socket_names
+        )
         named[input_name] = value
-        node.widgets_values = w.named_to_widgets(node.type, named, object_info)
+        node.widgets_values = w.named_to_widgets(
+            node.type, named, object_info, socket_names
+        )
 
     def get_widget(self, node_id: int, input_name: str, object_info: dict[str, Any]) -> Any:
         node = self.nodes[node_id]
-        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        named = w.widgets_to_named(
+            node.type,
+            node.widgets_values,
+            object_info,
+            {slot.name for slot in node.inputs},
+        )
         return named.get(input_name)
 
     # --- subgraphs ---

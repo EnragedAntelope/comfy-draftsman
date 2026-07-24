@@ -135,9 +135,9 @@ def test_profile_inpaint_feature_not_img2img(object_info, tmp_path):
 
 
 def test_profile_malformed_raises(object_info, tmp_path):
-    # a node without a type is malformed - _profile_workflow raises (KeyError on the
-    # missing "type"); find_workflow turns that into a skip rather than a failure.
-    with pytest.raises(KeyError):
+    # a node without a type is malformed - _profile_workflow raises (from_ui names
+    # the problem); find_workflow turns that into a skip rather than a failure.
+    with pytest.raises(ValueError, match="needs an 'id' and a 'type'"):
         server._profile_workflow("bad", {"nodes": [{"id": 1}]}, object_info, tmp_path / "learned")
 
 

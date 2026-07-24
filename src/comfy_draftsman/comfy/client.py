@@ -86,7 +86,7 @@ class ComfyClient:
         return await self._get_json("/models")
 
     async def list_models(self, folder: str) -> list[str]:
-        return await self._get_json(f"/models/{folder}")
+        return await self._get_json(f"/models/{quote(folder, safe='')}")
 
     async def get_model_metadata(self, folder: str, filename: str) -> dict[str, Any]:
         """Embedded safetensors __metadata__ via /view_metadata. ComfyUI 404s
@@ -95,7 +95,7 @@ class ComfyClient:
         if clean.startswith("/") or ".." in clean.split("/"):
             raise ValueError(f"invalid filename: {filename!r}")
         response = await self._send(
-            "GET", f"/view_metadata/{folder}", params={"filename": filename}
+            "GET", f"/view_metadata/{quote(folder, safe='')}", params={"filename": filename}
         )
         if response.status_code == 404:
             raise FileNotFoundError(filename)

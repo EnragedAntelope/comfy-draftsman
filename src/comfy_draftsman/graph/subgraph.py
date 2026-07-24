@@ -106,13 +106,18 @@ def _expand(
         node = inner.nodes.get(inner_id)
         if node is None or node.type not in object_info:
             continue
-        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        # instance context, same as model.set_widget: without it a custom
+        # JS-widget input is invisible and the rebuild below drops its value
+        sockets = {slot.name for slot in node.inputs}
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info, sockets)
         key = widget_name if widget_name in named else next(
             (k for k in named if k.endswith("__" + widget_name)), None
         )
         if key is not None:
             named[key] = value
-            node.widgets_values = w.named_to_widgets(node.type, named, object_info)
+            node.widgets_values = w.named_to_widgets(
+                node.type, named, object_info, sockets
+            )
 
     # what feeds each boundary input, from the instance's external wiring
     # (instance sockets are a named subset of the def's inputs)

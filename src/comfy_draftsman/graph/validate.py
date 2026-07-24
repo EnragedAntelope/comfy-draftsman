@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from . import widgets as w
-from .model import MODE_MUTE, MODE_NORMAL, VIRTUAL_TYPES, Workflow
+from .model import MODE_BYPASS, MODE_MUTE, MODE_NORMAL, VIRTUAL_TYPES, Workflow
 
 # A combo's option list is authoritative when we can trust the /object_info
 # snapshot: either it lists on-disk files (an "is this installed" check) or it
@@ -91,14 +91,21 @@ def check_widget_value(
     value: Any,
     object_info: dict[str, Any],
     widgets_values: Any = None,
+    socket_names: set[str] | None = None,
 ) -> str | None:
     """Actionable error string if ``value`` is invalid for this widget, else
     None. Used by edit ops to reject made-up values at WRITE time - validate()
     catches the same problems later, but late feedback wastes a round trip.
-    Widget-NAME checks live in set_widget/add_node; unknown names pass here."""
+    Widget-NAME checks live in set_widget/add_node; unknown names pass here.
+
+    ``socket_names`` (an existing node's declared sockets) makes custom
+    JS-widget inputs visible to the slot walk, so their spec is found and the
+    positions of the widgets after them line up. Omit it for a fresh node."""
     if class_type not in object_info or input_name.endswith(w.SYNTHETIC_SUFFIXES):
         return None
-    spec = w.widget_specs(class_type, object_info, widgets_values).get(input_name)
+    spec = w.widget_specs(class_type, object_info, widgets_values, socket_names).get(
+        input_name
+    )
     if spec is None:
         return None
     if value is None:
@@ -247,6 +254,28 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     "instance - resolve it via the Comfy Registry (resolve_missing_nodes)",
                     node.id,
                     class_type=node.type,
+                )
+            )
+            continue
+
+        # Muted (mode 2) and bypassed (mode 4) nodes are dropped by to_api and
+        # never reach ComfyUI, so their own widget values and unconnected inputs
+        # cannot break the run - and muting a branch is THE standard way to
+        # disable it. Checking them anyway produced blocking errors that refused
+        # run_workflow/save_workflow for a graph whose prompt document doesn't
+        # even contain those nodes. Report the disabled state once and move on;
+        # what a disabled node does to its *consumers* is checked below, on the
+        # active consumer itself (muted-input-source / dead-input-source).
+        if node.mode in (MODE_MUTE, MODE_BYPASS):
+            findings.append(
+                _finding(
+                    "info",
+                    "node-disabled",
+                    f"{node.type} #{node.id} is "
+                    + ("muted" if node.mode == MODE_MUTE else "bypassed")
+                    + " - it is skipped at run time and not validated "
+                    "(set_mode 0 to re-enable it)",
+                    node.id,
                 )
             )
             continue
@@ -404,6 +433,27 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     else None
                 )
                 src = wf.nodes.get(origin[0]) if origin is not None else None
+                if origin is None:
+                    # The slot is wired, but the chain resolves to no producer:
+                    # a BYPASSED node with nothing feeding its matching input
+                    # (bypass is a passthrough, so it forwards a hole), or a
+                    # link whose origin node is gone. to_api drops the input
+                    # entirely and ComfyUI rejects the prompt - name it here.
+                    findings.append(
+                        _finding(
+                            "error",
+                            "dead-input-source",
+                            f"{node.type} #{node.id}: required input '{name}' is wired "
+                            "but the chain feeding it resolves to nothing - a bypassed "
+                            "node passes its input through, so a bypassed node with "
+                            "that input unconnected forwards a hole. Connect the "
+                            "upstream source, or unbypass the node that should "
+                            "produce this value",
+                            node.id,
+                            input=name,
+                        )
+                    )
+                    continue
                 if src is not None and src.mode == MODE_MUTE:
                     findings.append(
                         _finding(

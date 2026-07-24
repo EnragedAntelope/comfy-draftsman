@@ -107,7 +107,7 @@ async def test_save_output_rejects_traversal_source(wired):
 
 async def test_save_output_rename_refused_for_batch(wired):
     result = await server.save_output(prompt_id="p1", dest_filename="one.png")
-    assert "error" in result and "multi-image" in result["error"]
+    assert "error" in result and "multi-file" in result["error"]
 
 
 async def test_save_output_dedupes_instead_of_clobbering(wired):
@@ -145,6 +145,115 @@ async def test_run_workflow_explicit_save_dir(wired, tmp_path):
     dest = tmp_path / "elsewhere"
     result = await server.run_workflow(wf_id, return_preview=False, save_dir=str(dest))
     assert result["saved_paths"] == [str(dest.resolve() / "out_00001_.png")]
+
+
+# --- round 17: every output kind relocates, not just images ------------------
+
+
+class VideoClient(RelocClient):
+    """A run that produced a video (Wan/LTX/AnimateDiff) and its audio track -
+    just as stuck inside ComfyUI's output tree as an image, and previously
+    impossible to hand to a sandboxed caller."""
+
+    def __init__(self):
+        super().__init__()
+        self.history = {
+            "outputs": {
+                "12": {
+                    "gifs": [{"filename": "clip.webp", "subfolder": "", "type": "output"}],
+                    "videos": [{"filename": "clip.mp4", "subfolder": "", "type": "output"}],
+                    "audio": [{"filename": "clip.flac", "subfolder": "", "type": "output"}],
+                }
+            }
+        }
+
+    async def run_and_wait(self, api, timeout=600.0, extra_data=None, front=False):
+        return {
+            "status": "success",
+            "prompt_id": "p1",
+            "outputs": ComfyClient._collect_outputs(self.history),
+        }
+
+
+@pytest.fixture
+def wired_video(monkeypatch, tmp_path):
+    client = VideoClient()
+    session = Session(tmp_path / "sessions")
+    mount = tmp_path / "mount"
+    monkeypatch.setattr(
+        server._State, "config",
+        Config(comfyui_url=BASE, session_dir=tmp_path, mount_dir=mount),
+    )
+    monkeypatch.setattr(server._State, "client", client)
+    monkeypatch.setattr(server._State, "session", session)
+    return client, session.create(Workflow.new(), title="t"), mount
+
+
+async def test_save_output_relocates_video_and_audio(wired_video):
+    _client, _wf_id, _mount = wired_video
+    result = await server.save_output(prompt_id="p1")
+    assert {__import__("pathlib").Path(p).name for p in result["saved_paths"]} == {
+        "clip.webp", "clip.mp4", "clip.flac",
+    }
+
+
+async def test_run_workflow_relocates_a_video_render(wired_video):
+    _client, wf_id, mount = wired_video
+    result = await server.run_workflow(wf_id, return_preview=False)
+    assert result["status"] == "success"
+    assert len(result["saved_paths"]) == 3
+    assert (mount.resolve() / "clip.mp4").exists()
+
+
+async def test_save_output_reports_no_files_not_no_images(monkeypatch, tmp_path):
+    client = RelocClient()
+    client.history = {"outputs": {"9": {}}}
+    session = Session(tmp_path / "s")
+    monkeypatch.setattr(
+        server._State, "config",
+        Config(comfyui_url=BASE, session_dir=tmp_path, mount_dir=tmp_path / "m"),
+    )
+    monkeypatch.setattr(server._State, "client", client)
+    monkeypatch.setattr(server._State, "session", session)
+    result = await server.save_output(prompt_id="p1")
+    assert "no output files" in result["error"]
+
+
+# --- round 17: save_dir on a background run is never silently dropped --------
+
+
+class QueueOnlyClient(RelocClient):
+    def _ws_url(self, client_id=None):
+        return f"ws://comfy.test/ws?clientId={client_id}"
+
+    async def queue_prompt(self, api, extra_data=None, client_id=None, front=False):
+        return {"prompt_id": "queued-1"}
+
+
+class _NoopTracker:
+    client_id = "tracker-1"
+
+    def ensure_running(self):
+        pass
+
+
+async def test_background_run_says_save_dir_does_not_apply(monkeypatch, tmp_path):
+    session = Session(tmp_path / "s")
+    monkeypatch.setattr(
+        server._State, "config",
+        Config(comfyui_url=BASE, session_dir=tmp_path, mount_dir=None),
+    )
+    monkeypatch.setattr(server._State, "client", QueueOnlyClient())
+    monkeypatch.setattr(server._State, "tracker", _NoopTracker())
+    monkeypatch.setattr(server._State, "session", session)
+    wf_id = session.create(Workflow.new(), title="t")
+    dest = tmp_path / "elsewhere"
+
+    result = await server.run_workflow(wf_id, wait=False, save_dir=str(dest))
+    assert result["status"] == "queued"
+    # previously: the dir was created, then silently ignored
+    assert "save_dir_ignored" in result
+    assert "save_output(prompt_id='queued-1'" in result["save_dir_ignored"]
 
 
 async def test_run_workflow_no_relocation_without_mount(monkeypatch, tmp_path):

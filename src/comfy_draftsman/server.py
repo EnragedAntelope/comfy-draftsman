@@ -28,7 +28,7 @@ from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
 from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
 from .comfy.progress import ProgressTracker
-from .comfy.registry import RegistryClient
+from .comfy.registry import RegistryClient, RegistryUnavailableError
 from .config import Config, load_config
 from .graph.annotate import annotate
 from .graph.lint import lint
@@ -55,6 +55,15 @@ class _State:
     registry: RegistryClient | None = None
     session: Session | None = None
     tracker: ProgressTracker | None = None
+
+
+# INVARIANT: the lazy accessors below (_config/_client/_registry/_session/
+# _tracker) must stay SYNCHRONOUS. FastMCP dispatches tool calls concurrently on
+# one event loop, and a sync function body cannot be preempted mid-way - that is
+# the only reason "check None, then construct" is safe here without a lock. Add
+# an `await` inside one of them and two racing cold calls could each build a
+# client, with _lifespan closing only whichever landed in _State and leaking the
+# other's connection pool. Construct eagerly-but-synchronously; await elsewhere.
 
 
 @asynccontextmanager
@@ -331,8 +340,10 @@ async def check_setup() -> dict[str, Any]:
         )
         reachable = False
 
-    # Soft requirement: can finished renders be relocated to a caller-reachable folder?
-    reloc = _mount_status()
+    # Soft requirement: can finished renders be relocated to a caller-reachable
+    # folder? Re-probe rather than trusting the cache - this is the doctor tool,
+    # run precisely when the operator has just changed something.
+    reloc = _mount_status(recheck=True)
     checks.append(
         {
             "name": "relocation",
@@ -800,11 +811,31 @@ async def import_workflow(
             return {"error": str(e)}
         title = title or name.replace("\\", "/").rsplit("/", 1)[-1]
     else:
-        data = json.loads(workflow_json)
-    if "nodes" in data:
-        wf = Workflow.from_ui(data)
-    else:
-        wf = Workflow.from_api(data, await _object_info())
+        try:
+            data = json.loads(workflow_json)
+        except json.JSONDecodeError as e:
+            return {
+                "error": f"workflow_json is not valid JSON: {e}",
+                "hint": "paste the file's exact contents, or use name=... to load a "
+                "workflow straight from ComfyUI (list_workflows shows them)",
+            }
+    if not isinstance(data, dict):
+        return {
+            "error": f"expected a JSON object, got {type(data).__name__}",
+            "hint": "a workflow is either UI format (a 'nodes' list) or API format "
+            "({node_id: {class_type, inputs}})",
+        }
+    try:
+        if "nodes" in data:
+            wf = Workflow.from_ui(data)
+        else:
+            wf = Workflow.from_api(data, await _object_info())
+    except (ValueError, KeyError, TypeError) as e:
+        return {
+            "error": f"could not parse this workflow: {e}",
+            "hint": "UI format needs a 'nodes' list with integer ids; API format is "
+            "{node_id: {class_type, inputs}}. export_workflow_json shows both shapes",
+        }
     workflow_id = _session().create(wf, title=title or "imported")
     return _summary(workflow_id, wf)
 
@@ -995,6 +1026,7 @@ async def edit_workflow(
                     problem = check_widget_value(
                         node.type, op["input"], op["value"], object_info,
                         node.widgets_values,
+                        {slot.name for slot in node.inputs},
                     )
                     if problem:
                         raise ValueError(f"{node.type} #{node_id}: {problem}")
@@ -1147,6 +1179,7 @@ async def edit_workflow(
                     problem = check_widget_value(
                         inner_node.type, input_name, value, object_info,
                         inner_node.widgets_values,
+                        {slot.name for slot in inner_node.inputs},
                     )
                     if problem:
                         raise ValueError(
@@ -1244,7 +1277,17 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
     registry_result: dict[str, Any] = {}
     capability_impact: list[dict[str, Any]] = []
     if missing:
-        registry_result = await _registry().resolve_node_classes(missing)
+        try:
+            registry_result = await _registry().resolve_node_classes(missing)
+        except RegistryUnavailableError as e:
+            # the registry is remote and optional; the local findings above are
+            # the valuable part of a diagnose - never throw them away for it
+            registry_result = {
+                "error": str(e),
+                "hint": "the findings above are complete; pack resolution needs "
+                "internet access - retry resolve_missing_nodes when online",
+                "unresolved": missing,
+            }
         resolved = registry_result.get("resolved", {})
         capability_impact = [
             {"class_type": cls, "provided_by": resolved.get(cls)} for cls in missing
@@ -1334,9 +1377,11 @@ async def run_workflow(
     allow_invalid=True submits even when the local validator reports errors
     (ComfyUI is the final judge; use it if a valid graph is being wrongly
     blocked). save_dir (or, when empty, the configured COMFYUI_MOUNT_DIR)
-    relocates every finished image out of ComfyUI's output tree into a folder
-    the caller can reach, returning saved_paths - so a render is presentable in
-    one call without a separate save_output step.
+    relocates every finished output file - images, video, audio alike - out of
+    ComfyUI's output tree into a folder the caller can reach, returning
+    saved_paths, so a render is presentable in one call without a separate
+    save_output step. Relocation needs finished files, so it only applies when
+    wait=True; a background run relocates later via save_output(prompt_id=...).
 
     front: None (default) checks the queue first - if >=2 prompts are already
     pending, NOTHING is queued and {status: queue_busy} comes back so the user
@@ -1403,7 +1448,15 @@ async def run_workflow(
             )
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
-        response = {"status": "queued", "prompt_id": queued["prompt_id"]}
+        response: dict[str, Any] = {"status": "queued", "prompt_id": queued["prompt_id"]}
+        if save_dir:
+            # relocation happens after a run finishes, and this call returns
+            # before that - say so rather than silently ignoring save_dir
+            response["save_dir_ignored"] = (
+                f"save_dir {save_dir!r} does not apply to a background run: nothing has "
+                "rendered yet. When get_run_status reports success, relocate with "
+                f"save_output(prompt_id={queued['prompt_id']!r}, dest_dir={save_dir!r})"
+            )
         if queued.get("node_errors"):
             response["node_errors"] = queued["node_errors"]
             response["warning"] = _PARTIAL_RUN_WARNING
@@ -1424,8 +1477,10 @@ async def run_workflow(
         result["node_errors"] = node_errors
         result["warning"] = _PARTIAL_RUN_WARNING
     if dest_root is not None and ran_ok:
-        image_items = [o for o in result["outputs"] if o.get("kind") == "images"]
-        saved, save_errors = await _relocate_outputs(_client(), image_items, dest_root)
+        # every kind, not just images: a video/audio render (Wan, LTX,
+        # AnimateDiff...) is just as undeliverable while it sits in ComfyUI's
+        # output tree, and /view serves all of them the same way
+        saved, save_errors = await _relocate_outputs(_client(), result["outputs"], dest_root)
         if saved:
             result["saved_paths"] = saved
             result["dest_dir"] = str(dest_root)
@@ -1520,13 +1575,34 @@ def _resolve_dest(dest_dir: str) -> tuple[Path | None, str | None]:
     return root, None
 
 
-def _mount_status() -> dict[str, Any]:
+_MOUNT_STATUS_CACHE: tuple[Path | None, dict[str, Any]] | None = None
+
+
+def _mount_status(recheck: bool = False) -> dict[str, Any]:
     """Relocation readiness for a sandboxed caller (Cowork/Desktop/Code). A render
     can only be handed to the user if COMFYUI_MOUNT_DIR points at a folder BOTH
     this server and the caller can see. We verify our half (configured, resolves,
     writable via a probe file); the shared-view half is the operator's to set up.
     Returned by get_instance_info and the draftsman://capabilities resource so an
-    agent can check up front instead of discovering it after a wasted render."""
+    agent can check up front instead of discovering it after a wasted render.
+
+    The result is cached against the configured mount path: the mount is fixed
+    by env var at start, but get_instance_info / check_setup / the capabilities
+    resource are all read repeatedly during a session and each was writing and
+    deleting a probe file. Caching on the path (not just "once per process")
+    means a reconfigured mount re-probes on its own. check_setup passes
+    recheck=True - it is the tool you run precisely because something on disk
+    changed."""
+    global _MOUNT_STATUS_CACHE
+    mount = _config().mount_dir
+    if not recheck and _MOUNT_STATUS_CACHE is not None and _MOUNT_STATUS_CACHE[0] == mount:
+        return _MOUNT_STATUS_CACHE[1]
+    status = _probe_mount()
+    _MOUNT_STATUS_CACHE = (mount, status)
+    return status
+
+
+def _probe_mount() -> dict[str, Any]:
     mount = _config().mount_dir
     if mount is None:
         return {
@@ -1628,12 +1704,12 @@ async def save_output(
     """Copy a finished render out of ComfyUI's output tree into a folder the
     caller (e.g. a Claude Desktop / Cowork sandbox) can reach. ComfyUI's save
     nodes only write inside its own output/ dir and reject absolute paths, so a
-    relocation step is needed before an image can be presented or edited.
+    relocation step is needed before a render can be presented or edited.
 
-    Provide prompt_id (relocates every output image of that finished job) OR an
-    explicit filename (+subfolder/type, as reported in a run's outputs).
-    dest_dir defaults to the configured COMFYUI_MOUNT_DIR. dest_filename renames
-    a single saved image. Returns {saved_paths, dest_dir}."""
+    Provide prompt_id (relocates every output FILE of that finished job -
+    images, video, audio) OR an explicit filename (+subfolder/type, as reported
+    in a run's outputs). dest_dir defaults to the configured COMFYUI_MOUNT_DIR.
+    dest_filename renames a single saved file. Returns {saved_paths, dest_dir}."""
     if not prompt_id and not filename:
         return {"error": "provide prompt_id or filename - nothing to relocate otherwise"}
     client = _client()
@@ -1641,9 +1717,11 @@ async def save_output(
         history = await client.get_history(prompt_id)
         if not history:
             return {"error": f"no finished job {prompt_id!r} in history (still running?)"}
-        items = [o for o in client._collect_outputs(history) if o.get("kind") == "images"]
+        # all kinds (images, gifs, videos, audio) - a video render is exactly as
+        # stuck inside ComfyUI's output tree as an image is
+        items = client._collect_outputs(history)
         if not items:
-            return {"error": f"job {prompt_id!r} produced no output images to relocate"}
+            return {"error": f"job {prompt_id!r} produced no output files to relocate"}
     else:
         problem = _check_output_ref(filename, subfolder)
         if problem:
@@ -1651,7 +1729,7 @@ async def save_output(
         items = [{"filename": filename, "subfolder": subfolder, "type": type}]
     if dest_filename and len(items) > 1:
         return {
-            "error": "dest_filename can't rename a multi-image batch; relocate one "
+            "error": "dest_filename can't rename a multi-file batch; relocate one "
             "at a time (pass an explicit filename) to rename"
         }
     dest_root, dest_error = _resolve_dest(dest_dir)
@@ -1921,14 +1999,20 @@ async def resolve_missing_nodes(class_types: list[str]) -> dict[str, Any]:
     is for model-family moves, not missing nodes). Returns pack ids, repos, and
     install hints. Installing custom nodes runs third-party code - surface the
     choice to the user."""
-    return await _registry().resolve_node_classes(class_types)
+    try:
+        return await _registry().resolve_node_classes(class_types)
+    except RegistryUnavailableError as e:
+        return {"error": str(e), "unresolved": class_types}
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def search_node_packs(query: str) -> list[dict[str, Any]]:
     """Search the Comfy Registry for node packs by capability (e.g. 'face detailer',
     'wildcards', 'video interpolation')."""
-    return await _registry().search_packs(query)
+    try:
+        return await _registry().search_packs(query)
+    except RegistryUnavailableError as e:
+        return [{"error": str(e)}]
 
 
 @mcp.tool(annotations=_READ_LOCAL)

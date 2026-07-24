@@ -282,6 +282,13 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
         if is_knob:
             node.color, node.bgcolor = GREEN
             painted += 1
+        elif (node.color, node.bgcolor) == GREEN:
+            # organize is idempotent, so a node that STOPPED being a knob (its
+            # prompt got wired from upstream, say) must lose the "touch me"
+            # green too - a stale highlight tells the reader to edit a box they
+            # can't type into. Only our own swatch is cleared; a colour a human
+            # picked is left alone.
+            node.color, node.bgcolor = None, None
     return painted
 
 

@@ -198,8 +198,13 @@ def detect_family(
     """
     best_key: tuple[int, int] = (0, 0)
     best_family = None
+    # built once: _detect_index globs the learned dir and parses every YAML in
+    # it, and find_workflow calls detect_family for each of up to 400 saved
+    # workflows - rebuilding it per model reference made that quadratic in disk
+    # reads for no benefit (the index can't change mid-call).
+    index = _detect_index(learned_dir)
     for widget_name, filename in _model_refs(wf, object_info):
-        for family, data in _detect_index(learned_dir).items():
+        for family, data in index.items():
             patterns = (data.get("detect") or {}).get("checkpoint_patterns", [])
             matched = [p for p in patterns if _matches(filename, [p])]
             if not matched:

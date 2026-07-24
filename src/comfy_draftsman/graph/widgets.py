@@ -433,15 +433,25 @@ def roll_seed_controls(
 
 
 def named_to_widgets(
-    class_type: str, named: dict[str, Any], object_info: dict[str, Any]
+    class_type: str,
+    named: dict[str, Any],
+    object_info: dict[str, Any],
+    socket_names: set[str] | None = None,
 ) -> list[Any]:
     """Build a positional widgets_values array from named values, defaults
     filling gaps. Dynamic-combo expansion follows the selected keys present in
     ``named`` (dotted sub-widgets), so an API-format prompt round-trips to the
-    UI array the frontend expects."""
+    UI array the frontend expects.
+
+    ``socket_names`` (the node instance's declared sockets) must be passed
+    whenever this rebuilds an EXISTING node's array: without it a custom
+    JS-widget input is invisible to the slot walk, so its value is dropped and
+    every later value shifts up a slot. Omit it only for schema-only contexts
+    (a fresh node with no instance to read sockets from).
+    """
     schema = _schema(class_type, object_info)
     values: list[Any] = []
-    for name, spec in _entries(schema, _named_resolver(named)):
+    for name, spec in _entries(schema, _named_resolver(named), socket_names):
         if name in named:
             values.append(named[name])
         elif spec is None:

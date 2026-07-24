@@ -7,7 +7,9 @@ every tool call. ``persist``ed workflows survive server restarts.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +58,20 @@ class Session:
         path = self._dir / f"{wf_id}.json"
         document = wf.to_ui()
         document.setdefault("extra", {})["draftsman_title"] = self._titles.get(wf_id, "untitled")
-        path.write_text(json.dumps(document, indent=1), encoding="utf-8")
+        # Write-then-rename: run_workflow persists on every seed roll, so an
+        # interrupted write is not hypothetical, and a half-written file would
+        # make this workflow id permanently unloadable.
+        fd, tmp_name = tempfile.mkstemp(dir=self._dir, prefix=f".{wf_id}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(document, handle, indent=1)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)  # atomic on POSIX and Windows
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return path
 
     def _load(self, wf_id: str) -> bool:
@@ -66,7 +81,15 @@ class Session:
         path = self._dir / f"{wf_id}.json"
         if not path.is_file():
             return False
-        document = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            # a truncated/unreadable file should read as "no such workflow" with
+            # the reason, not as an opaque decoder traceback from get()
+            raise KeyError(
+                f"workflow '{wf_id}' exists on disk at {path} but could not be read "
+                f"({e}); delete the file or re-import the workflow"
+            ) from e
         self._workflows[wf_id] = Workflow.from_ui(document)
         self._titles[wf_id] = document.get("extra", {}).get("draftsman_title", "untitled")
         return True
