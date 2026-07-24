@@ -131,6 +131,48 @@ def test_layout_is_deterministic(txt2img, object_info):
     assert first == second
 
 
+def test_ranks_breaks_cycle_instead_of_piling_at_zero(object_info):
+    """A cyclic graph (rare feedback edge) must still yield distinct ranks - the
+    old Kahn-only ranker left every cycle node at rank 0 (all at the far-left
+    edge, overlapping)."""
+    from comfy_draftsman.graph.layout import _ranks
+    from comfy_draftsman.graph.model import Link
+
+    wf = Workflow.new()
+    a = wf.add_node("CLIPTextEncode", object_info=object_info)
+    b = wf.add_node("KSampler", object_info=object_info)
+    c = wf.add_node("VAEDecode", object_info=object_info)
+    wf.links = {
+        1: Link(1, a.id, 0, b.id, 0, "*"),
+        2: Link(2, b.id, 0, c.id, 0, "*"),
+        3: Link(3, c.id, 0, a.id, 0, "*"),  # feedback edge closes the cycle
+    }
+    ranks = _ranks(wf)  # must terminate
+    assert {a.id, b.id, c.id} <= set(ranks)
+    assert len({ranks[a.id], ranks[b.id], ranks[c.id]}) > 1, "cycle nodes all at one rank"
+
+
+def test_cyclic_graph_layout_terminates_spreads_and_is_deterministic(object_info):
+    """apply_layout on a cyclic graph must not hang, must place nodes in distinct
+    columns (no pile-up), and stay deterministic."""
+    from comfy_draftsman.graph.model import Link
+
+    wf = Workflow.new()
+    a = wf.add_node("CLIPTextEncode", object_info=object_info)
+    b = wf.add_node("KSampler", object_info=object_info)
+    c = wf.add_node("VAEDecode", object_info=object_info)
+    wf.links = {
+        1: Link(1, a.id, 0, b.id, 0, "*"),
+        2: Link(2, b.id, 0, c.id, 0, "*"),
+        3: Link(3, c.id, 0, a.id, 0, "*"),
+    }
+    apply_layout(wf, object_info)  # must not hang or raise
+    assert len({n.pos[0] for n in wf.nodes.values()}) == 3, "cycle nodes piled in one column"
+    first = {n.id: tuple(n.pos) for n in wf.nodes.values()}
+    apply_layout(wf, object_info)
+    assert first == {n.id: tuple(n.pos) for n in wf.nodes.values()}
+
+
 def test_estimate_size_scales_with_widget_count(object_info):
     ksampler = estimate_size("KSampler", object_info)
     decode = estimate_size("VAEDecode", object_info)

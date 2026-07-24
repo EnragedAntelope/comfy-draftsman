@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.2 — Cycle-safe auto-layout
+
+### Fixed
+
+- **Auto-layout no longer piles cyclic nodes at the far-left edge.** The layout
+  ranker (`graph/layout._ranks`) used a plain topological sort, so a workflow
+  containing a feedback edge (rare — an unusual custom node that loops output
+  back to an upstream input) left every node in the cycle at rank 0, stacked and
+  overlapping. The ranker now breaks a cycle by releasing its most-resolved node
+  and continues, spreading the nodes across columns. Acyclic workflows — every
+  normal image pipeline — hit an identical code path and are byte-for-byte
+  unchanged (verified: the existing left-to-right, no-overlap, real-template, and
+  determinism layout tests all still pass).
+
 ## 0.7.1 — Repo audit remediation
 
 Correctness and hygiene fixes surfaced by a full-repo audit. No new tools or

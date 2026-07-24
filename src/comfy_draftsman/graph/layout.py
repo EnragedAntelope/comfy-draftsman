@@ -103,7 +103,16 @@ def _node_widget_count(node: Any) -> int | None:
 
 
 def _ranks(wf: Workflow) -> dict[int, int]:
-    """Longest-path rank per linked node; unlinked non-note nodes go to rank 0."""
+    """Longest-path rank per linked node; unlinked non-note nodes go to rank 0.
+
+    Kahn's algorithm, with one guard for cycles: image workflows are acyclic, but
+    a feedback edge from an unusual custom node would otherwise leave every node
+    in the cycle stuck at rank 0 (piled at the far-left edge, overlapping). When
+    the frontier empties with nodes still unprocessed, the most-resolved leftover
+    (fewest remaining in-edges, then lowest id) is released to break the cycle and
+    ranking continues. An acyclic graph never hits that path, so its ranks - and
+    thus its layout - are byte-for-byte unchanged.
+    """
     downstream: dict[int, list[int]] = {}
     indegree: dict[int, int] = {}
     linked: set[int] = set()
@@ -114,17 +123,29 @@ def _ranks(wf: Workflow) -> dict[int, int]:
         indegree[link.target_id] = indegree.get(link.target_id, 0) + 1
         linked.update((link.origin_id, link.target_id))
     rank = {nid: 0 for nid in linked}
-    frontier = [nid for nid in sorted(linked) if indegree.get(nid, 0) == 0]
     remaining_in = dict(indegree)
-    order: list[int] = []
-    while frontier:
-        nid = frontier.pop(0)
-        order.append(nid)
-        for child in downstream.get(nid, []):
-            rank[child] = max(rank[child], rank[nid] + 1)
-            remaining_in[child] -= 1
-            if remaining_in[child] == 0:
-                frontier.append(child)
+    frontier = [nid for nid in sorted(linked) if indegree.get(nid, 0) == 0]
+    processed: set[int] = set()
+    while len(processed) < len(linked):
+        while frontier:
+            nid = frontier.pop(0)
+            if nid in processed:
+                continue
+            processed.add(nid)
+            for child in downstream.get(nid, []):
+                rank[child] = max(rank[child], rank[nid] + 1)
+                remaining_in[child] -= 1
+                if remaining_in[child] <= 0 and child not in processed:
+                    frontier.append(child)
+        if len(processed) < len(linked):
+            # cycle: no zero-indegree node remains. Release the most-resolved
+            # leftover so the loop makes progress (terminates: one new node each pass).
+            victim = min(
+                (nid for nid in sorted(linked) if nid not in processed),
+                key=lambda n: (remaining_in.get(n, 0), n),
+            )
+            remaining_in[victim] = 0
+            frontier.append(victim)
     for node in wf.nodes.values():
         if node.id not in rank and node.type not in NOTE_TYPES:
             rank[node.id] = 0
