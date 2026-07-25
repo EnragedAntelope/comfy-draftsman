@@ -24,6 +24,10 @@ _FILE_COMBO_RE = re.compile(
     r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|sft|vae|pkl|yaml|yml)$", re.IGNORECASE
 )
 
+# How many disabled node ids to name in the single collapsed `node-disabled`
+# note; the rest are counted. The full list is always in its `node_ids` field.
+_DISABLED_IDS_SHOWN = 12
+
 
 def _looks_like_file_combo(choices: list[Any]) -> bool:
     return any(
@@ -223,6 +227,7 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    disabled: list[int] = []
     for node in wf.nodes.values():
         if node.type in VIRTUAL_TYPES:
             continue
@@ -263,21 +268,12 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
         # cannot break the run - and muting a branch is THE standard way to
         # disable it. Checking them anyway produced blocking errors that refused
         # run_workflow/save_workflow for a graph whose prompt document doesn't
-        # even contain those nodes. Report the disabled state once and move on;
-        # what a disabled node does to its *consumers* is checked below, on the
-        # active consumer itself (muted-input-source / dead-input-source).
+        # even contain those nodes. Collected and reported as ONE finding below
+        # (a 25-node muted branch used to emit 25 near-identical notes); what a
+        # disabled node does to its *consumers* is checked on the active consumer
+        # itself (muted-input-source / dead-input-source).
         if node.mode in (MODE_MUTE, MODE_BYPASS):
-            findings.append(
-                _finding(
-                    "info",
-                    "node-disabled",
-                    f"{node.type} #{node.id} is "
-                    + ("muted" if node.mode == MODE_MUTE else "bypassed")
-                    + " - it is skipped at run time and not validated "
-                    "(set_mode 0 to re-enable it)",
-                    node.id,
-                )
-            )
+            disabled.append(node.id)
             continue
 
         socket_names = {slot.name for slot in node.inputs}
@@ -499,4 +495,20 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         input=name,
                     )
                 )
+    if disabled:
+        # one note for the whole set: repeating it per node was pure token cost
+        # on a graph with a disabled branch, and said nothing new each time
+        shown = ", ".join(f"#{nid}" for nid in sorted(disabled)[:_DISABLED_IDS_SHOWN])
+        more = len(disabled) - _DISABLED_IDS_SHOWN
+        findings.append(
+            _finding(
+                "info",
+                "node-disabled",
+                f"{len(disabled)} node(s) muted/bypassed - skipped at run time and "
+                f"not validated: {shown}"
+                + (f" (+{more} more)" if more > 0 else "")
+                + ". set_mode 0 re-enables one",
+                node_ids=sorted(disabled),
+            )
+        )
     return findings

@@ -145,10 +145,13 @@ def test_disabled_branch_does_not_block_run_or_save(object_info, mode):
 
 @pytest.mark.parametrize("mode", [MODE_MUTE, MODE_BYPASS])
 def test_disabled_nodes_are_reported_as_info(object_info, mode):
+    """One collapsed note for the whole set - see test_round18_tokens for why
+    this is not one finding per node."""
     findings = validate(_disabled_branch(object_info, mode), object_info)
     disabled = [f for f in findings if f["code"] == "node-disabled"]
-    assert len(disabled) == 2
-    assert all(f["level"] == "info" for f in disabled)
+    assert len(disabled) == 1
+    assert disabled[0]["level"] == "info"
+    assert disabled[0]["node_ids"] == [1, 2]
 
 
 def test_enabling_the_branch_restores_the_errors(object_info):

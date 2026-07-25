@@ -10,10 +10,17 @@ from typing import Any
 
 from . import widgets as w
 from .layout import is_text_display
-from .model import Node, Workflow
+from .model import MODE_BYPASS, MODE_MUTE, Node, Workflow
 
 NOTE_TYPES = {"Note", "MarkdownNote"}
 _PROMPT_WIDGETS = ("text", "prompt", "wildcard_text")
+
+# Overlap is reported as ONE finding naming at most this many nodes. Every node
+# added through edit_workflow sits at the default position until
+# organize_workflow runs, so a freshly built graph is N-way self-overlapping:
+# reporting it pairwise produced 190 findings for 20 nodes (and 1,326 for 52),
+# which is both unreadable and the single largest token sink in the server.
+_OVERLAP_IDS_SHOWN = 8
 
 
 def _finding(code: str, message: str, node_id: int | None = None) -> dict[str, Any]:
@@ -98,6 +105,13 @@ def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
         linked_ids.update((link.origin_id, link.target_id))
 
     for node in real_nodes:
+        if node.mode in (MODE_MUTE, MODE_BYPASS):
+            # a disabled node is dropped before the prompt is submitted, so its
+            # own wiring is not a defect - validate skips it for the same reason,
+            # and lint contradicting validate on the same graph (plus
+            # save_workflow's "lint is not clean" nag over a deliberately muted
+            # branch) was pure noise
+            continue
         schema = object_info.get(node.type)
         if schema is not None:
             for name, spec in schema.get("input", {}).get("required", {}).items():
@@ -130,16 +144,39 @@ def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
             )
 
     findings.extend(_missing_prompt_previews(wf, object_info))
+    findings.extend(_overlap_findings(wf))
+    return findings
 
-    # overlapping nodes make workflows unreadable
+
+def _overlap_findings(wf: Workflow) -> list[dict[str, Any]]:
+    """Overlapping nodes make workflows unreadable - reported as ONE finding.
+
+    Every node involved in any overlap is collected and named once. The previous
+    per-pair report was quadratic in output: a graph whose nodes are all still at
+    the default position (i.e. anything built with edit_workflow and not yet
+    organized) produced N*(N-1)/2 findings that all said the same thing.
+    """
     boxes = [
         (n.id, (n.pos[0], n.pos[1], n.pos[0] + n.size[0], n.pos[1] + n.size[1]))
         for n in wf.nodes.values()
     ]
+    involved: set[int] = set()
+    pairs = 0
     for i, (id_a, a) in enumerate(boxes):
         for id_b, b in boxes[i + 1 :]:
             if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
-                findings.append(
-                    _finding("overlap", f"nodes #{id_a} and #{id_b} overlap visually", id_a)
-                )
-    return findings
+                involved.update((id_a, id_b))
+                pairs += 1
+    if not involved:
+        return []
+    ids = sorted(involved)
+    shown = ", ".join(f"#{nid}" for nid in ids[:_OVERLAP_IDS_SHOWN])
+    more = len(ids) - _OVERLAP_IDS_SHOWN
+    finding = _finding(
+        "overlap",
+        f"{len(ids)} node(s) overlap visually ({pairs} overlapping pair(s)): {shown}"
+        + (f" (+{more} more)" if more > 0 else "")
+        + " - organize_workflow lays the whole graph out in one pass",
+    )
+    finding["node_ids"] = ids
+    return [finding]

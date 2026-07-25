@@ -90,6 +90,31 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 - **Token discipline:** `edit_workflow` returns a compact delta by default
   (`summary=true` opts into the full graph); summaries clip long widget
   strings; guidance sentences are stated once per result, not per item.
+- **Every list a tool returns must be bounded, and per-item repetition is a
+  bug.** This is the rule the 0.9.0 audit found broken in five places, so it is
+  written down with its enforcement points:
+  - *Findings* go through `server._cap_findings` (severity-sorted, errors never
+    dropped) or `server._cap_lint` (advisory, straight cap). **Every** tool that
+    returns findings uses one — `validate_workflow`, `diagnose_workflow`,
+    `organize_workflow`, `port_workflow`, `run_workflow`, `save_workflow`.
+  - *File and choice lists* are capped with a true `count` plus a hint naming
+    the narrowing parameter: `catalog._apply_choices` (combos, 24) and
+    `list_models` (`_MODEL_FILES_CAP` 60, hint `search=`). They are the same
+    data — an instance with 400 LoRAs must not return 400 names just because the
+    caller asked a different tool.
+  - *Folded schemas* are capped: `search_nodes(detail=True)` fills only the top
+    `_DETAIL_SCHEMA_CAP` hits, since a schema is ~300-700 tokens each.
+  - *A condition affecting N nodes is ONE finding* naming a few ids and counting
+    the rest, with the full list in a `node_ids` field — never N findings. See
+    `lint._overlap_findings` and validate's `node-disabled`. A pairwise report is
+    quadratic: 20 co-located nodes once produced 190 findings identical in
+    substance, and 52 produced 1,326 (~30k tokens in one response).
+  - `tests/test_round18_tokens.py` asserts ceilings on all of the above, so a
+    regression fails in CI instead of in a user's context window.
+- **`ok` means "no errors", never "no findings".** `validate_workflow` and
+  `diagnose_workflow` both gate on `level == "error"`. Using `not findings` (as
+  diagnose once did) makes an informational note — a disabled node, a subgraph
+  instance — report a healthy workflow as broken.
 - **Subgraph fixtures must be realistic:** minimal hand-built defs without
   boundary links or inner `inputs` arrays behave differently from real
   exports — `tests/fixtures/subgraph_real_template.json` is the reference.
@@ -232,6 +257,16 @@ Open:
 
 Recently closed:
 
+- **[DONE, round 18] Token efficiency** — `lint`'s overlap report collapsed from
+  one finding per overlapping *pair* (quadratic: 1,326 findings / ~30k tokens on
+  a 52-node graph) to one finding for the set; `save_workflow`/
+  `organize_workflow`/`port_workflow` now cap their findings like the other
+  tools (~35k → ~5.4k tokens on a messy graph); `list_models` and
+  `search_nodes(detail=True)` capped; the `node-disabled` note collapsed to one
+  finding. Plus two bugs: `_cap_findings` could return more than it received with
+  a false "…0 more omitted" marker, and `diagnose_workflow`'s `ok` flipped on a
+  purely informational finding. Ceilings pinned in
+  `tests/test_round18_tokens.py`.
 - **[DONE, round 17] Repo-audit remediation** — `set_widget` no longer destroys
   a neighbouring widget's value on pack nodes with custom JS-widget inputs
   (`socket_names` threaded through the whole write path); muted/bypassed nodes

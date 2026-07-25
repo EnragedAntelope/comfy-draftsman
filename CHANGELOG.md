@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.9.0 — Token efficiency
+
+A second audit, asking specifically whether the server is token-efficient to
+use. The architecture already had good instincts — the `edit_workflow` compact
+delta, combo capping in `get_node_info`, digested safetensors metadata — but
+five paths bypassed that discipline, the worst able to return ~30k tokens from a
+single call. Every number below was measured by running the code.
+
+Minor rather than patch: several tool outputs change shape (capped lists, one
+collapsed finding instead of many, a corrected `ok`).
+
+### Fixed — token leaks
+
+- **`lint` no longer reports overlap pairwise.** The check is O(n²) and emitted
+  one finding *per overlapping pair*. Because `add_node` leaves every node at the
+  default position until `organize_workflow` runs, anything built through
+  `edit_workflow` is N-way self-overlapping — so the report was quadratic in the
+  node count while saying one thing: "not laid out yet". Now a single finding
+  naming the nodes, with the full id list in `node_ids`.
+
+  | graph | before | after |
+  |---|---|---|
+  | 20-node mid-build | 292 findings, 27,108 chars (~6,777 tok) | 103 findings, ~2,884 tok (capped: ~1,120) |
+  | 52-node messy | 1,428 findings, 122,754 chars (~30,688 tok) | 103 findings, ~2,832 tok |
+
+- **`save_workflow`, `organize_workflow` and `port_workflow` now cap their
+  findings.** `_cap_findings` existed for exactly this and was applied by
+  `validate_workflow`/`diagnose_workflow` only; the other three returned
+  everything. `save_workflow` measured **~35,000 tok → ~5,400 tok** on a messy
+  graph. Advisory lint gets its own `_cap_lint` (lint findings carry no severity
+  and never block, so a straight cap is right).
+- **`list_models` is capped at 60 files** with the true `count`, a `truncated`
+  count and a `search=` hint. It served the same filenames an `object_info` combo
+  does — and those are capped at 24 — so an instance with 400 LoRAs returned
+  ~5,283 tok per call, against the repo's own documented rule.
+- **`search_nodes(detail=True)` folds a schema into the top 8 hits only**, and
+  says so. At the default `limit=25` it measured ~13,068 chars (~3,267 tok) on
+  the *trimmed* test fixture; a real instance is larger.
+- **A disabled branch is one finding, not one per node.** The `node-disabled`
+  note added in 0.8.0 repeated ~174 chars per node — the per-item repetition this
+  project explicitly forbids. Now one note listing the ids (~64 tok flat,
+  whatever the count), with every id in `node_ids`.
+
+### Fixed — bugs
+
+- **`_cap_findings` could return MORE than it was given, and lie about it.** When
+  errors alone filled the cap, nothing was dropped but the truncation marker was
+  appended anyway: 88 findings in → 89 out, ending with *"…0 more finding(s)
+  omitted"*. The marker is now only added when something was actually trimmed.
+- **`diagnose_workflow`'s `ok` flipped on an informational note.** It used
+  `not findings`, so *any* finding — including a purely informational one —
+  reported the workflow as broken. A clean, fully-wired graph with one muted
+  PreviewImage returned `ok: false` while `validate_workflow` correctly returned
+  `ok: true`. Now both use the same errors-only predicate. Pre-existing (the
+  `subgraph-instance` info could already trigger it), but 0.8.0's `node-disabled`
+  made it fire on any graph with a disabled node.
+- **`lint` no longer contradicts `validate` about disabled nodes.** 0.8.0 taught
+  `validate` to skip muted/bypassed nodes but left `lint` reporting
+  `unconnected-input`/`orphan-node` on them, so the two tools disagreed about the
+  same graph and `save_workflow`'s *"lint is not clean"* nag fired over a
+  deliberately muted branch.
+
+### Audited, not changed
+
+- **Tool descriptions stay as they are.** The 29 tool schemas cost ~5,673 tokens
+  of fixed context per session (plus ~221 for the server instructions).
+  `edit_workflow` (1,813 chars) and `run_workflow` (1,676) dominate, but
+  `edit_workflow`'s bulk *is* the op-schema list an agent needs to call it
+  correctly at all — a misused tool costs far more than the prose saves. Measured
+  and left alone deliberately.
+- **`add_node` still places every node at `[0, 0]`.** This is the root cause of
+  the overlap noise above, but `organize_workflow` overwrites positions anyway,
+  so fixing the *reporting* was the right-sized change. Noted so it is not
+  rediscovered as a bug.
+- **Errors are still never dropped by the cap**, by design — a graph with 88
+  missing node classes returns 88 errors. Hiding actionable errors to save tokens
+  would be the wrong trade.
+
+### Dev
+
+- New `tests/test_round18_tokens.py` (13 tests) asserting measured *ceilings* on
+  the payloads most likely to blow up, so an unbounded list fails in CI rather
+  than in someone's conversation. Ceilings are ~2x current size: regression
+  guards, not golden masters.
+
 ## 0.8.0 — Full repo audit remediation
 
 A second full-repo audit, this time reproducing each defect by running the code

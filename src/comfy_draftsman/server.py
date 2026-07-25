@@ -157,6 +157,32 @@ def _clip(v: Any) -> Any:
 _LEVEL_RANK = {"error": 0, "warning": 1, "info": 2}
 _FINDINGS_CAP = 40
 
+# search_nodes(detail=True) folds a full node schema into each hit; only the top
+# few get one, or a default-limit search becomes a multi-thousand-token response.
+_DETAIL_SCHEMA_CAP = 8
+
+# list_models serves the same filenames a combo does, and object_info combos are
+# capped at 24 (catalog.MAX_COMBO_CHOICES) for exactly this reason - an instance
+# with hundreds of LoRAs would otherwise return the lot on every call.
+_MODEL_FILES_CAP = 60
+
+
+def _cap_lint(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cap advisory lint output. Lint findings carry no severity (they never
+    block), so this is a straight cap - but it must exist: lint is returned by
+    organize_workflow and save_workflow, and an unorganized graph can produce
+    hundreds of findings."""
+    if len(warnings) <= _FINDINGS_CAP:
+        return warnings
+    return [
+        *warnings[:_FINDINGS_CAP],
+        {
+            "code": "lint-truncated",
+            "message": f"…{len(warnings) - _FINDINGS_CAP} more lint finding(s) "
+            "omitted; organize_workflow usually clears most of them at once",
+        },
+    ]
+
 
 def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort findings most-severe first and cap the number returned to the model,
@@ -168,11 +194,17 @@ def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     errors = [f for f in ordered if f.get("level") == "error"]
     keep = max(_FINDINGS_CAP, len(errors))  # never drop an error to make room
     capped = ordered[:keep]
+    omitted = len(ordered) - keep
+    if not omitted:
+        # errors alone filled the cap, so nothing was actually dropped. Appending
+        # the marker anyway made the "capped" list LONGER than its input and
+        # announced "…0 more finding(s) omitted".
+        return capped
     capped.append(
         {
             "level": "info",
             "code": "findings-truncated",
-            "message": f"…{len(ordered) - len(capped)} more finding(s) omitted; fix "
+            "message": f"…{omitted} more finding(s) omitted; fix "
             "the ones above first, then re-validate",
         }
     )
@@ -382,8 +414,20 @@ async def search_nodes(
     object_info = await _object_info()
     results = catalog_search(object_info, query, category=category or None, limit=limit)
     if detail:
-        for hit in results:
+        # A folded schema is ~300-700 tokens each, so detail=True at the default
+        # limit of 25 was a multi-thousand-token response. Fold into the top hits
+        # only and say so - the rest still come back as normal search results.
+        for hit in results[:_DETAIL_SCHEMA_CAP]:
             hit["schema"] = node_summary(object_info, hit["class_type"])
+        if len(results) > _DETAIL_SCHEMA_CAP:
+            results.append(
+                {
+                    "note": f"schemas folded into the first {_DETAIL_SCHEMA_CAP} hits "
+                    f"only ({len(results) - _DETAIL_SCHEMA_CAP} more matched); narrow "
+                    "the query, pass a smaller limit, or call get_node_info "
+                    "(it batches: class_types=[...]) for specific classes"
+                }
+            )
     return results
 
 
@@ -463,9 +507,21 @@ async def list_models(
     if search:
         needle = search.lower()
         files = [f for f in files if needle in f.lower()]
-    result = {"folder": folder, "count": len(files), "files": files}
+    # cap like a combo list: `count` still reports the true total, so the agent
+    # knows to narrow rather than assuming it has seen everything
+    result: dict[str, Any] = {
+        "folder": folder,
+        "count": len(files),
+        "files": files[:_MODEL_FILES_CAP],
+    }
     if search:
         result["search"] = search
+    if len(files) > _MODEL_FILES_CAP:
+        result["truncated"] = len(files) - _MODEL_FILES_CAP
+        result["hint"] = (
+            f"showing {_MODEL_FILES_CAP} of {len(files)}; pass search='substring' "
+            "to narrow (matching is case-insensitive on the filename)"
+        )
     return result
 
 
@@ -1242,7 +1298,7 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
         "workflow layout updated in place; save_workflow persists it, "
         "export_workflow_json shows the reorganized graph"
     )
-    report["lint"] = lint(wf, object_info)
+    report["lint"] = _cap_lint(lint(wf, object_info))
     return report
 
 
@@ -1293,7 +1349,10 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
             {"class_type": cls, "provided_by": resolved.get(cls)} for cls in missing
         ]
     result: dict[str, Any] = {
-        "ok": not findings,
+        # errors only, same predicate as validate_workflow: an informational
+        # note (a disabled node, a subgraph instance) is not a problem, and
+        # reporting ok=False for one sent agents hunting for a nonexistent fault
+        "ok": not any(f["level"] == "error" for f in findings),
         "findings": _cap_findings(findings),
         "missing_node_packs": registry_result,
         "capability_impact": capability_impact,
@@ -1323,7 +1382,7 @@ async def port_workflow(workflow_id: str, target_family: str) -> dict[str, Any]:
     get_instance_info."""
     wf = _wf(workflow_id)
     report = port_engine(wf, target_family, await _object_info(refresh=True), _config().learned_dir)
-    report["validate"] = validate(wf, await _object_info())
+    report["validate"] = _cap_findings(validate(wf, await _object_info()))
     return report
 
 
@@ -1418,7 +1477,7 @@ async def run_workflow(
         if errors:
             return {
                 "status": "invalid",
-                "findings": errors,
+                "findings": _cap_findings(errors),
                 "hint": "fix with edit_workflow (diagnose_workflow for missing node "
                 "classes), or run_workflow(allow_invalid=True) to submit anyway",
             }
@@ -1926,7 +1985,7 @@ async def save_workflow(
                 "break for the user - fix them with edit_workflow, or pass "
                 "allow_invalid=True to save a known-broken draft anyway"
             ),
-            "findings": errors,
+            "findings": _cap_findings(errors),
         }
     document = wf.to_ui()
     candidates = [name, f"{name} (draftsman)"] + [f"{name} (draftsman {i})" for i in range(2, 21)]
@@ -1963,8 +2022,8 @@ async def save_workflow(
         "saved_to_comfyui": f"workflows/{filename} (visible in the ComfyUI workflow browser)",
         "renamed_from": renamed_from,
         "local_copy": local,
-        "validation": findings,
-        "lint": warnings,
+        "validation": _cap_findings(findings),
+        "lint": _cap_lint(warnings),
         "note": persist_note
         + (
             f"'{name}' already existed, so this saved as '{filename}' - the original file is untouched. "
