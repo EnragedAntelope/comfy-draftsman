@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.10.0 — PrimitiveNode authoring, socket typing, data outputs
+
+From a live session building a character-cycling workflow (report kept in
+project memory, not the repo) that hit three walls, plus one more found in the
+repo audit that followed. All four are behavior changes, hence minor.
+
+### Fixed
+
+- **`connect` no longer treats `COMBO` as a wildcard.** A STRING output wired
+  into a converted combo widget used to pass `validate_workflow` clean and then
+  get rejected by ComfyUI's own executor at queue time
+  (`return_type_mismatch`) — which queues the prompt anyway and runs only the
+  rest of the graph, so the failure was silent. `connect` now checks every
+  wire with `model.types_compatible` (shared with the new `validate` check
+  below) and refuses a mismatch unless `"force": true`. `validate_workflow`
+  gained the matching `link-type-mismatch` (error) check, so the same mistake
+  arriving via `import_workflow` is no longer invisible until the failed run.
+- **`PrimitiveNode` and `Reroute` are now authorable.** Both were already
+  recognized as virtual nodes (`to_api` inlined a primitive's value and traced
+  through reroutes), but `add_node`'s installed-class gate only special-cased
+  `Note`/`MarkdownNote`, so adding either failed with "not installed on this
+  instance." This blocked the correct ComfyUI idiom for "a value that adapts
+  to and can cycle whatever it's wired to" — a dropdown, a checkpoint, a LoRA
+  — forcing a strictly worse same-type-only workaround. A primitive is
+  typeless until `connect`ed, then mirrors its target's type (COMBO included)
+  the way the frontend does on first connection; `set_widget` addresses it by
+  the mirrored widget's name or the alias `"value"`, plus
+  `"control_after_generate"`; `apply_seed_control` (used by
+  `run_workflow(roll_seeds=True)`) now rolls a primitive's control mode too —
+  this is the only way a headless caller can cycle a COMBO across runs, since
+  `control_after_generate` is browser JS the raw `/prompt` API never applies.
+  `validate` checks a primitive's value against every widget it drives (the
+  one place anything does, since its consumer's own widget check is skipped
+  because that slot is connected); `organize_workflow` places it as a green
+  Inputs-band knob and keeps a Reroute glued to its source as a layout
+  companion.
+- **`run_workflow`/`get_run_status` surface non-file output values.** Only the
+  four FILE keys (`images`/`gifs`/`videos`/`audio`) were ever harvested from a
+  finished job's history, so a custom node's other return values — a save
+  node's `filenames`/`path`/`saved_count`, a ShowText-style node's `text` —
+  were silently dropped. Both tools now include `data_outputs` (per node id,
+  clipped and budgeted, omitted entirely when empty) alongside the unchanged
+  file `outputs`.
+- **`OutputSlot` no longer drops a primitive's widget marker on save.** A real
+  `PrimitiveNode` output serializes as `{"widget": {"name": "steps"}, ...}`
+  (confirmed against the bundled `sdxl_simple_example.json` fixture, which
+  itself uses primitives); `OutputSlot` had no field for it, so every
+  save/load round-trip of a workflow using primitives silently lost what each
+  one mirrored — including that bundled template.
+
+### Also
+
+- `edit_workflow`'s docstring collapsed five near-duplicate
+  `*_in_definition` op lines into one rule (`_check_op` already names an op's
+  required keys on error, so the schema doesn't need repeating six times).
+  Net tool-schema cost across all 29 tools went down (~19.6k vs ~20.0k chars)
+  despite the new capability.
+
 ## 0.9.0 — Token efficiency
 
 A second audit, asking specifically whether the server is token-efficient to

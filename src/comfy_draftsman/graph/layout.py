@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from . import widgets as w
-from .model import Workflow
+from .model import VIRTUAL_TYPES, Workflow
 
 X_GUTTER = 90.0
 Y_GAP = 40.0
@@ -160,7 +160,8 @@ def apply_layout(
         return
     for nid in rank:
         node = wf.nodes[nid]
-        node.size = list(estimate_size(node.type, object_info, _node_widget_count(node)))
+        if node.type not in VIRTUAL_TYPES:
+            node.size = list(estimate_size(node.type, object_info, _node_widget_count(node)))
 
     columns: dict[int, list[int]] = {}
     for nid, r in rank.items():
@@ -253,7 +254,10 @@ def apply_staged_layout(
     rank = _ranks(wf)
     for nid in stage_of:
         node = wf.nodes[nid]
-        if node.type not in NOTE_TYPES:
+        # virtual nodes are already correctly sized by construction/import and are
+        # absent from object_info, so estimate_size would flatten a 75x26 Reroute
+        # and a multiline primitive alike into the generic unknown-class box
+        if node.type not in VIRTUAL_TYPES:
             node.size = list(
                 estimate_size(node.type, object_info, _node_widget_count(node))
             )

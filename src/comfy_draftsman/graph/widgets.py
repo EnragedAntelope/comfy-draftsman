@@ -82,6 +82,37 @@ def has_control_slot(name: str, spec: Any) -> bool:
     return spec[0] == "INT" and leaf in ("seed", "noise_seed")
 
 
+def combo_choices(spec: Any) -> list[Any] | None:
+    """The option list of any combo flavour (legacy list, V3 COMBO, dynamic
+    combo), else None. Dynamic combos answer with their option KEYS, which is
+    what the main widget's value must be."""
+    if not isinstance(spec, list | tuple) or not spec:
+        return None
+    kind = spec[0]
+    if isinstance(kind, list):
+        return list(kind)
+    if is_dynamic_combo(spec):
+        return [o.get("key") for o in dynamic_options(spec)]
+    if kind == "COMBO":
+        return list(_opts(spec).get("options") or [])
+    return None
+
+
+def primitive_takes_control(spec: Any) -> bool:
+    """Whether a PrimitiveNode mirroring this widget gets a
+    ``control_after_generate`` slot.
+
+    The frontend calls ``addValueControlWidget`` only for widget types "number"
+    and "combo", so a STRING or BOOLEAN primitive serializes a single value and
+    nothing else. Distinct from ``has_control_slot``, which answers the same
+    question for a REAL node's own seed widget (a name/flag heuristic)."""
+    if not isinstance(spec, list | tuple) or not spec:
+        return False
+    if combo_choices(spec) is not None:
+        return True
+    return spec[0] in ("INT", "FLOAT")
+
+
 def is_widget_input(spec: Any) -> bool:
     """True if this input spec renders as a widget (consumes a widgets_values slot).
 

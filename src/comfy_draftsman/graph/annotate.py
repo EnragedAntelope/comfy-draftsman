@@ -17,7 +17,7 @@ from typing import Any
 
 from .. import knowledge
 from .layout import Y_GAP, apply_staged_layout, is_text_display
-from .model import Group, Node, Workflow
+from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Group, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
 
@@ -53,6 +53,11 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
         return "inputs"
     if _is_canvas_node(node.type):
         return "inputs"
+    if node.type == PRIMITIVE_TYPE:
+        # a primitive exists precisely to be adjusted by hand (that is why the
+        # frontend gives it control_after_generate), so it belongs on the left
+        # edge with the other tweakables - not in the middle of the sampler band
+        return "inputs"
     schema = object_info.get(node.type)
     name = node.type.lower()
     if schema is not None:
@@ -87,12 +92,16 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
 
 
 def _is_display_companion(node: Node, object_info: dict[str, Any]) -> bool:
-    """Display-only nodes (Show Text, PreviewImage...) that exist to show what
-    another node produced. They must sit NEXT TO that node, not be swept into a
-    far-away Output group - a reader pairing six previews with six samplers by
-    following wires across the canvas is exactly the layout failure this fixes.
-    SaveImage-style disk writers are NOT companions; they are real outputs."""
-    if is_text_display(node.type):
+    """Nodes that exist only in service of another node and must sit NEXT TO it,
+    not be swept into a far-away group - a reader pairing six previews with six
+    samplers by following wires across the canvas is exactly the layout failure
+    this fixes.
+
+    Display-only nodes (Show Text, PreviewImage...) and Reroutes qualify: a
+    Reroute is pure wire-tidying, so stranding it in whatever band it happened to
+    classify into lengthens the very wire it exists to shorten. SaveImage-style
+    disk writers are NOT companions; they are real outputs."""
+    if node.type == REROUTE_TYPE or is_text_display(node.type):
         return True
     schema = object_info.get(node.type) or {}
     return bool(schema.get("output_node")) and "preview" in node.type.lower()
@@ -278,6 +287,8 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
             node.type in _INPUT_CLASSES
             or editable_prompt_knob
             or _is_canvas_node(node.type)
+            # a primitive IS a hand-set value, whatever socket it mirrors
+            or node.type == PRIMITIVE_TYPE
         )
         if is_knob:
             node.color, node.bgcolor = GREEN
@@ -380,6 +391,11 @@ def _note_text(
             lines.append("👇 Load your source image/media here.")
         if any(_is_canvas_node(n.type) for n in members):
             lines.append("👇 Set the image size (width / height / batch) here.")
+        if any(n.type == PRIMITIVE_TYPE for n in members):
+            lines.append(
+                "👇 The green value boxes here feed settings further along the "
+                "graph — change them here, not at the node they connect to."
+            )
     if not lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]

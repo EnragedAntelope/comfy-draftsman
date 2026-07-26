@@ -32,9 +32,9 @@ from .comfy.registry import RegistryClient, RegistryUnavailableError
 from .config import Config, load_config
 from .graph.annotate import annotate
 from .graph.lint import lint
-from .graph.model import NOTE_TYPES, VIRTUAL_TYPES, Workflow
+from .graph.model import NOTE_TYPES, PRIMITIVE_TYPE, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
-from .graph.validate import check_widget_value, validate
+from .graph.validate import check_primitive_value, check_widget_value, validate
 from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names, widgets_to_named
 from .imaging import downscale_image
 from .session import Session
@@ -306,8 +306,11 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
             if ln.origin_id in wf.nodes
             and ln.target_id in wf.nodes
             and ln.target_slot < len(wf.nodes[ln.target_id].inputs)
-            and wf.nodes[ln.origin_id].type not in VIRTUAL_TYPES
-            and wf.nodes[ln.target_id].type not in VIRTUAL_TYPES
+            # Notes are the only virtual nodes with no wiring to show. Primitives
+            # and Reroutes DO carry links, and hiding them made an authored
+            # primitive look unconnected in the very summary used to verify it.
+            and wf.nodes[ln.origin_id].type not in NOTE_TYPES
+            and wf.nodes[ln.target_id].type not in NOTE_TYPES
         ],
         "groups": [g.title for g in wf.groups],
     }
@@ -346,12 +349,11 @@ async def get_instance_info() -> dict[str, Any]:
 async def check_setup() -> dict[str, Any]:
     """One-shot setup diagnostic for a fresh install or a sandboxed client (Cowork/
     Desktop/Code): can I reach ComfyUI, can I hand finished renders back to the user
-    (COMFYUI_MOUNT_DIR), and is the partner-node key present. Unlike get_instance_info
-    this never raises - a down instance is reported as a failed check, not an error -
-    so run it first when a render can't be delivered or the instance seems unreachable.
-    Returns {ok, checks:[{name, ok, detail}], hint?}. `ok` is gated on ComfyUI being
-    reachable; relocation is a soft check (workflows still run, but auto-delivery needs
-    it) surfaced via `hint`."""
+    (COMFYUI_MOUNT_DIR), is the partner-node key present. Unlike get_instance_info it
+    never raises - a down instance is a failed check, not an error - so run it first
+    when a render can't be delivered or the instance seems unreachable. Returns
+    {ok, checks:[{name, ok, detail}], hint?}; `ok` gates on ComfyUI being reachable,
+    relocation is a soft check surfaced via `hint`."""
     cfg = _config()
     checks: list[dict[str, Any]] = []
 
@@ -921,7 +923,7 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
 _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "add_node": ({"class_type"}, {"title", "widgets", "force"}),
     "remove_node": ({"node_id"}, set()),
-    "connect": ({"from_node", "from_output", "to_node", "to_input"}, set()),
+    "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
     "set_widget": ({"node_id", "input", "value"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
@@ -981,22 +983,23 @@ async def edit_workflow(
     - {"op": "set_widget", "node_id": int, "input": str, "value": any}
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
-    - {"op": "connect_in_definition", "definition_id": str, "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}
-    - {"op": "add_node_to_definition", "definition_id": str, "class_type": str, "title"?: str, "widgets"?: {name: value}, "force"?: bool}
-    - {"op": "remove_node_from_definition", "definition_id": str, "node_id": int}
-    - {"op": "set_title_in_definition", "definition_id": str, "node_id": int, "title": str}
-    - {"op": "set_mode_in_definition", "definition_id": str, "node_id": int, "mode": int}
-    - {"op": "set_widget_in_definition", "definition_id": str, "node_id": int, "input": str, "value": any, "force"?: bool}
 
+    All six have a definition-scoped twin taking an extra "definition_id", for
+    editing inside a subgraph definition: add_node_to_definition,
+    remove_node_from_definition, and connect/set_widget/set_title/
+    set_mode_in_definition. A malformed op reports its own required keys.
 
-    Output slot names and widget names come from get_node_info. Annotation nodes
-    (class_type "Note" or "MarkdownNote") are supported with a single widget
-    'text'. Ops apply in order; a failing op stops the batch, reports what
-    succeeded, and leaves the graph unchanged by the failing op.
+    Slot and widget names come from get_node_info. Virtual (UI-only) classes:
+    "Note"/"MarkdownNote" take a single widget 'text'; "Reroute" and
+    "PrimitiveNode" take none at add time - connect a PrimitiveNode to a widget
+    input and it mirrors that socket's type (combos included), then set_widget
+    'value' and, for a number/combo, 'control_after_generate'
+    (fixed/randomize/increment/decrement) to advance it on every run.
 
-    Widget VALUES are checked against the live schema at write time (combo
-    choices, ranges, types) - an invalid value fails the op with suggestions;
-    add "force": true to a set_widget/add_node op to skip that check.
+    Ops apply in order; a failing op stops the batch, reports what succeeded, and
+    leaves the graph unchanged by the failing op. Widget VALUES and link TYPES are
+    checked against the live schema at write time - add "force": true to a
+    set_widget/add_node/connect op to override.
 
     Result is a compact delta (applied ops + changed nodes); pass summary=true
     or call inspect_workflow for the full graph.
@@ -1017,6 +1020,18 @@ async def edit_workflow(
                     if bad := sorted(set(widgets) - {"text"}):
                         raise ValueError(
                             f"{class_type} has a single widget 'text'; got {bad}"
+                        )
+                elif class_type in VIRTUAL_TYPES:
+                    # PrimitiveNode/Reroute are frontend-only nodes, absent from
+                    # object_info - the "installed?" check below would reject them
+                    # even though ComfyUI has them. A primitive has no widgets until
+                    # it adopts a socket's type on its first connection.
+                    if widgets:
+                        raise ValueError(
+                            f"{class_type} takes no widgets at add time: connect it to "
+                            "a widget input first (it then mirrors that socket's type), "
+                            "then set_widget 'value' and, for a number/combo, "
+                            "'control_after_generate'; graph unchanged"
                         )
                 elif class_type not in object_info:
                     raise ValueError(
@@ -1069,6 +1084,7 @@ async def edit_workflow(
                     int(op["to_node"]),
                     op["to_input"],
                     object_info,
+                    force=bool(op.get("force")),
                 )
                 touched.update((int(op["from_node"]), int(op["to_node"])))
                 applied.append(
@@ -1078,12 +1094,22 @@ async def edit_workflow(
             elif kind == "set_widget":
                 node_id = int(op["node_id"])
                 node = wf.nodes[node_id]
-                if not op.get("force") and node.type not in NOTE_TYPES:
-                    problem = check_widget_value(
-                        node.type, op["input"], op["value"], object_info,
-                        node.widgets_values,
-                        {slot.name for slot in node.inputs},
-                    )
+                if not op.get("force"):
+                    if node.type == PRIMITIVE_TYPE and op["input"] != "control_after_generate":
+                        # a primitive's value must satisfy the widget it mirrors -
+                        # nothing else validates it, since its consumer's slot is
+                        # connected and so skips its own widget check
+                        problem = check_primitive_value(
+                            wf, node, op["value"], object_info
+                        )
+                    elif node.type in VIRTUAL_TYPES:
+                        problem = None  # notes/reroutes/primitive control slots
+                    else:
+                        problem = check_widget_value(
+                            node.type, op["input"], op["value"], object_info,
+                            node.widgets_values,
+                            {slot.name for slot in node.inputs},
+                        )
                     if problem:
                         raise ValueError(f"{node.type} #{node_id}: {problem}")
                 wf.set_widget(node_id, op["input"], op["value"], object_info)
@@ -1422,30 +1448,29 @@ async def run_workflow(
     front: bool | None = None,
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
-    node errors if it failed, output file refs, and an inline preview thumbnail so
-    you can SEE the result (view_output fetches full size / other outputs).
-    wait=False returns {status: queued, prompt_id} immediately - poll
-    get_run_status(prompt_id). Prove a workflow works before saving/delivering.
+    node errors on failure, output file refs, any non-file return values
+    (data_outputs: generated text, paths a save node wrote), and an inline preview
+    thumbnail so you can SEE the result (view_output fetches full size).
+    wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
+    workflow works before saving/delivering.
 
-    roll_seeds=True (default) mirrors the browser: any seed whose
-    control_after_generate is randomize/increment/decrement is re-rolled before
-    submit and the new value persisted (the raw /prompt API never does this, so
-    headless runs would otherwise repeat the same seed forever). Pass
-    roll_seeds=False for a deterministic re-run of the exact stored seeds.
+    roll_seeds=True (default) mirrors the browser: every seed AND PrimitiveNode
+    whose control_after_generate is randomize/increment/decrement is re-rolled
+    before submit and the new value persisted. The raw /prompt API never does this,
+    so headless runs would otherwise repeat forever - and this is the only way to
+    advance a combo across runs. False re-runs the exact stored values.
 
-    allow_invalid=True submits even when the local validator reports errors
-    (ComfyUI is the final judge; use it if a valid graph is being wrongly
-    blocked). save_dir (or, when empty, the configured COMFYUI_MOUNT_DIR)
-    relocates every finished output file - images, video, audio alike - out of
-    ComfyUI's output tree into a folder the caller can reach, returning
-    saved_paths, so a render is presentable in one call without a separate
-    save_output step. Relocation needs finished files, so it only applies when
-    wait=True; a background run relocates later via save_output(prompt_id=...).
+    allow_invalid=True submits despite local validation errors (ComfyUI is the
+    final judge; use it if a valid graph is wrongly blocked). save_dir (or the
+    configured COMFYUI_MOUNT_DIR) relocates every finished output file - images,
+    video, audio alike - out of ComfyUI's output tree into a folder the caller can
+    reach, returning saved_paths, so a render is presentable in one call.
+    Relocation needs finished files: wait=True only; a background run relocates
+    later via save_output(prompt_id=...).
 
-    front: None (default) checks the queue first - if >=2 prompts are already
-    pending, NOTHING is queued and {status: queue_busy} comes back so the user
-    can choose. front=True queues this run to go next (existing pending jobs are
-    untouched, never deleted); front=False waits at the back of the line."""
+    front: None (default) refuses to queue when >=2 prompts are already pending and
+    returns {status: queue_busy} so the USER can choose; True runs next (pending
+    jobs untouched, never deleted); False waits at the back of the line."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
@@ -1760,15 +1785,15 @@ async def save_output(
     dest_filename: str = "",
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Copy a finished render out of ComfyUI's output tree into a folder the
-    caller (e.g. a Claude Desktop / Cowork sandbox) can reach. ComfyUI's save
-    nodes only write inside its own output/ dir and reject absolute paths, so a
-    relocation step is needed before a render can be presented or edited.
+    """Copy a finished render out of ComfyUI's output tree into a folder the caller
+    (e.g. a Claude Desktop / Cowork sandbox) can reach. ComfyUI's save nodes only
+    write inside its own output/ dir and reject absolute paths, so a render must be
+    relocated before it can be presented or edited.
 
-    Provide prompt_id (relocates every output FILE of that finished job -
-    images, video, audio) OR an explicit filename (+subfolder/type, as reported
-    in a run's outputs). dest_dir defaults to the configured COMFYUI_MOUNT_DIR.
-    dest_filename renames a single saved file. Returns {saved_paths, dest_dir}."""
+    Pass prompt_id (relocates every output FILE of that finished job - images,
+    video, audio) OR an explicit filename (+subfolder/type, as reported in a run's
+    outputs). dest_dir defaults to COMFYUI_MOUNT_DIR; dest_filename renames a
+    single file. Returns {saved_paths, dest_dir}."""
     if not prompt_id and not filename:
         return {"error": "provide prompt_id or filename - nothing to relocate otherwise"}
     client = _client()
@@ -1828,6 +1853,12 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
             "prompt_id": prompt_id,
             "outputs": client._collect_outputs(history),
         }
+        # a pure parser over the history document, so it is called on the CLASS:
+        # tests (and any sandboxed caller) substitute lightweight fake clients that
+        # only implement what they need, and reaching for an instance attribute
+        # here would break them for no benefit
+        if data := ComfyClient._collect_data_outputs(history):
+            result["data_outputs"] = data
         if error:
             result["error"] = error
         else:

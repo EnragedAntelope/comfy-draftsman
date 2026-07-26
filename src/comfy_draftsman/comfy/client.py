@@ -248,14 +248,73 @@ class ComfyClient:
         response.raise_for_status()
         return filename
 
+    #: output keys holding {filename, subfolder, type} FILE refs - the only ones
+    #: /view can fetch and _relocate_outputs can move.
+    FILE_OUTPUT_KEYS = ("images", "gifs", "videos", "audio")
+
+    #: non-file keys that carry no information for the caller: `animated` is a
+    #: per-image bool list the frontend uses to pick a player.
+    _DATA_KEYS_IGNORED = frozenset({"animated"})
+
+    # A node can return anything JSON-serializable, and some return a lot (an
+    # entire generated prompt, a batch's worth of paths). These are explicitly
+    # requested run results rather than a recurring summary, so the budget is
+    # generous - but it is still a budget.
+    _DATA_VALUE_CHARS = 1200
+    _DATA_TOTAL_CHARS = 5000
+
     @staticmethod
     def _collect_outputs(history: dict[str, Any]) -> list[dict[str, Any]]:
+        """FILE outputs only, flattened to relocatable {filename, subfolder, type}
+        refs. Non-file return values go through _collect_data_outputs."""
         outputs: list[dict[str, Any]] = []
         for node_id, node_output in (history.get("outputs") or {}).items():
-            for key in ("images", "gifs", "videos", "audio"):
+            for key in ComfyClient.FILE_OUTPUT_KEYS:
                 for item in node_output.get(key, []) or []:
                     outputs.append({**item, "node_id": node_id, "kind": key})
         return outputs
+
+    @classmethod
+    def _collect_data_outputs(cls, history: dict[str, Any]) -> dict[str, Any]:
+        """Every NON-file value an output node returned, keyed by node id.
+
+        Output nodes are free to return anything in their `ui` dict, and plenty
+        do: ShowText-style nodes return `text`, and save nodes commonly return the
+        paths they wrote (`filenames`, `path`, `saved_count`). Harvesting only the
+        four file keys meant those results were silently dropped - a workflow whose
+        product was a generated string, or whose save node reported where it wrote,
+        looked like it produced nothing at all.
+
+        Values are truncated per item and the whole payload is budgeted; a `note`
+        records anything cut so a short value is never mistaken for the full one.
+        """
+        collected: dict[str, Any] = {}
+        used = 0
+        truncated: list[str] = []
+        for node_id, node_output in (history.get("outputs") or {}).items():
+            if not isinstance(node_output, dict):
+                continue
+            for key, value in node_output.items():
+                if key in cls.FILE_OUTPUT_KEYS or key in cls._DATA_KEYS_IGNORED:
+                    continue
+                rendered = value if isinstance(value, str) else json.dumps(value, default=str)
+                # over-long values degrade to a clipped STRING; anything within
+                # budget keeps its original shape (list/dict/number)
+                kept: Any = value
+                if len(rendered) > cls._DATA_VALUE_CHARS:
+                    kept = rendered[: cls._DATA_VALUE_CHARS] + "…"
+                    truncated.append(f"{node_id}.{key}")
+                cost = len(kept) if isinstance(kept, str) else len(rendered)
+                if used + cost > cls._DATA_TOTAL_CHARS:
+                    truncated.append(f"{node_id}.{key} (omitted)")
+                    continue
+                used += cost
+                collected.setdefault(str(node_id), {})[key] = kept
+        if truncated:
+            collected["note"] = (
+                "clipped to keep the response bounded: " + ", ".join(truncated[:10])
+            )
+        return collected
 
     def _ws_url(self, client_id: str | None = None) -> str:
         scheme = "wss" if self.base_url.startswith("https") else "ws"
@@ -307,10 +366,17 @@ class ComfyClient:
         # /history can lag the execution_success event by a beat; on a clean run
         # with no outputs yet, re-poll briefly before trusting an empty list.
         outputs: list[dict[str, Any]] = []
+        data_outputs: dict[str, Any] = {}
         for attempt in range(5):
             history = await self.get_history(prompt_id)
             outputs = self._collect_outputs(history)
-            if outputs or error or history.get("status", {}).get("completed") is False:
+            data_outputs = self._collect_data_outputs(history)
+            if (
+                outputs
+                or data_outputs
+                or error
+                or history.get("status", {}).get("completed") is False
+            ):
                 break
             if attempt < 4:
                 await asyncio.sleep(0.2 * (attempt + 1))
@@ -319,6 +385,10 @@ class ComfyClient:
             "prompt_id": prompt_id,
             "outputs": outputs,
         }
+        if data_outputs:
+            # non-file return values (generated text, written paths, counts) -
+            # omitted entirely when empty so the common case costs nothing
+            result["data_outputs"] = data_outputs
         if error:
             result["error"] = {
                 "node_id": error.get("node_id"),

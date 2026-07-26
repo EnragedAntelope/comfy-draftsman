@@ -14,8 +14,10 @@ in the UI graph but are resolved away during API serialization.
 
 from __future__ import annotations
 
+import random
 import re
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -23,6 +25,42 @@ from typing import Any
 from . import widgets as w
 
 VIRTUAL_TYPES = {"Note", "MarkdownNote", "PrimitiveNode", "Reroute"}
+
+PRIMITIVE_TYPE = "PrimitiveNode"
+REROUTE_TYPE = "Reroute"
+
+# Slot types that accept anything: litegraph's own wildcard plus the spellings
+# custom packs use for the same idea.
+_WILDCARD_SLOT_TYPES = {"*", "", "ANY", "ANYTYPE", "?"}
+
+CONTROL_MODES = ("fixed", "randomize", "increment", "decrement")
+
+
+def types_compatible(out_type: str | None, in_type: str | None) -> bool:
+    """Whether an output slot may feed an input slot.
+
+    Mirrors ComfyUI's executor (a mismatch answers ``return_type_mismatch``) and
+    litegraph's case-insensitive comparison, with the wildcards above and the
+    comma-joined union types a few packs declare ("IMAGE,LATENT").
+
+    **COMBO is not a wildcard.** Wiring a STRING into a converted combo widget
+    used to pass every local check and then be rejected by the live server, which
+    queues the prompt anyway and executes only the rest of the graph - a silent
+    partial render. A combo input does accept a COMBO-typed producer (the
+    frontend's PrimitiveNode adopts exactly that type when it mirrors a combo).
+    """
+    out = str(out_type or "").strip().upper()
+    inp = str(in_type or "").strip().upper()
+    if out in _WILDCARD_SLOT_TYPES or inp in _WILDCARD_SLOT_TYPES:
+        return True
+    if out == inp:
+        return True
+    if "," in out or "," in inp:
+        return bool(
+            {p.strip() for p in out.split(",") if p.strip()}
+            & {p.strip() for p in inp.split(",") if p.strip()}
+        )
+    return False
 
 # %date% / %date:FORMAT% filename-prefix tokens are substituted by a frontend
 # extension (pysssss / Custom-Scripts) before the browser submits; the backend
@@ -76,6 +114,11 @@ class OutputSlot:
     type: str
     links: list[int] = field(default_factory=list)
     slot_index: int | None = None
+    # A PrimitiveNode's output records which widget it mirrors
+    # ({"widget": {"name": "steps"}}). Dropping it on import silently degraded
+    # every round-trip of a workflow using primitives - including the bundled
+    # SDXL template, whose primitives drive steps/end_at_step/text.
+    widget_name: str | None = None
 
 
 @dataclass
@@ -216,6 +259,7 @@ class Workflow:
                         type=str(o.get("type", "*")),
                         links=list(links),
                         slot_index=o.get("slot_index", idx),
+                        widget_name=(o.get("widget") or {}).get("name"),
                     )
                 )
             wf.nodes[node.id] = node
@@ -386,6 +430,20 @@ class Workflow:
         elif class_type in NOTE_TYPES:
             node.widgets_values = [""]
             node.size = [380.0, 180.0]
+        elif class_type == REROUTE_TYPE:
+            # a wire-tidying passthrough: one untyped input, one untyped output
+            node.inputs.append(InputSlot(name="", type="*"))
+            node.outputs.append(OutputSlot(name="", type="*", slot_index=0))
+            node.size = [75.0, 26.0]
+            node.properties = {"showOutputText": False, "horizontal": False}
+        elif class_type == PRIMITIVE_TYPE:
+            # Typeless until connected: the frontend gives a primitive its type,
+            # widget and value list from the first widget input it feeds. connect()
+            # mirrors that here (see _mirror_primitive) because there is no browser
+            # to do it for a headless author.
+            node.outputs.append(OutputSlot(name="*", type="*", slot_index=0))
+            node.properties = {"Run widget replace on values": False}
+            node.size = [210.0, 82.0]
         if raw_widgets is not None:
             node.widgets_values = raw_widgets
         self.nodes[nid] = node
@@ -417,6 +475,7 @@ class Workflow:
         target_id: int,
         target_input: str,
         object_info: dict[str, Any] | None = None,
+        force: bool = False,
     ) -> Link:
         origin = self.nodes[origin_id]
         target = self.nodes[target_id]
@@ -435,11 +494,13 @@ class Workflow:
             out_index = found
         out_slot = origin.outputs[out_index]
         in_slot = target.input_by_name(target_input)
+        materialized = False
         if in_slot is None:
             # a widget input (STRING/INT/FLOAT/...) not yet exposed as a socket:
             # convert it to an input, exactly like the ComfyUI "convert widget to
             # input" action. Keeps the widgets_values slot; the link overrides it.
             in_slot = self._materialize_widget_input(target, target_input, object_info)
+            materialized = in_slot is not None
         if in_slot is None:
             widget_hint = ""
             if object_info is None:
@@ -448,18 +509,138 @@ class Workflow:
                 f"node {target_id} ({target.type}) has no input '{target_input}'; "
                 f"available: {[i.name for i in target.inputs]}{widget_hint}"
             )
-        # litegraph slot typing is case-insensitive (STRING == string), so compare
-        # upper-cased; '*'/'COMBO' stay wildcards
-        if (
-            in_slot.type.upper() not in ("*", "COMBO")
-            and out_slot.type != "*"
-            and in_slot.type.upper() != out_slot.type.upper()
-        ):
+        if not force and not types_compatible(out_slot.type, in_slot.type):
+            if materialized:
+                # a REFUSED connect must leave nothing behind: converting the
+                # widget to an input is a visible change (the node grows an empty
+                # socket and stops accepting a typed value), so undo it
+                target.inputs.remove(in_slot)
             raise ValueError(
                 f"type mismatch: {origin.type}.{out_slot.name} ({out_slot.type}) -> "
-                f"{target.type}.{target_input} ({in_slot.type})"
+                f"{target.type}.{target_input} ({in_slot.type}). ComfyUI rejects this "
+                "at queue time (return_type_mismatch) and then runs only the REST of "
+                f"the graph, so the failure is silent. To drive a {in_slot.type} "
+                "widget: set_widget it directly, or feed it a PrimitiveNode (it "
+                "mirrors the socket's own type and can carry control_after_generate). "
+                'Add "force": true to wire it anyway.'
             )
+        # a primitive takes its type from the socket it first feeds - do that
+        # before the link is made, so the link records the resolved type
+        if origin.type == PRIMITIVE_TYPE:
+            self._mirror_primitive(origin, out_slot, target, in_slot, object_info)
         return self._add_link(origin_id, out_index, target_id, target_input)
+
+    def _mirror_primitive(
+        self,
+        primitive: Node,
+        out_slot: OutputSlot,
+        target: Node,
+        in_slot: InputSlot,
+        object_info: dict[str, Any] | None,
+    ) -> None:
+        """Adopt the target widget's type onto a PrimitiveNode, as the frontend
+        does on a primitive's first connection (widgetInputs.ts
+        ``#onFirstConnection``/``setType``).
+
+        That behaviour is browser JS, so a headless author must resolve it at
+        authoring time or the node stays typeless and unusable. Only an
+        *unresolved* primitive adopts: one already bound keeps its type, so wiring
+        a second consumer of the same value never silently retypes it.
+
+        Shape mirrors a real export (see tests/fixtures/sdxl_simple_example.json):
+        output name+type are the widget type ("COMBO" for any combo), the output
+        carries the widget marker, the title is the widget's name, and
+        widgets_values is ``[value]`` plus ``["fixed"]`` for number/combo widgets
+        only - a STRING primitive gets no control widget.
+        """
+        if out_slot.type not in ("*", ""):
+            return
+        widget_name = in_slot.widget_name or in_slot.name
+        spec = None
+        if object_info is not None and target.type in object_info:
+            spec = w.widget_specs(
+                target.type,
+                object_info,
+                target.widgets_values,
+                {s.name for s in target.inputs},
+            ).get(widget_name)
+        if spec is not None:
+            kind = spec[0]
+            slot_type = (
+                "COMBO"
+                if isinstance(kind, list) or kind in ("COMBO", w.DYNAMIC_COMBO_TYPE)
+                else str(kind)
+            )
+        else:
+            slot_type = in_slot.type if in_slot.type not in ("*", "") else "COMBO"
+        out_slot.type = slot_type
+        out_slot.name = slot_type
+        out_slot.widget_name = widget_name
+        if primitive.title is None:
+            primitive.title = widget_name
+        values: list[Any] = [w._default_for(spec) if spec is not None else ""]
+        if spec is not None and w.primitive_takes_control(spec):
+            values.append("fixed")
+        primitive.widgets_values = values
+        if spec is not None and w._opts(spec).get("multiline"):
+            primitive.size = [300.0, 160.0]
+        else:
+            primitive.size = [210.0, 82.0]
+
+    def _forward_widget_targets(
+        self, node_id: int, depth: int = 0
+    ) -> Iterator[tuple[Node, InputSlot]]:
+        """(target node, input slot) for everything this node feeds, seeing
+        forward through Reroutes the way _trace_origin sees backward."""
+        if depth > 10:
+            return
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        for out in node.outputs:
+            for lid in out.links:
+                link = self.links.get(lid)
+                if link is None:
+                    continue
+                target = self.nodes.get(link.target_id)
+                if target is None or link.target_slot >= len(target.inputs):
+                    continue
+                if target.type == REROUTE_TYPE:
+                    yield from self._forward_widget_targets(target.id, depth + 1)
+                else:
+                    yield target, target.inputs[link.target_slot]
+
+    def primitive_targets(
+        self, node_id: int, object_info: dict[str, Any]
+    ) -> list[tuple[Any, Node, str]]:
+        """(widget spec, target node, widget name) for every widget a
+        PrimitiveNode drives. Empty when it is unconnected or feeds no known
+        widget - i.e. it has no type and nothing to validate against."""
+        results: list[tuple[Any, Node, str]] = []
+        seen: set[tuple[int, str]] = set()
+        for target, slot in self._forward_widget_targets(node_id):
+            if target.type not in object_info:
+                continue
+            name = slot.widget_name or slot.name
+            if (target.id, name) in seen:
+                continue
+            spec = w.widget_specs(
+                target.type,
+                object_info,
+                target.widgets_values,
+                {s.name for s in target.inputs},
+            ).get(name)
+            if spec is not None:
+                seen.add((target.id, name))
+                results.append((spec, target, name))
+        return results
+
+    def primitive_target(
+        self, node_id: int, object_info: dict[str, Any]
+    ) -> tuple[Any, Node, str] | None:
+        """The first widget a PrimitiveNode drives, or None."""
+        targets = self.primitive_targets(node_id, object_info)
+        return targets[0] if targets else None
 
     def _materialize_widget_input(
         self, node: Node, name: str, object_info: dict[str, Any] | None
@@ -520,6 +701,9 @@ class Workflow:
                 raise ValueError(f"{node.type} has a single widget: 'text'")
             node.widgets_values = [value]
             return
+        if node.type == PRIMITIVE_TYPE:
+            self._set_primitive_widget(node, input_name, value, object_info)
+            return
         # instance context: a custom JS-widget input is only recognizable from
         # the sockets this node actually serialized (widgets._is_custom_widget).
         # Without it the slot walk misses that widget, so the round-trip below
@@ -557,6 +741,64 @@ class Workflow:
         node.widgets_values = w.named_to_widgets(
             node.type, named, object_info, socket_names
         )
+
+    def _primitive_widget_names(self, node: Node) -> tuple[str | None, set[str]]:
+        """(mirrored widget name, accepted control-slot names) for a primitive."""
+        bound = node.outputs[0].widget_name if node.outputs else None
+        control = {"control_after_generate"}
+        if bound:
+            control.add(bound + w.CONTROL_SUFFIX)
+        return bound, control
+
+    def _set_primitive_widget(
+        self, node: Node, input_name: str, value: Any, object_info: dict[str, Any]
+    ) -> None:
+        """Set a PrimitiveNode's value or control mode.
+
+        A primitive's widgets are created by the frontend from whatever socket it
+        mirrors, so its slot names come from the GRAPH, not object_info: slot 0 is
+        the mirrored widget - addressable by its real name or the alias ``value`` -
+        and slot 1, when the mirrored widget is a number or combo, is
+        ``control_after_generate``.
+        """
+        bound, control_names = self._primitive_widget_names(node)
+        values = list(node.widgets_values) if isinstance(node.widgets_values, list) else []
+        if not values:
+            values = [""]
+        if input_name in control_names:
+            if value not in CONTROL_MODES:
+                raise ValueError(
+                    f"control_after_generate must be one of {list(CONTROL_MODES)}, "
+                    f"got {value!r}"
+                )
+            resolved = self.primitive_target(node.id, object_info)
+            if resolved is not None and not w.primitive_takes_control(resolved[0]):
+                kind = resolved[0][0]
+                raise ValueError(
+                    f"PrimitiveNode #{node.id} mirrors a {kind if isinstance(kind, str) else 'COMBO'} "
+                    "widget, and the ComfyUI frontend only gives number and combo "
+                    "primitives a control_after_generate widget - there is nothing to set"
+                )
+            if len(values) < 2:
+                values.append(value)
+            else:
+                values[1] = value
+            node.widgets_values = values
+            return
+        if input_name not in ("value", bound):
+            usable = "'value'" + (f" (mirrors '{bound}')" if bound else "")
+            hint = (
+                ""
+                if bound
+                else " - connect it to a widget input first so it adopts that "
+                "socket's type"
+            )
+            raise ValueError(
+                f"PrimitiveNode #{node.id} has widgets {usable} and "
+                f"'control_after_generate'; got {input_name!r}{hint}"
+            )
+        values[0] = value
+        node.widgets_values = values
 
     def get_widget(self, node_id: int, input_name: str, object_info: dict[str, Any]) -> Any:
         node = self.nodes[node_id]
@@ -684,6 +926,7 @@ class Workflow:
                         "type": s.type,
                         "links": list(s.links),
                         **({"slot_index": s.slot_index} if s.slot_index is not None else {}),
+                        **({"widget": {"name": s.widget_name}} if s.widget_name else {}),
                     }
                     for s in node.outputs
                 ],
@@ -789,6 +1032,10 @@ class Workflow:
         widgets_values in place. Returns True if any seed changed."""
         changed = False
         for node in self.nodes.values():
+            if node.type == PRIMITIVE_TYPE:
+                if self.roll_primitive_control(node, object_info):
+                    changed = True
+                continue
             if node.type not in object_info:
                 continue
             new_values, node_changed = w.roll_seed_controls(
@@ -801,6 +1048,73 @@ class Workflow:
                 node.widgets_values = new_values
                 changed = True
         return changed
+
+    def roll_primitive_control(
+        self,
+        node: Node,
+        object_info: dict[str, Any],
+        rng: random.Random | None = None,
+    ) -> bool:
+        """Re-roll one PrimitiveNode per its ``control_after_generate``, the way
+        the browser does between queues (ComfyUI's ``addValueControlWidgets``).
+
+        This is the ONLY way a headless caller can cycle a COMBO across runs:
+        control_after_generate is applied by browser JS, never by ``/prompt``, so
+        without this every repeated run re-submits the same dropdown value. It is
+        what makes "cycle a character/checkpoint/LoRA dropdown across runs"
+        possible through the MCP at all.
+
+        Faithful to the frontend, including the parts that feel wrong: an index
+        walk **clamps** at the ends of the option list rather than wrapping, and
+        numbers clamp to min/max. Returns True if the value changed.
+        """
+        values = node.widgets_values
+        if not isinstance(values, list) or len(values) < 2:
+            return False  # no control widget (a STRING primitive never has one)
+        mode = values[1]
+        if mode not in ("randomize", "increment", "decrement"):
+            return False
+        resolved = self.primitive_target(node.id, object_info)
+        if resolved is None:
+            return False
+        spec = resolved[0]
+        roller = rng or random
+        current = values[0]
+        choices = w.combo_choices(spec)
+        if choices:
+            if mode == "randomize":
+                index = roller.randrange(len(choices))
+            else:
+                try:
+                    index = choices.index(current)
+                except ValueError:
+                    index = 0
+                index += 1 if mode == "increment" else -1
+            new: Any = choices[max(0, min(len(choices) - 1, index))]
+        elif spec[0] in ("INT", "FLOAT") and isinstance(current, int | float) and not isinstance(current, bool):
+            opts = w._opts(spec)
+            step = opts.get("step") or 1
+            low = opts.get("min")
+            high = opts.get("max")
+            if mode == "randomize":
+                lo = float(low if low is not None else 0)
+                hi = float(high if high is not None else w.MAX_SEED)
+                # the frontend randomizes on the step grid: floor(rand * span/step) * step + min
+                span = max(int((hi - lo) / step), 0) if step else 0
+                new = lo + roller.randrange(span + 1) * step
+            else:
+                new = current + (step if mode == "increment" else -step)
+            if low is not None:
+                new = max(low, new)
+            if high is not None:
+                new = min(high, new)
+            new = int(new) if spec[0] == "INT" else round(float(new), 6)
+        else:
+            return False
+        if new == current:
+            return False
+        node.widgets_values = [new, *values[1:]]
+        return True
 
     def _resolve_link_origins(self) -> dict[tuple[int, int], tuple[int, int]]:
         """Map (target_id, target_slot) -> real (origin_id, origin_slot), seeing

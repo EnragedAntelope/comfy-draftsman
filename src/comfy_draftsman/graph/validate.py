@@ -13,7 +13,16 @@ import re
 from typing import Any
 
 from . import widgets as w
-from .model import MODE_BYPASS, MODE_MUTE, MODE_NORMAL, VIRTUAL_TYPES, Workflow
+from .model import (
+    MODE_BYPASS,
+    MODE_MUTE,
+    MODE_NORMAL,
+    PRIMITIVE_TYPE,
+    VIRTUAL_TYPES,
+    Node,
+    Workflow,
+    types_compatible,
+)
 
 # A combo's option list is authoritative when we can trust the /object_info
 # snapshot: either it lists on-disk files (an "is this installed" check) or it
@@ -76,17 +85,7 @@ def _finding(
     return finding
 
 
-def _combo_choices(spec: Any) -> list[Any] | None:
-    kind = spec[0]
-    if isinstance(kind, list):
-        return kind
-    if w.is_dynamic_combo(spec):
-        # the main value must be one of the option keys
-        return [o.get("key") for o in w.dynamic_options(spec)]
-    if kind == "COMBO":
-        opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
-        return opts.get("options", [])
-    return None
+_combo_choices = w.combo_choices
 
 
 def check_widget_value(
@@ -164,6 +163,151 @@ def check_widget_value(
             if not _step_aligned(value, min_val, step):
                 return f"'{input_name}' = {value} is not aligned to step {step} (min {min_val})"
     return None
+
+
+def check_primitive_value(
+    wf: Workflow, node: Node, value: Any, object_info: dict[str, Any]
+) -> str | None:
+    """Actionable error string if a PrimitiveNode's value is invalid for the
+    widget(s) it mirrors, else None.
+
+    A primitive's value is checked HERE and nowhere else: ``to_api`` inlines it
+    into its consumer's input, and the consumer's own widget check is skipped
+    because that slot is *connected*. Reuses ``check_widget_value``, so the same
+    confidence gate applies - a client-populated third-party combo doesn't block.
+    """
+    for _spec, target, name in wf.primitive_targets(node.id, object_info):
+        problem = check_widget_value(
+            target.type,
+            name,
+            value,
+            object_info,
+            target.widgets_values,
+            {s.name for s in target.inputs},
+        )
+        if problem:
+            return f"drives {target.type} #{target.id}.{name}: {problem}"
+    return None
+
+
+def _primitive_findings(
+    wf: Workflow, object_info: dict[str, Any]
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for node in wf.nodes.values():
+        if node.type != PRIMITIVE_TYPE or node.mode in (MODE_MUTE, MODE_BYPASS):
+            continue
+        if not wf.primitive_targets(node.id, object_info):
+            # harmless to the run (to_api drops virtual nodes), but it has no type
+            # and drives nothing - so a warning, not a blocking error
+            findings.append(
+                _finding(
+                    "warning",
+                    "primitive-unbound",
+                    f"PrimitiveNode #{node.id} drives no widget, so it has no type and "
+                    "does nothing. Connect it to a widget input (it then mirrors that "
+                    "socket's type) or remove it",
+                    node.id,
+                )
+            )
+            continue
+        value = (
+            node.widgets_values[0]
+            if isinstance(node.widgets_values, list) and node.widgets_values
+            else None
+        )
+        problem = check_primitive_value(wf, node, value, object_info)
+        if problem:
+            findings.append(
+                _finding(
+                    "error",
+                    "primitive-value-invalid",
+                    f"PrimitiveNode #{node.id} {problem}",
+                    node.id,
+                )
+            )
+    return findings
+
+
+def _schema_output_type(
+    node: Node, slot_index: int, object_info: dict[str, Any]
+) -> str:
+    """An output slot's type, preferring the live schema over the stored slot: a
+    workflow saved against an older version of a pack can carry a type the node
+    no longer declares."""
+    outs = (object_info.get(node.type) or {}).get("output") or []
+    if isinstance(outs, list) and 0 <= slot_index < len(outs):
+        return str(outs[slot_index])
+    if 0 <= slot_index < len(node.outputs):
+        return node.outputs[slot_index].type
+    return "*"
+
+
+def _schema_input_type(node: Node, slot: Any, object_info: dict[str, Any]) -> str:
+    """An input slot's type from the live schema, with any combo flavour reported
+    as COMBO (what the frontend types a converted combo widget as)."""
+    schema = object_info.get(node.type)
+    if schema is not None:
+        wanted = slot.widget_name or slot.name
+        for name, spec in w._iter_schema_inputs(schema):
+            if name != wanted:
+                continue
+            if w.combo_choices(spec) is not None:
+                return "COMBO"
+            kind = spec[0] if isinstance(spec, list | tuple) and spec else spec
+            return str(kind)
+    return slot.type
+
+
+def _link_type_findings(
+    wf: Workflow, object_info: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Mirror ComfyUI's executor type check on every wire.
+
+    The server answers ``return_type_mismatch``, queues the prompt anyway, and
+    executes only the rest of the graph - so a mistyped wire reads as a run that
+    "succeeded" with missing outputs. Nothing else in draftsman checked link
+    types at all, which is how a STRING wired into a COMBO widget validated
+    clean. Virtual endpoints (Reroute/PrimitiveNode) adopt their neighbour's type
+    and disabled nodes never run, so both are skipped.
+    """
+    findings: list[dict[str, Any]] = []
+    for link in sorted(wf.links.values(), key=lambda x: x.id):
+        origin, target = wf.nodes.get(link.origin_id), wf.nodes.get(link.target_id)
+        if origin is None or target is None:
+            continue
+        if origin.type in VIRTUAL_TYPES or target.type in VIRTUAL_TYPES:
+            continue
+        if origin.type not in object_info or target.type not in object_info:
+            continue  # missing-node-class already reports this
+        if origin.mode != MODE_NORMAL or target.mode != MODE_NORMAL:
+            continue
+        if link.target_slot >= len(target.inputs):
+            continue
+        slot = target.inputs[link.target_slot]
+        out_type = _schema_output_type(origin, link.origin_slot, object_info)
+        in_type = _schema_input_type(target, slot, object_info)
+        if types_compatible(out_type, in_type):
+            continue
+        findings.append(
+            _finding(
+                "error",
+                "link-type-mismatch",
+                f"{origin.type} #{origin.id} ({out_type}) -> {target.type} #{target.id}"
+                f".{slot.name} ({in_type}): ComfyUI rejects this wire at queue time "
+                "(return_type_mismatch) and runs only the rest of the graph. "
+                + (
+                    "Drive a COMBO widget with set_widget, or with a PrimitiveNode "
+                    "(it mirrors the socket's type and can cycle it via "
+                    "control_after_generate)"
+                    if in_type == "COMBO"
+                    else "Rewire it to a source of the expected type"
+                ),
+                target.id,
+                input=slot.name,
+            )
+        )
+    return findings
 
 
 def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -495,6 +639,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         input=name,
                     )
                 )
+    findings.extend(_primitive_findings(wf, object_info))
+    findings.extend(_link_type_findings(wf, object_info))
     if disabled:
         # one note for the whole set: repeating it per node was pure token cost
         # on a graph with a disabled branch, and said nothing new each time

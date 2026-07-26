@@ -229,11 +229,109 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   node whose schema sets `output_node` is expected and suppressed (not
   `widget-count-drift`); a shortfall, or any mismatch on a non-output node, still
   reports.
+- **Socket types are checked; COMBO is not a wildcard.** `model.types_compatible`
+  is the single source of truth (case-insensitive, `*`/`ANY`/empty wildcards,
+  comma-joined unions intersect) and is used by both `connect` (refuses a
+  mismatch unless `"force": true`) and `validate`'s `link-type-mismatch` (error).
+  Before round 19, `connect` treated `COMBO` as a second wildcard alongside `*` -
+  a STRING wired into a converted combo widget passed local validation and was
+  then rejected by ComfyUI's own executor at queue time
+  (`return_type_mismatch`), which queues the prompt anyway and runs only the
+  rest of the graph. `validate` did not check link types at all, so the same
+  mistake arriving via `import_workflow` was invisible until the failed run.
+- **`PrimitiveNode` and `Reroute` are real, authorable virtual nodes**, not
+  merely tolerated ones. Both were already in `VIRTUAL_TYPES` (so `to_api`
+  already inlined a primitive's value and traced through a reroute), but
+  `add_node`'s installed-class gate only special-cased `NOTE_TYPES`, so
+  `add_node(class_type="PrimitiveNode")` failed with "not installed on this
+  instance" even though the class is a standard ComfyUI frontend concept. This
+  blocked the correct idiom for "a value that adapts to and can cycle whatever
+  it's wired to" (a dropdown, a checkpoint, a LoRA), forcing a same-type-only
+  workaround.
+  - **A primitive is typeless until connected** (`outputs[0].type == "*"`) and
+    adopts its target's type on `connect` (`Workflow._mirror_primitive`,
+    mirroring the frontend's `widgetInputs.ts #onFirstConnection`/`setType`,
+    which is browser JS a headless author has no other way to replay). Verified
+    against a real export: `outputs[0]` carries `{"widget": {"name": "steps"}}`,
+    `title` becomes the mirrored widget's name, `widgets_values` is
+    `[value, "fixed"]` for number/combo or `[value]` for STRING (the frontend's
+    `addValueControlWidget` only fires for number and combo types -
+    `widgets.primitive_takes_control`). Only an *unresolved* primitive (still
+    `type == "*"`) adopts - one already bound keeps its type, so a second
+    connect never silently retypes an in-use value.
+  - **`set_widget` addresses a primitive by the mirrored widget's real name or
+    the alias `"value"`**, plus `"control_after_generate"` - its slot names come
+    from the GRAPH (what it mirrors), not from `object_info`, since a primitive
+    has no schema of its own.
+  - **Nothing else validates a primitive's value** - its consumer's widget slot
+    is *connected*, so the consumer's own widget check is skipped (same as any
+    other wired input). `validate._primitive_findings` is the one place that
+    checks it, against every widget it drives (`Workflow.primitive_targets`,
+    which sees forward through Reroutes) via the same `check_widget_value` used
+    everywhere else - so the confidence gate (core enum vs. client-populated
+    third-party combo) still applies. An unbound primitive (drives nothing) is a
+    non-blocking `primitive-unbound` warning, not an error: `to_api` drops
+    virtual nodes, so it cannot break a run, only waste a value.
+  - **`apply_seed_control` rolls a primitive's control mode too**
+    (`Workflow.roll_primitive_control`) - this is the only way a headless
+    caller can cycle a COMBO across runs, since `control_after_generate` is
+    applied by browser JS and the raw `/prompt` API never sees it. Faithful to
+    the frontend including the parts that feel wrong: an index walk **clamps**
+    at the ends of the option list (does not wrap), and randomize is uniform
+    over the *option index*, not a value-weighted pick.
+  - **Layout/annotate treat a primitive as a tweakable**: `classify` puts it in
+    the `inputs` band (same reasoning as the empty-latent canvas node - it
+    exists to be hand-set) and `_paint_knobs` colors it green. A `Reroute` is a
+    display companion of its source (like Show Text/PreviewImage), not left to
+    land wherever its rank happens to fall - it exists purely to shorten a wire,
+    so stranding it elsewhere lengthens the very thing it's for.
+  - **`_summary` only hides `NOTE_TYPES` links now**, not all of
+    `VIRTUAL_TYPES`. Hiding every link touching a primitive or reroute made an
+    authored primitive look unconnected in the very view used to verify it built
+    correctly; a Note genuinely has no sockets, so it contributes nothing to
+    hide.
+  - `layout.estimate_size` has no schema for a virtual class and would flatten
+    a 75×26 Reroute or a 300×160 multiline-STRING primitive into the generic
+    "unknown class" box - `apply_layout`/`apply_staged_layout` skip it for
+    anything in `VIRTUAL_TYPES` and keep the size construction already gave it.
+- **`OutputSlot` round-trips a primitive's widget marker.** A real
+  `PrimitiveNode` output serializes as
+  `{"name": "INT", "type": "INT", "widget": {"name": "steps"}, "links": [...]}`
+  (confirmed in the bundled `tests/fixtures/sdxl_simple_example.json`, which
+  itself uses primitives to drive `steps`/`end_at_step`/both prompts). Before
+  round 19 `OutputSlot` had no field for it, so `from_ui` silently dropped the
+  marker on every workflow using primitives - including that bundled fixture -
+  and the round-tripped `to_ui` primitive no longer named what it mirrored.
+- **A custom output node's non-file return values were invisible.**
+  `client._collect_outputs` (feeding both `run_workflow`'s `outputs` and
+  `save_output`'s relocation) only ever harvested the four FILE keys
+  (`images`/`gifs`/`videos`/`audio`). A node like `NH_SaveImagePath` that also
+  returns `filenames`/`path`/`saved_count`, or a ShowText-style node returning
+  `text`, had those values silently dropped - the caller had to go find the
+  real save directory by reading the running ComfyUI process's command line.
+  `client._collect_data_outputs` now harvests every OTHER key per output node
+  into `run_workflow`/`get_run_status`'s `data_outputs` (omitted entirely when
+  empty), value-clipped and total-budgeted the same way findings are capped
+  elsewhere in this server - `FILE_OUTPUT_KEYS` stays the file-only source for
+  relocation, untouched.
 
 ## Remaining TODOs
 
 Open:
 
+- **[OPEN] `roll_primitive_control`'s randomize is index-uniform, not
+  value-weighted**, matching `roll_seed_controls`' own seed randomize (uniform
+  over the numeric range) rather than doing anything smarter - a combo with
+  wildly uneven option counts across categories has no notion of "fair" here,
+  and neither does the frontend it mirrors. Revisit only if a real workflow
+  needs weighted sampling.
+- **[OPEN] Nested primitive chains (primitive -> Reroute -> primitive) are
+  unhandled.** `_forward_widget_targets` sees through a `Reroute` to find the
+  widget a primitive drives, but a second `PrimitiveNode` sitting between two
+  reroutes has no widget to mirror and nothing resolves it. Not a data-loss risk
+  (`primitive-unbound` catches it as a warning), just an authoring pattern
+  nobody has asked for yet - a chained primitive is meaningless in the
+  frontend too.
 - **[OPEN] Widget-backed custom-JS inputs stay a loud stop, by design.** Packs
   like LoraManager (`text` / `AUTOCOMPLETE_TEXT_LORAS`) and StyleStringInjector2
   (`gallery` / `ZIPN_STYLE_GALLERY_BUTTON`) expose an input as a widget-backed
@@ -257,6 +355,20 @@ Open:
 
 Recently closed:
 
+- **[DONE, round 19] PrimitiveNode/Reroute authoring, socket type checking, data
+  outputs.** From a live session that hit three walls building a
+  character-cycling workflow, plus one found in the ensuing audit: `connect`
+  treated COMBO as a wildcard (a STRING wired into a converted combo widget
+  validated clean, then silently partial-ran on the live server);
+  `PrimitiveNode`/`Reroute` were in `VIRTUAL_TYPES` but unauthorable via
+  `add_node`, blocking the one correct idiom for a value that mirrors and can
+  cycle a dropdown; `run_workflow`/`get_run_status` only ever surfaced FILE
+  outputs, dropping a custom node's other return values entirely; and
+  `OutputSlot` silently lost a primitive's widget marker on every save
+  round-trip, including in the bundled SDXL template. All four fixed - see
+  Gotchas for the mechanics. Net tool-schema cost went DOWN (~19.6k vs ~20.0k
+  chars) despite the new capability, by collapsing `edit_workflow`'s five
+  near-duplicate `*_in_definition` doc lines into one rule.
 - **[DONE, round 18] Token efficiency** — `lint`'s overlap report collapsed from
   one finding per overlapping *pair* (quadratic: 1,326 findings / ~30k tokens on
   a 52-node graph) to one finding for the set; `save_workflow`/
