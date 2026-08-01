@@ -98,10 +98,15 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
     returns findings uses one — `validate_workflow`, `diagnose_workflow`,
     `organize_workflow`, `port_workflow`, `run_workflow`, `save_workflow`.
   - *File and choice lists* are capped with a true `count` plus a hint naming
-    the narrowing parameter: `catalog._apply_choices` (combos, 24) and
-    `list_models` (`_MODEL_FILES_CAP` 60, hint `search=`). They are the same
-    data — an instance with 400 LoRAs must not return 400 names just because the
-    caller asked a different tool.
+    the narrowing parameter: `catalog._apply_choices` (combos, 24),
+    `list_models` (`_MODEL_FILES_CAP` 60, hint `search=`) and `list_templates`
+    (`_TEMPLATES_CAP` 40, `_TEMPLATE_DESC_CAP` 110, hint `search=`). They are the
+    same data — an instance with 400 LoRAs must not return 400 names just because
+    the caller asked a different tool. **A cap without a count is a correctness
+    bug, not just a token one:** `list_templates` returned a bare `list[:60]` out
+    of ~450 templates, so a caller who found no match reasonably concluded the
+    catalog had none. Search runs over the *full* record, not the clipped entry —
+    otherwise the clip makes real matches unfindable.
   - *Folded schemas* are capped: `search_nodes(detail=True)` fills only the top
     `_DETAIL_SCHEMA_CAP` hits, since a schema is ~300-700 tokens each.
   - *A condition affecting N nodes is ONE finding* naming a few ids and counting
@@ -229,6 +234,64 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   node whose schema sets `output_node` is expected and suppressed (not
   `widget-count-drift`); a shortfall, or any mismatch on a non-output node, still
   reports.
+- **ComfyUI's V3 io system declares five META types, and they are not values.**
+  `comfy_api/latest/_io.py` defines `COMFY_MATCHTYPE_V3`, `COMFY_AUTOGROW_V3`,
+  `COMFY_DYNAMICSLOT_V3`, `COMFY_DYNAMICCOMBO_V3` and `COMFY_MULTITYPED_V3`.
+  Each is a schema marker the frontend expands into something else, so **each
+  breaks a different draftsman heuristic that assumes a type string describes a
+  value**. Two were found broken at once in round 20, so treat a new `COMFY_*_V3`
+  as guilty until checked:
+  - *MatchType is a wildcard.* `comfy_execution/validation.py` short-circuits
+    `validate_node_input` to True whenever either end is a MatchType
+    ("validation for this is handled by the frontend"), because such a node
+    adopts whatever it is wired to. Core nodes use it — `ComfySwitchNode` is
+    MatchType in *and* out. Treating it as concrete made `link-type-mismatch`
+    fire on every wire touching a switch, and since that check gates
+    `run_workflow`/`save_workflow`, it made any workflow containing one
+    unrunnable and unsavable — including every bundled Krea-2 template.
+    `model.MATCH_TYPE` + `types_compatible`.
+  - *None of them is a widget.* A node routinely does NOT serialize a meta input
+    into its `inputs` socket array (an autogrow node emits `value0..valueN`
+    instead of its `values` marker; an unconnected MatchType slot is just
+    absent) — which is exactly the shape `widgets._is_custom_widget` reads as "a
+    pack's JS-rendered widget". Counting one invents a slot and shifts every
+    later `widgets_values` entry. `widgets.is_v3_meta_type` matches the
+    `COMFY_*_V3` shape rather than a fixed set, so a new core meta type can't
+    silently reintroduce it.
+  - `COMFY_MULTITYPED_V3` never reaches a type comparison — a MultiType input
+    serializes as its comma-joined member types, which the union branch of
+    `types_compatible` already handles. `COMFY_DYNAMICCOMBO_V3` **is** a widget
+    and is handled separately (`widgets.is_dynamic_combo`); it is excluded from
+    `_is_custom_widget` by the earlier `is_widget_input` check, not by the meta
+    carve-out.
+- **A remediation string must name an op that exists.** Every finding on a node
+  inside a subgraph used to end "edit_workflow can't reach inside; rebuild flat
+  to change it" — written before the `*_in_definition` ops landed and never
+  revisited. `inspect_workflow`'s `subgraph_note` said the same. A live session
+  read it, believed it, and hand-rebuilt a 14-node graph to change one wrong
+  model path that `set_widget_in_definition` fixes in one call. `flatten`'s
+  provenance now carries `definition` + `inner_id` (the exact arguments those
+  ops take) and an `editable` flag that is honest about the limit —
+  `subgraph_as_workflow` refuses both a nested node *and* any definition that
+  itself contains an instance, so `editable` requires depth 1 **and** no nested
+  instance. Only a genuinely unreachable node is told to rebuild flat. The ids
+  ride on the finding as structured fields; the how-to sentence is stated once
+  per result (`server._subgraph_edit_hint`), never per finding.
+- **A subgraph definition's boundary inputs are not all connectable.** The
+  instance node exposes only some as real sockets and `connect` addresses
+  instance sockets, so `inspect_workflow` marks the rest `name (internal)`
+  (`server._subgraph_summary(sg, wf)`; omit `wf` and nothing is claimed). The
+  bundled Z-Image template declares six and exposes one — listing all six
+  unqualified sent a session chasing a `value` socket that does not exist,
+  while `edit_workflow`'s own error message listed the real ones. Two tools
+  disagreeing about what a node has is worse than either being terse.
+- **A lint that fires on correct work is worse than no lint.**
+  `no-prompt-preview` walked only the encoder's upstream chain, so it missed a
+  Show Text *tapped off* the generator's output (generator → display alongside
+  generator → encoder). That is the more common hand-wired shape and shows the
+  identical string — arguably better, since the display isn't in the path it
+  reports on. `lint._has_text_display` accepts both. Callers who see a rule
+  fire on work they know is right stop reading the rule.
 - **Socket types are checked; COMBO is not a wildcard.** `model.types_compatible`
   is the single source of truth (case-insensitive, `*`/`ANY`/empty wildcards,
   comma-joined unions intersect) and is used by both `connect` (refuses a
@@ -319,6 +382,24 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
+- **[OPEN] The remaining V3 meta types are tolerated, not supported.** Round 20
+  stopped `COMFY_AUTOGROW_V3` / `COMFY_DYNAMICSLOT_V3` from corrupting widget
+  reads, but draftsman cannot *author* with them: `edit_workflow` can only
+  connect to an autogrow slot the schema already declares (`value0..valueN`, so
+  a node's declared `max` is the real ceiling), and it never grows or prunes the
+  socket list the way the frontend does as wires come and go. Nothing observed
+  has needed it — core autogrow nodes declare their full slot range up front, so
+  connecting works — but a pack that declares `min` slots and relies on the
+  frontend to add more would hit the wall. Revisit with a real workflow that
+  needs it; `widgets.is_v3_meta_type` is where the classification lives.
+- **[OPEN] `_is_custom_widget` is a shape heuristic, and shapes collide.** "A
+  custom-typed input the node didn't serialize as a socket" identifies a pack's
+  JS widget correctly, but it is inference, not knowledge — ComfyUI's own meta
+  types matched it exactly (round 20) and anything else that is declared-but-not-
+  serialized will too. There is no flag in `/object_info` that distinguishes
+  them, so the carve-out list is the mechanism; it needs re-checking whenever
+  ComfyUI adds an input kind. A schema-level marker upstream would retire this
+  whole heuristic.
 - **[OPEN] `roll_primitive_control`'s randomize is index-uniform, not
   value-weighted**, matching `roll_seed_controls`' own seed randomize (uniform
   over the numeric range) rather than doing anything smarter - a combo with
@@ -355,6 +436,21 @@ Open:
 
 Recently closed:
 
+- **[DONE, round 20] V3 meta types + honest subgraph remedies.** From a live
+  session that logged its snags while building a Krea-2 + LM Studio workflow;
+  three of seven were real, two more surfaced while verifying those.
+  `COMFY_MATCHTYPE_V3` was treated as a concrete type, so every wire touching a
+  core `ComfySwitchNode` raised a blocking `link-type-mismatch` and made the
+  bundled Krea-2 templates neither runnable nor savable; the V3 meta types were
+  being counted as custom JS widgets and shifting `widgets_values`; every
+  subgraph-inner finding claimed `edit_workflow` couldn't reach it (false — and
+  the direct cause of a 14-node hand-rebuild); `inspect_workflow` listed
+  unreachable boundary inputs as if connectable; and `no-prompt-preview` fired
+  on graphs whose Show Text was tapped rather than inline. Plus `list_templates`
+  silently dropping ~390 of ~450 templates. See Gotchas for the mechanics;
+  `tests/test_round20_v3_types_and_subgraph_edits.py` pins all of it. Three
+  reported items were **not** defects and were deliberately not "fixed" — the
+  CHANGELOG's *Not changed* section records why, so they don't get relitigated.
 - **[DONE, round 19] PrimitiveNode/Reroute authoring, socket type checking, data
   outputs.** From a live session that hit three walls building a
   character-cycling workflow, plus one found in the ensuing audit: `connect`

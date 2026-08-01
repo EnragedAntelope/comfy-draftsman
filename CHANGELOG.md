@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.11.0 — V3 meta types, honest subgraph remedies
+
+From a live session that built a Krea-2 + LM Studio workflow and logged every
+snag as it went (report kept locally, not in the repo). Three of the seven
+reported snags were real draftsman defects; two more surfaced while verifying
+them. The rest belonged to other tools or were misreadings — see *Not changed*.
+
+### Fixed
+
+- **`COMFY_MATCHTYPE_V3` is a wildcard, not a concrete type.** ComfyUI's own
+  executor short-circuits `validate_node_input` to `True` whenever either end of
+  a wire is a MatchType ("validation for this is handled by the frontend"), and
+  core nodes rely on it — `ComfySwitchNode` (If/Else Switch) is MatchType in and
+  MatchType out. `types_compatible` treated the marker as an ordinary type, so
+  every wire into or out of a switch raised a `link-type-mismatch` **error**.
+  Because that check gates both `run_workflow` and `save_workflow`, any workflow
+  containing a switch — including every bundled Krea-2 template — was neither
+  runnable nor savable through draftsman, with the finding confidently blaming
+  the template. A live session hand-rebuilt a 14-node graph rather than use one.
+- **V3 meta types are no longer counted as custom JS widgets.** Round 17's
+  per-instance heuristic reads "a custom-typed input the node did not serialize
+  as a socket" as a pack-rendered widget. ComfyUI's five own `COMFY_*_V3` meta
+  types (`MATCHTYPE`, `AUTOGROW`, `DYNAMICSLOT`, `DYNAMICCOMBO`, `MULTITYPED`)
+  fit that shape exactly while being no widget at all — an autogrow node emits
+  `value0..valueN` in place of its `values` marker, and an unconnected MatchType
+  slot is simply absent. Each one invented a widget slot, which shifted every
+  later `widgets_values` entry up a position on read and on rebuild.
+- **Findings inside a subgraph now name the op that fixes them.** Every inner
+  finding ended with "edit_workflow can't reach inside; rebuild flat to change
+  it" — false since the `*_in_definition` ops shipped. It is the single line
+  that caused the rebuild above. Inner findings now carry `definition_id` and
+  `inner_node_id` as structured fields (the exact arguments those ops take), and
+  the results that return findings carry one `subgraph_edit` sentence explaining
+  how to use them. Only a genuinely unreachable node — nested deeper than
+  `subgraph_as_workflow` can parse — still says "rebuild flat", and
+  `flatten`'s provenance computes that honestly rather than assuming.
+- **`inspect_workflow` distinguishes exposed from internal subgraph inputs.** A
+  definition's boundary inputs are not all reachable from the parent graph: the
+  instance node exposes only some as real sockets, and `connect` addresses
+  instance sockets. Listing all of them unqualified read as "these are
+  connectable" and sent a session chasing a `value` socket that did not exist
+  (the bundled Z-Image template declares six boundary inputs and exposes one).
+  Unexposed inputs now report as `name (internal)`, and the subgraph note says
+  what to do instead.
+- **`no-prompt-preview` no longer fires on a previewed workflow.** The rule
+  walked only the encoder's upstream chain, so it missed the more common
+  hand-wired shape — a Show Text *tapped off* the generator's output, in
+  parallel with the encoder rather than in series. That displays the identical
+  string, and arguably better (the display isn't in the path it reports on). A
+  lint that fires on correct work teaches callers to ignore the rule.
+
+### Changed
+
+- **`list_templates` returns a bounded object instead of a silently truncated
+  list.** The bundled catalog is ~450 templates; the tool returned a bare
+  `list[:60]` with no indication that ~390 were dropped, so a caller who found
+  no match reasonably concluded none existed — the one failure mode the
+  repo's own bounded-list rule exists to prevent. It now returns
+  `{count, templates, hint}` with the true match count and a `search=` hint
+  whenever the list is cut. Cap tightened to 40 and the description clip to 110
+  chars now that the response is honest about what it omits (~18KB → ~7KB on the
+  common no-search call); `search` still matches against the **full** template
+  record, so a model name or a detail past the clip stays findable.
+
+### Not changed (reported, but not defects)
+
+- *Bundled templates reference model files by flat filename while the user's
+  models live in subfolders.* ComfyUI fails on this identically — the template
+  isn't wrong about anything draftsman can fix. `validate` already reports the
+  installed path as a closest-match `suggestion`; what was missing was any way
+  to apply it, which is the subgraph-remedy fix above.
+- *`StringConcatenate` delimiter double-escaping.* Nothing in the write path
+  escapes string widget values — `set_widget` stores exactly what it is given
+  and `json.dump` writes it — and a real newline **is** `\n` in a JSON file.
+  Auto-unescaping was considered and rejected: it would corrupt Windows paths
+  and any prompt containing a literal backslash.
+- *`look_at` timeouts and Playwright sidebar behavior.* Different MCP servers.
+
 ## 0.10.0 — PrimitiveNode authoring, socket typing, data outputs
 
 From a live session building a character-cycling workflow (report kept in

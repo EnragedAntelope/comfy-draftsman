@@ -33,6 +33,15 @@ REROUTE_TYPE = "Reroute"
 # custom packs use for the same idea.
 _WILDCARD_SLOT_TYPES = {"*", "", "ANY", "ANYTYPE", "?"}
 
+# ComfyUI's V3 io system declares a handful of META types that are markers for
+# the frontend, never a concrete socket type a value can be. `COMFY_MATCHTYPE_V3`
+# is the one that reaches `types_compatible`: the backend's own
+# `comfy_execution.validation.validate_node_input` short-circuits True whenever
+# either side is a MatchType ("validation for this is handled by the frontend"),
+# because a match-type node adopts whatever it is wired to. Core nodes use it -
+# `ComfySwitchNode` (If/Else Switch) is MatchType in and MatchType out.
+MATCH_TYPE = "COMFY_MATCHTYPE_V3"
+
 CONTROL_MODES = ("fixed", "randomize", "increment", "decrement")
 
 
@@ -41,17 +50,26 @@ def types_compatible(out_type: str | None, in_type: str | None) -> bool:
 
     Mirrors ComfyUI's executor (a mismatch answers ``return_type_mismatch``) and
     litegraph's case-insensitive comparison, with the wildcards above and the
-    comma-joined union types a few packs declare ("IMAGE,LATENT").
+    comma-joined union types a few packs declare ("IMAGE,LATENT" - which is also
+    how a V3 ``MultiType`` input serializes).
 
     **COMBO is not a wildcard.** Wiring a STRING into a converted combo widget
     used to pass every local check and then be rejected by the live server, which
     queues the prompt anyway and executes only the rest of the graph - a silent
     partial render. A combo input does accept a COMBO-typed producer (the
     frontend's PrimitiveNode adopts exactly that type when it mirrors a combo).
+
+    **MatchType IS a wildcard**, exactly as the backend treats it - see
+    ``MATCH_TYPE``. Treating it as a concrete type refused every wire into or out
+    of a core ``ComfySwitchNode``, which made any workflow containing one
+    unrunnable *and* unsavable through draftsman (validate's link-type-mismatch
+    is a blocking error), with no way to force past it from a template.
     """
     out = str(out_type or "").strip().upper()
     inp = str(in_type or "").strip().upper()
     if out in _WILDCARD_SLOT_TYPES or inp in _WILDCARD_SLOT_TYPES:
+        return True
+    if MATCH_TYPE in (out, inp):
         return True
     if out == inp:
         return True

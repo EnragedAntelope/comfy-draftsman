@@ -166,6 +166,16 @@ _DETAIL_SCHEMA_CAP = 8
 # with hundreds of LoRAs would otherwise return the lot on every call.
 _MODEL_FILES_CAP = 60
 
+# The bundled template catalog is ~450 entries and growing (452 on ComfyUI
+# 0.29 / comfyui_workflow_templates 0.11.2); an unsearched list_templates was
+# returning 60 of them - ~18KB - while silently dropping the other ~390, so a
+# caller who found no match concluded none existed. Capped lower now that the
+# response carries a true `count` and names `search=`, and the description clip
+# is tighter: title + models identify a template, the description only has to
+# disambiguate. ~18KB -> ~7KB on the common no-search call.
+_TEMPLATES_CAP = 40
+_TEMPLATE_DESC_CAP = 110
+
 
 def _cap_lint(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Cap advisory lint output. Lint findings carry no severity (they never
@@ -211,6 +221,30 @@ def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return capped
 
 
+def _subgraph_edit_hint(findings: list[dict[str, Any]]) -> dict[str, str]:
+    """A single `subgraph_edit` sentence when any finding sits on an editable
+    inner node - `{}` otherwise, so it costs nothing on a flat graph.
+
+    Stated once per RESULT, never per finding: the findings themselves already
+    carry `definition_id` + `inner_node_id` as structured fields, and repeating
+    the how-to on each is exactly the per-item repetition this server treats as a
+    bug. Findings inside a subgraph are common (one wrong model path in a bundled
+    template produces several), and until round 20 they all ended in "edit_workflow
+    can't reach inside; rebuild flat" - which is false, and cost a live session a
+    hand-rebuild of a 14-node graph."""
+    if not any(f.get("definition_id") for f in findings):
+        return {}
+    return {
+        "subgraph_edit": (
+            "Findings carrying definition_id + inner_node_id are fixable in place: "
+            "pass those to edit_workflow's definition-scoped ops "
+            "(set_widget_in_definition, connect_in_definition, "
+            "add_node_to_definition, remove_node_from_definition, "
+            "set_title_in_definition, set_mode_in_definition). No rebuild needed."
+        )
+    }
+
+
 def _widget_preview(n) -> Any:
     # prompts/wildcards/note text can be multi-KB and summaries are re-sent on
     # every inspect/edit - truncate the preview, the graph content is intact
@@ -220,11 +254,26 @@ def _widget_preview(n) -> Any:
     return {k: _clip(v) for k, v in dict(n.widgets_values).items()}
 
 
-def _subgraph_summary(sg: dict[str, Any]) -> dict[str, Any]:
+def _subgraph_summary(sg: dict[str, Any], wf: Workflow | None = None) -> dict[str, Any]:
     """Readable view of one subgraph definition: inner nodes with widget
-    previews, and inner wiring - enough to use the subgraph as reference or
-    rebuild it flat."""
+    previews, and inner wiring - enough to edit it in place or rebuild it flat.
+
+    A definition's boundary inputs are NOT all reachable from the parent graph:
+    an instance node exposes only some of them as real sockets, and `connect`
+    addresses instance sockets. Listing the definition's full input list
+    unqualified read as "these are connectable" and sent a live session chasing
+    a `value` socket the instance never exposed. Inputs are reported as
+    `"name (internal)"` when no instance exposes them, which needs the parent
+    workflow - omit `wf` and every input is reported unqualified."""
     nodes = {n["id"]: n for n in sg.get("nodes", []) or [] if "id" in n}
+    exposed: set[str] | None = None
+    if wf is not None:
+        exposed = {
+            slot.name
+            for node in wf.nodes.values()
+            if node.type == sg.get("id")
+            for slot in node.inputs
+        }
 
     def link_str(ln: Any) -> str | None:
         if isinstance(ln, dict):
@@ -248,7 +297,13 @@ def _subgraph_summary(sg: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": sg.get("id"),
         "name": sg.get("name"),
-        "inputs": [i.get("name") for i in sg.get("inputs", []) or []],
+        "inputs": [
+            name
+            if exposed is None or name in exposed
+            else f"{name} (internal)"
+            for i in sg.get("inputs", []) or []
+            if (name := i.get("name")) is not None
+        ],
         "outputs": [o.get("name") for o in sg.get("outputs", []) or []],
         "nodes": [
             {
@@ -528,24 +583,38 @@ async def list_models(
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
-async def list_templates(search: str = "") -> list[dict[str, Any]]:
+async def list_templates(search: str = "") -> dict[str, Any]:
     """ComfyUI's bundled workflow templates - the best starting points for current
-    models (they ship with every release). Seed one via create_workflow(template=...)."""
+    models (they ship with every release). Seed one via create_workflow(template=...).
+    Narrow with search= (matched against title/description/models); the catalog is
+    ~450 templates, far more than one response should carry."""
     index = await _client().get_template_index()
+    needle = search.lower()
     out = []
     for module in index:
         for template in module.get("templates", []):
             entry = {
                 "name": template.get("name"),
                 "title": template.get("title"),
-                "description": (template.get("description") or "")[:160],
+                "description": (template.get("description") or "")[:_TEMPLATE_DESC_CAP],
                 "models": template.get("models", []),
                 "category": module.get("title"),
             }
-            haystack = json.dumps(entry).lower()
-            if not search or search.lower() in haystack:
+            # match on the FULL record, not the clipped entry: a model name or a
+            # detail past the description clip is exactly what a caller searches
+            # for, and dropping it from the haystack would make it unfindable
+            if not needle or needle in json.dumps([entry, template]).lower():
                 out.append(entry)
-    return out[:60]
+    shown = out[:_TEMPLATES_CAP]
+    result: dict[str, Any] = {"count": len(out), "templates": shown}
+    if len(out) > len(shown):
+        # the previous bare `out[:60]` said nothing about the other ~390, so a
+        # caller who saw no match reasonably concluded the catalog had none
+        result["hint"] = (
+            f"showing {len(shown)} of {len(out)} matches - narrow with "
+            "search= (model family, modality, or template name)"
+        )
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -907,11 +976,17 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
     summary = _summary(workflow_id, wf)
     subgraphs = wf.subgraph_defs()
     if subgraphs:
-        summary["subgraphs"] = [_subgraph_summary(sg) for sg in subgraphs.values()]
+        summary["subgraphs"] = [_subgraph_summary(sg, wf) for sg in subgraphs.values()]
         summary["subgraph_note"] = (
             "subgraph instances run FLATTENED - validate/run/export expand them "
-            "automatically; edit_workflow ops don't reach inside, rebuild flat "
-            "to modify internals"
+            "automatically. Edit internals in place with edit_workflow's "
+            "definition-scoped ops (set_widget_in_definition, connect_in_definition, "
+            "add_node_to_definition, remove_node_from_definition, "
+            "set_title_in_definition, set_mode_in_definition), passing the "
+            "subgraph 'id' as definition_id and the inner node's own id; only a "
+            "definition that itself contains an instance needs a flat rebuild. "
+            "An input marked '(internal)' is not a socket on any instance, so "
+            "`connect` can't target it - wire it inside the definition instead."
         )
     return summary
 
@@ -1341,9 +1416,11 @@ async def validate_workflow(workflow_id: str) -> dict[str, Any]:
     range, combo/model-file values actually present (with closest-match suggestions),
     required inputs connected. Fix errors before run_workflow."""
     findings = validate(_wf(workflow_id), await _object_info(refresh=True))
+    capped = _cap_findings(findings)
     return {
         "ok": not any(f["level"] == "error" for f in findings),
-        "findings": _cap_findings(findings),
+        "findings": capped,
+        **_subgraph_edit_hint(capped),
     }
 
 
@@ -1379,12 +1456,13 @@ async def diagnose_workflow(workflow_id: str) -> dict[str, Any]:
         # note (a disabled node, a subgraph instance) is not a problem, and
         # reporting ok=False for one sent agents hunting for a nonexistent fault
         "ok": not any(f["level"] == "error" for f in findings),
-        "findings": _cap_findings(findings),
+        "findings": (capped := _cap_findings(findings)),
         "missing_node_packs": registry_result,
         "capability_impact": capability_impact,
         "family": knowledge.detect_family(
             wf, await _object_info(), learned_dir=_config().learned_dir
         ),
+        **_subgraph_edit_hint(capped),
     }
     if missing:
         # stated once, not per missing node
@@ -1500,11 +1578,13 @@ async def run_workflow(
     if not allow_invalid:
         errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
         if errors:
+            capped = _cap_findings(errors)
             return {
                 "status": "invalid",
-                "findings": _cap_findings(errors),
+                "findings": capped,
                 "hint": "fix with edit_workflow (diagnose_workflow for missing node "
                 "classes), or run_workflow(allow_invalid=True) to submit anyway",
+                **_subgraph_edit_hint(capped),
             }
     try:
         api = wf.to_api(object_info)
@@ -2016,7 +2096,8 @@ async def save_workflow(
                 "break for the user - fix them with edit_workflow, or pass "
                 "allow_invalid=True to save a known-broken draft anyway"
             ),
-            "findings": _cap_findings(errors),
+            "findings": (capped := _cap_findings(errors)),
+            **_subgraph_edit_hint(capped),
         }
     document = wf.to_ui()
     candidates = [name, f"{name} (draftsman)"] + [f"{name} (draftsman {i})" for i in range(2, 21)]

@@ -52,6 +52,27 @@ SYNTHETIC_SUFFIXES = (CONTROL_SUFFIX, UPLOAD_SUFFIX)
 KeyResolver = Callable[[str, int], Any]
 
 
+def is_v3_meta_type(kind: Any) -> bool:
+    """True for ComfyUI's own V3 *meta* io types - schema markers, never a
+    concrete value type and never a widget.
+
+    `comfy_api.latest._io` declares five (`COMFY_MATCHTYPE_V3`,
+    `COMFY_AUTOGROW_V3`, `COMFY_DYNAMICSLOT_V3`, `COMFY_DYNAMICCOMBO_V3`,
+    `COMFY_MULTITYPED_V3`). They matter here because a node usually does NOT
+    serialize them into its `inputs` socket array - an autogrow node emits
+    `value0..valueN` instead of the `values` marker, and an unconnected MatchType
+    slot is simply absent - which is precisely the shape `_is_custom_widget` reads
+    as "a pack's JS-rendered widget". Counting one as a widget invents a slot that
+    doesn't exist and shifts every later `widgets_values` entry up by one.
+
+    Matching the `COMFY_*_V3` shape rather than a fixed set keeps new core meta
+    types from silently reintroducing the same corruption.
+    """
+    return (
+        isinstance(kind, str) and kind.startswith("COMFY_") and kind.endswith("_V3")
+    )
+
+
 def _iter_schema_inputs(schema: dict[str, Any]):
     """Yield (name, spec) over required then optional inputs, in declaration order."""
     inputs = schema.get("input", {})
@@ -141,13 +162,17 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
     custom-typed input that the node did NOT serialize as a socket
     (``name not in socket_names``) can only be a JS widget (the frontend always
     emits real connection sockets in the node's ``inputs`` array). Without
-    ``socket_names`` (schema/fresh context) we can't tell, so return False."""
+    ``socket_names`` (schema/fresh context) we can't tell, so return False.
+
+    ComfyUI's own V3 meta types are the exception to "absent socket => widget":
+    they are schema markers the frontend expands into other slots, so they are
+    routinely absent while being no widget at all (see ``is_v3_meta_type``)."""
     if socket_names is None or is_widget_input(spec):
         return False
     if not isinstance(spec, list | tuple) or not spec:
         return False
     kind = spec[0]
-    if _opts(spec).get("forceInput"):
+    if _opts(spec).get("forceInput") or is_v3_meta_type(kind):
         return False
     return isinstance(kind, str) and kind != "*" and name not in socket_names
 

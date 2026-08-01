@@ -47,8 +47,16 @@ def flatten(
 ) -> tuple[Workflow, dict[int, dict[str, Any]], list[dict[str, Any]]]:
     """Expanded copy of ``wf`` with every active subgraph instance replaced by
     its inner nodes, plus provenance for reporting:
-    {new node id: {"path": "104:90", "subgraph": name, "instance": 104}}
+    {new node id: {"path": "104:90", "subgraph": name, "instance": 104,
+                   "definition": uuid, "inner_id": 90, "depth": 1}}
     ("path" uses the frontend's instanceId:innerId convention).
+
+    ``definition`` + ``inner_id`` are what a caller needs to actually FIX an
+    inner node: they are the ``definition_id``/``node_id`` of edit_workflow's
+    ``*_in_definition`` ops. ``depth`` is 1 for a node one level in; those ops
+    parse the definition into a Workflow and so only work at depth 1 (a nested
+    definition raises NotImplementedError), which is why callers gate on it
+    before naming a remedy.
 
     Returns a 3-tuple ``(flat, provenance, diagnostics)`` where *diagnostics*
     records boundary links that were silently dropped during expansion (target
@@ -74,7 +82,9 @@ def flatten(
         if depth >= MAX_DEPTH:
             raise ValueError(f"subgraphs nested deeper than {MAX_DEPTH} levels")
         for inst in instances:
-            _expand(flat, inst.id, defs[inst.type], object_info, provenance, diagnostics)
+            _expand(
+                flat, inst.id, defs[inst.type], object_info, provenance, diagnostics, defs
+            )
         depth += 1
     return flat, provenance, diagnostics
 
@@ -86,6 +96,7 @@ def _expand(
     object_info: dict[str, Any],
     provenance: dict[int, dict[str, Any]],
     diagnostics: list[dict[str, Any]],
+    defs: dict[str, dict[str, Any]],
 ) -> None:
     inst = flat.nodes[inst_id]
     name = sg.get("name") or sg.get("id")
@@ -94,6 +105,15 @@ def _expand(
     inner = Workflow.from_ui({"nodes": sg["nodes"], "links": sg.get("links") or []})
     parent = provenance.get(inst.id)
     prefix = parent["path"] if parent else str(inst.id)
+    depth = (parent["depth"] + 1) if parent else 1
+    # Whether edit_workflow's *_in_definition ops can actually reach these nodes.
+    # `Workflow.subgraph_as_workflow` refuses BOTH a nested node (depth > 1) and
+    # any definition that itself contains an instance, so the honest gate is
+    # both conditions - a finding that names a remedy which then raises is worse
+    # than one that says "rebuild flat".
+    editable = depth == 1 and not any(
+        isinstance(n, dict) and n.get("type") in defs for n in sg["nodes"]
+    )
 
     # widget promotion: instance values override inner widgets positionally
     proxies = inst.properties.get("proxyWidgets") or []
@@ -139,6 +159,13 @@ def _expand(
             "path": f"{prefix}:{node.id}",
             "subgraph": name,
             "instance": inst.id,
+            # the definition uuid and the node's id INSIDE it - i.e. exactly the
+            # definition_id/node_id an edit_workflow *_in_definition op takes.
+            # `node.id` is reassigned to new_id on the next line, so read it here.
+            "definition": inst.type,
+            "inner_id": node.id,
+            "depth": depth,
+            "editable": editable,
         }
         node.id = new_id
         for slot in node.inputs:

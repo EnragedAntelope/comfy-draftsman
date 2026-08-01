@@ -347,10 +347,28 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
         if origin:
             f["subgraph"] = origin["subgraph"]
             f["inner_node"] = origin["path"]
-            f["message"] += (
-                f" [inner node {origin['path']} of subgraph '{origin['subgraph']}' - "
-                "edit_workflow can't reach inside; rebuild flat to change it]"
-            )
+            # The remedy must name a real op. This tail used to read "edit_workflow
+            # can't reach inside; rebuild flat to change it", which is false at
+            # depth 1 - the *_in_definition ops exist - and cost a live session a
+            # hand-rebuild of a 14-node graph to fix one wrong model path. Only
+            # a nested/unparseable definition earns "rebuild flat" (see
+            # subgraph.flatten's `editable`).
+            if origin.get("editable"):
+                # the two ids an edit_workflow *_in_definition op needs. Kept as
+                # structured fields, not prose: the how-to sentence belongs once
+                # per result (server._subgraph_edit_hint), not on every finding.
+                f["definition_id"] = origin["definition"]
+                f["inner_node_id"] = origin["inner_id"]
+                f["message"] += (
+                    f" [inner node #{origin['inner_id']} of subgraph "
+                    f"'{origin['subgraph']}' - editable in place]"
+                )
+            else:
+                f["message"] += (
+                    f" [inner node {origin['path']} of subgraph "
+                    f"'{origin['subgraph']}', nested deeper than edit_workflow's "
+                    "*_in_definition ops can parse; rebuild flat to change it]"
+                )
     defs = wf.subgraph_defs()
     for node in wf.nodes.values():
         sg = defs.get(node.type)

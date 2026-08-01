@@ -53,6 +53,30 @@ def _upstream_nodes(wf: Workflow, node: Node, slot_name: str, depth: int = 4) ->
     return found
 
 
+def _has_text_display(wf: Workflow, chain: list[Node]) -> bool:
+    """Whether the user can see the text produced by this upstream chain.
+
+    Two shapes count, because they show the identical string:
+
+    - *inline*: a Show Text node sits IN the chain feeding the encoder.
+    - *tapped*: a Show Text node hangs off an output of a node in the chain
+      (generator -> Show Text, generator -> encoder). This is the more common
+      hand-wired shape and arguably the better one - the display doesn't sit in
+      the path it reports on - but the chain walk alone never saw it, so a
+      correctly-previewed workflow was told to "insert a Show Text node" that was
+      already there. A false lint teaches callers to ignore the rule.
+    """
+    if any(is_text_display(n.type) for n in chain):
+        return True
+    chain_ids = {n.id for n in chain}
+    return any(
+        is_text_display(consumer.type)
+        for link in wf.links.values()
+        if link.origin_id in chain_ids
+        and (consumer := wf.nodes.get(link.target_id)) is not None
+    )
+
+
 def _missing_prompt_previews(
     wf: Workflow, object_info: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -78,13 +102,14 @@ def _missing_prompt_previews(
         if not wired or _prompt_role(wf, node) != "positive":
             continue
         chain = _upstream_nodes(wf, node, wired[0])
-        if not any(is_text_display(n.type) for n in chain):
+        if not _has_text_display(wf, chain):
             findings.append(
                 _finding(
                     "no-prompt-preview",
                     f"{node.type} #{node.id}: the positive prompt is generated "
-                    "upstream, so the user never sees the final text - insert a "
-                    "Show Text node (e.g. ShowText|pys) inline before this encoder",
+                    "upstream, so the user never sees the final text - add a Show "
+                    "Text node (e.g. ShowText|pys), either inline before this "
+                    "encoder or tapped off the generator's text output",
                     node.id,
                 )
             )
