@@ -139,8 +139,18 @@ def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         schema = object_info.get(node.type)
         if schema is not None:
+            socket_names = {slot.name for slot in node.inputs}
             for name, spec in schema.get("input", {}).get("required", {}).items():
-                if w.is_widget_input(spec):
+                # mirror validate's exemptions exactly - lint contradicting
+                # validate on the same graph is pure noise, and save_workflow
+                # nags about an unclean lint. A widget, a pack's JS widget, and
+                # an autogrow container are all "not a socket"; the last is
+                # checked as a group by validate's autogrow-underfilled instead.
+                if (
+                    w.is_widget_input(spec)
+                    or w._is_custom_widget(name, spec, socket_names)
+                    or w.autogrow_template(spec) is not None
+                ):
                     continue
                 slot = node.input_by_name(name)
                 if slot is None or slot.link is None:

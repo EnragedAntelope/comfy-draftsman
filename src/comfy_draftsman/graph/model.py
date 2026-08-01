@@ -434,6 +434,19 @@ class Workflow:
             for name, spec in w._iter_schema_inputs(schema):
                 if w.is_widget_input(spec):
                     continue
+                autogrow = w.autogrow_template(spec)
+                if autogrow is not None:
+                    # the marker is a container, not a socket - materialize the
+                    # `min` mandatory synthesized sockets in its place, the way
+                    # the frontend draws them on a freshly dropped node. Wiring
+                    # further ones is `connect`'s job.
+                    item_type = autogrow["item_spec"]
+                    item_type = item_type[0] if isinstance(item_type, list | tuple) and item_type else "*"
+                    for slot_name in autogrow["names"][: autogrow["min"]]:
+                        node.inputs.append(
+                            InputSlot(name=f"{name}.{slot_name}", type=str(item_type))
+                        )
+                    continue
                 slot_type = spec[0] if isinstance(spec[0], str) else "COMBO"
                 node.inputs.append(InputSlot(name=name, type=slot_type))
             out_names = schema.get("output_name") or schema.get("output") or []
@@ -511,6 +524,11 @@ class Workflow:
                 )
             out_index = found
         out_slot = origin.outputs[out_index]
+        # An autogrow slot has two legal spellings (bare canvas name, dotted API
+        # name). Resolve to the one this node actually carries BEFORE anything
+        # else: looking up the caller's spelling directly would miss an existing
+        # socket, materialize a duplicate, and then fail to find it again by name.
+        target_input = self._resolve_autogrow_alias(target, target_input, object_info)
         in_slot = target.input_by_name(target_input)
         materialized = False
         if in_slot is None:
@@ -660,11 +678,35 @@ class Workflow:
         targets = self.primitive_targets(node_id, object_info)
         return targets[0] if targets else None
 
+    def _resolve_autogrow_alias(
+        self, node: Node, name: str, object_info: dict[str, Any] | None
+    ) -> str:
+        """Map an autogrow slot name onto the spelling this node actually uses.
+
+        Prefers an existing socket under either spelling (so a caller writing the
+        canvas name `image0` lands on an imported `images.image0` instead of
+        creating a second one), and otherwise returns the dotted API name for a
+        fresh socket. Non-autogrow names pass straight through."""
+        if object_info is None or node.input_by_name(name) is not None:
+            return name
+        schema = object_info.get(node.type)
+        if schema is None:
+            return name
+        resolved = w.autogrow_resolve(schema, name)
+        if resolved is None:
+            return name
+        api_name = resolved[0]
+        bare = api_name.split(".", 1)[1]
+        for candidate in (api_name, bare):
+            if node.input_by_name(candidate) is not None:
+                return candidate
+        return api_name
+
     def _materialize_widget_input(
         self, node: Node, name: str, object_info: dict[str, Any] | None
     ) -> InputSlot | None:
-        """Expose a primitive/combo widget as a real input slot so a link can feed
-        it. Returns the new slot, or None if the name isn't a convertible widget."""
+        """Expose a widget (or an undrawn autogrow slot) as a real input slot so a
+        link can feed it. Returns the new slot, or None if the name is neither."""
         if object_info is None:
             return None
         schema = object_info.get(node.type)
@@ -676,6 +718,19 @@ class Workflow:
             kind = spec[0]
             slot_type = "COMBO" if isinstance(kind, list) or kind == "COMBO" else str(kind)
             slot = InputSlot(name=name, type=slot_type, widget_name=name)
+            node.inputs.append(slot)
+            return slot
+        # an autogrow socket beyond the `min` the node was created with: the
+        # frontend draws these on demand as wires arrive, and the backend accepts
+        # whichever names the prompt carries. NO widget_name - it is a real
+        # socket, not a converted widget, so it must not claim a widgets_values
+        # slot when the node is rebuilt. Stored under the dotted API name, which
+        # is what a fresh frontend-authored node carries.
+        resolved = w.autogrow_resolve(schema, name)
+        if resolved is not None:
+            api_name, item_spec = resolved
+            kind = item_spec[0] if isinstance(item_spec, list | tuple) and item_spec else "*"
+            slot = InputSlot(name=api_name, type=str(kind))
             node.inputs.append(slot)
             return slot
         return None
@@ -1030,6 +1085,7 @@ class Workflow:
                 for k, v in named_widgets.items()
                 if not k.endswith(w.SYNTHETIC_SUFFIXES)
             }
+            schema = object_info[node.type]
             for in_index, slot in enumerate(node.inputs):
                 if slot.link is None:
                     continue
@@ -1037,10 +1093,15 @@ class Workflow:
                 if origin is None:
                     continue
                 origin_id, origin_slot = origin
+                # an autogrow socket's API key is dotted ("images.image0") even
+                # though the canvas shows the bare name; the backend matches on
+                # the dotted form and silently ignores anything else, so a bare
+                # key would drop the input without erroring
+                key = w.autogrow_api_key(schema, slot.name) or slot.name
                 if origin_id in primitive_values:
-                    inputs[slot.name] = primitive_values[origin_id]
+                    inputs[key] = primitive_values[origin_id]
                 else:
-                    inputs[slot.name] = [str(origin_id), origin_slot]
+                    inputs[key] = [str(origin_id), origin_slot]
             api[str(node.id)] = {"class_type": node.type, "inputs": inputs}
         return api
 

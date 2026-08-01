@@ -17,6 +17,11 @@ MAX_COMBO_CHOICES = 24
 MAX_TOOLTIP_CHARS = 160  # tooltips are rarely needed to wire a node correctly
 MAX_TRIGGER_TAGS = 15
 
+# An autogrow container can declare up to 50 synthesized slot names. The names
+# are a visible arithmetic pattern ("image0".."image49"), so a few plus the
+# count and the last name convey it - listing all 50 is pure repetition.
+_AUTOGROW_NAMES_SHOWN = 6
+
 
 def metadata_digest(meta: dict[str, Any], max_tags: int = MAX_TRIGGER_TAGS) -> dict[str, Any]:
     """Trim a safetensors __metadata__ dict to what matters for USING the model:
@@ -185,6 +190,32 @@ def node_summary(
             elif kind == "COMBO":
                 entry["type"] = "COMBO"
                 _apply_choices(entry, opts.get("options", []), choices_filter, max_choices)
+            elif (autogrow := w.autogrow_template(spec)) is not None:
+                # A growing socket list, not a socket. `/object_info` names only
+                # this container, so without expanding it here the real slot
+                # names are undiscoverable and `connect` has nothing to aim at -
+                # and the prefix isn't derivable from the marker ("images" ->
+                # "image0"). Names are capped like every other list this server
+                # returns; `max` is up to 50 and repeating it per node is cost
+                # for nothing once the pattern is visible.
+                item = autogrow["item_spec"]
+                entry["type"] = str(
+                    item[0] if isinstance(item, list | tuple) and item else "*"
+                )
+                names = autogrow["names"]
+                entry["autogrow"] = True
+                entry["connect_to"] = [
+                    f"{name}.{n}" for n in names[:_AUTOGROW_NAMES_SHOWN]
+                ]
+                entry["slot_count"] = len(names)
+                entry["min_connected"] = autogrow["min"]
+                entry["hint"] = (
+                    f"a growing socket list, not a socket: connect to "
+                    f"'{name}.{names[0]}'..'{name}.{names[-1]}' "
+                    f"({len(names)} slots, at least {autogrow['min']} required, "
+                    "gaps allowed) - never to "
+                    f"'{name}' itself"
+                )
             elif w.is_dynamic_combo(spec):
                 # a V3 dynamic combo: the main value is one of the option keys,
                 # and the selected key reveals dotted sub-widgets. Surface both

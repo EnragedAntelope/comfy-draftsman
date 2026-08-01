@@ -143,7 +143,9 @@ def check_widget_value(
             f"instance - {listing}{browse}. Only listed values run; "
             '"force": true overrides if you know better'
         )
-    kind = spec[0]
+    # widgetType, not the io type: a union like "FLOAT,INT" names no single
+    # checkable kind, but its widgetType ("FLOAT") does
+    kind = w.widget_kind(spec)
     if kind == "INT" and (isinstance(value, bool) or not isinstance(value, int)):
         return f"'{input_name}' expects an integer, got {type(value).__name__} {value!r}"
     if kind == "FLOAT" and (isinstance(value, bool) or not isinstance(value, int | float)):
@@ -188,6 +190,40 @@ def check_primitive_value(
         if problem:
             return f"drives {target.type} #{target.id}.{name}: {problem}"
     return None
+
+
+def _autogrow_findings(
+    node: Node, marker: str, template: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Check an autogrow container: at least `min` of its synthesized sockets must
+    be wired. Gaps are fine - the backend collects whichever names the prompt
+    carries, so `image0` + `image2` runs exactly as written and needs no
+    renumbering (`Autogrow._expand_schema_for_dynamic`)."""
+    names = template["names"]
+    wired = [
+        n
+        for n in names
+        # either spelling counts: an imported graph carries whatever the frontend
+        # wrote, a draftsman-authored one carries the dotted API name
+        for slot in (node.input_by_name(n) or node.input_by_name(f"{marker}.{n}"),)
+        if slot is not None and slot.link is not None
+    ]
+    if len(wired) >= template["min"]:
+        return []
+    return [
+        _finding(
+            "error",
+            "autogrow-underfilled",
+            f"{node.type} #{node.id}: '{marker}' needs at least {template['min']} "
+            f"connected input(s), has {len(wired)}. It is a growing socket list, "
+            f"not a single socket - connect to "
+            f"{[f'{marker}.{n}' for n in names[:3]]}"
+            + (f" … up to '{marker}.{names[-1]}'" if len(names) > 3 else "")
+            + ". Gaps are allowed; the numbering never needs to be contiguous",
+            node.id,
+            input=marker,
+        )
+    ]
 
 
 def _primitive_findings(
@@ -576,6 +612,14 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             # base widgets, and custom JS-widget inputs the node didn't serialize
             # as a socket, are populated from widgets_values - not "unconnected"
             if w.is_widget_input(spec) or w._is_custom_widget(name, spec, socket_names):
+                continue
+            autogrow = w.autogrow_template(spec)
+            if autogrow is not None:
+                # the marker names a CONTAINER, never a socket - asking whether it
+                # is "connected" is a category error, and it produced a blocking
+                # error on 56 required markers across a stock instance. What the
+                # backend actually requires is the first `min` synthesized slots.
+                findings.extend(_autogrow_findings(node, name, autogrow))
                 continue
             slot = node.input_by_name(name)
             if slot is not None and slot.link is not None:

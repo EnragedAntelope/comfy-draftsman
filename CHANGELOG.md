@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.12.0 — Widget flags, autogrow authoring
+
+Closes four of 0.11.0's five open TODOs. Two of them rested on a premise that
+turned out to be false, so the "fix" was smaller and much more valuable than the
+TODO predicted — worth re-checking a TODO's claim before implementing around it.
+
+Measured over 60 real saved workflows on a live instance: **15 blocking false
+errors removed** (`unconnected-input` 24→10, `js-widget-input` 16→15, lint
+`unconnected-input` 30→24) with every other finding count unchanged, and every
+surviving error verified genuine.
+
+### Fixed
+
+- **ComfyUI's own `socketless` / `widgetType` flags are now believed.** V3's
+  `WidgetInput` serializes both, and draftsman ignored them — so on a stock
+  instance **26 classes had a ComfyUI-declared widget treated as a required
+  connection socket.** `ColorToRGBInt`, whose only parameter is a socketless
+  `COLOR`, got a phantom socket, no widget value at all, and a *blocking*
+  `unconnected-input` error for a graph that was perfectly fine; `TextOverlay`
+  silently dropped its `color` value and shifted every later widget up a slot.
+  `forceInput` still wins where a node declares both (7 inputs do), and
+  `socketless: false` is honoured as the real value it is. Widget value checks
+  now use `widgetType` as the effective kind, since a union like `"FLOAT,INT"`
+  names no single checkable type.
+- **Autogrow inputs are authorable.** `COMFY_AUTOGROW_V3` (66 inputs on a stock
+  instance) declares only a *marker* plus a template; the real sockets are
+  synthesized from `prefix`+index or an explicit `names` list. Three consequences,
+  all previously wrong:
+  - The marker was reported as an unconnected required input — a blocking error
+    on 56 required markers. `validate` now checks what the backend actually
+    requires (at least `min` synthesized slots connected,
+    `autogrow-underfilled`), and `lint` mirrors the exemption so the two tools
+    stop contradicting each other.
+  - The slot names were undiscoverable, so `connect` had nothing to aim at.
+    `get_node_info` now expands them (capped) with a hint, and `add_node`
+    materializes the mandatory ones.
+  - **The prompt key is dotted — `images.image0`, not `image0`.** Confirmed from
+    ComfyUI's `parse_class_inputs`/`finalize_prefix` and independently from the
+    frontend bundle. This one is silent when wrong: the backend does not error on
+    an unrecognized key, it just runs the node with that input missing. `to_api`
+    normalizes, `connect` accepts either spelling, and an imported socket is
+    never renamed — canonicalizing one would rewrite the user's file. Gaps are
+    legal, so `image0`+`image2` runs as written with no renumbering.
+
+### Closed without code
+
+- **Nested primitive chains (`primitive → Reroute → primitive`)** were carried as
+  unhandled. They are *unrepresentable*: a `PrimitiveNode` is a pure source with
+  no inputs, so `connect` refuses by name with the available list. That is a
+  better outcome than resolving the chain would have been.
+- **`roll_primitive_control`'s index-uniform randomize** is correct, not a
+  shortfall: it mirrors the frontend's `addValueControlWidget`, and a combo with
+  uneven option counts per category has no defensible notion of "fair".
+- **The `js-widget-input` block is now evidence-backed rather than assumed.** The
+  genuinely-unemittable types (`AUTOCOMPLETE_TEXT_LORAS`, `RANDOMIZER_CONFIG`,
+  `LORA_POOL_CONFIG`, `LORAS`) carry **no schema flags at all**, while
+  LoraManager's ordinary prompt widget declares `widgetType` — so the new rule
+  picks up the latter and leaves the former blocked, exactly as intended.
+  Verified across the same 60 workflows: every surviving block is an unflagged
+  bespoke type.
+
 ## 0.11.0 — V3 meta types, honest subgraph remedies
 
 From a live session that built a Krea-2 + LM Studio workflow and logged every

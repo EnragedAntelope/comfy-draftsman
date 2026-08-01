@@ -134,26 +134,160 @@ def primitive_takes_control(spec: Any) -> bool:
     return spec[0] in ("INT", "FLOAT")
 
 
+def widget_kind(spec: Any) -> Any:
+    """The widget this input actually renders as.
+
+    V3's ``widgetType`` overrides the io type for widget purposes - ComfyUI's own
+    ``WidgetInput.get_io_type`` does exactly this. It matters when the declared
+    type is a union: ``LTXVEmptyLatentAudio.frame_rate`` is ``"FLOAT,INT"`` with
+    ``widgetType: "FLOAT"``, and only the latter says how to range-check it."""
+    opts = _opts(spec)
+    declared = opts.get("widgetType")
+    if declared:
+        return declared
+    return spec[0] if isinstance(spec, list | tuple) and spec else spec
+
+
 def is_widget_input(spec: Any) -> bool:
     """True if this input spec renders as a widget (consumes a widgets_values slot).
 
-    Primitives and combos only - schema-level truth. Custom nodes may also declare
-    an input whose type is a bespoke string (e.g. ``AUTOCOMPLETE_TEXT_LORAS``,
-    ``ZIPN_STYLE_GALLERY_BUTTON``) that the pack's own frontend JS renders as an
-    editable widget; those can't be told apart from a connection socket by schema
-    alone, so they are recognized per-instance via ``socket_names`` in the slot
-    walk (see ``_is_custom_widget``), not here."""
+    Primitives, combos, and anything ComfyUI itself flags as widget-rendered -
+    all schema-level truth, so this works without instance context (``add_node``
+    and fresh-node defaults depend on that).
+
+    **``socketless`` / ``widgetType`` are ComfyUI's own declarations** and are
+    believed over the io type. `socketless: true` means the frontend renders the
+    input as a widget and never draws a socket for it; `widgetType` names the
+    widget that renders a bespoke io type. Without them, 26 classes on a stock
+    instance had a widget treated as a required connection socket - `TextOverlay`
+    lost its `color` value and shifted every later widget up a slot, and
+    `ColorToRGBInt` (whose only parameter is a socketless COLOR) validated as a
+    blocking `unconnected-input` error for a graph that was perfectly fine.
+
+    `forceInput` still wins: 7 inputs declare `socketless` *and* `forceInput`
+    (a type whose class defaults to socketless, overridden per-node), and
+    `forceInput` is the node author's explicit "draw this as a socket".
+
+    A pack that declares neither flag is still invisible here - a bespoke type
+    like ``AUTOCOMPLETE_TEXT_LORAS`` (no flags at all on a stock instance) is
+    recognized per-instance via ``socket_names`` in the slot walk
+    (``_is_custom_widget``), not here."""
     if not isinstance(spec, list | tuple) or not spec:
         return False
     kind = spec[0]
     opts = _opts(spec)
     if opts.get("forceInput"):
         return False
+    if opts.get("socketless") or opts.get("widgetType"):
+        return True
     if isinstance(kind, list):  # legacy COMBO: list of choices
         return True
     if kind in ("COMBO", DYNAMIC_COMBO_TYPE):  # V3-style COMBO / dynamic combo
         return True
     return kind in PRIMITIVE_TYPES
+
+
+AUTOGROW_TYPE = "COMFY_AUTOGROW_V3"
+
+
+def autogrow_template(spec: Any) -> dict[str, Any] | None:
+    """The synthesized socket list behind a `COMFY_AUTOGROW_V3` marker input, or
+    None if this spec isn't one.
+
+    An autogrow input is a *container*, not a socket: `/object_info` declares only
+    the marker (e.g. `BatchImagesNode.images`) plus a `template`, and the real
+    sockets are synthesized from it - `prefix`+index (`image0`..`image49`), or an
+    explicit `names` list. The frontend synthesizes them as wires are attached;
+    the backend re-derives them at execution from whatever the submitted prompt
+    actually contains (`Autogrow._expand_schema_for_dynamic`), making the first
+    `min` required and the rest optional.
+
+    Two consequences draftsman has to mirror:
+
+    - **The marker is never connectable.** It was being reported as a required
+      input that is "not connected" - a blocking error on 56 required markers
+      across a stock instance, for graphs that are fine.
+    - **Gaps are legal.** The backend walks the name list and collects whichever
+      names the prompt carries, so `image0` + `image2` with no `image1` executes
+      exactly as written. Nothing needs renumbering.
+
+    Note the prefix is NOT derivable from the marker name (`images` -> `image`),
+    so it must be read from the template.
+
+    **The API key is dotted: `{marker}.{slot}` (`images.image0`).** The canvas
+    label is the bare slot name, but the prompt document must carry the dotted
+    form - confirmed twice over, from ComfyUI's own
+    `parse_class_inputs`/`finalize_prefix` (which prefixes the marker id onto
+    every expanded name) and from the frontend bundle, which builds each
+    autogrow input as ``{name: `${marker}.${slot}`, display_name: slot}``.
+    Emitting the bare name would not error - the backend simply would not match
+    it, and the node would run with that input silently missing.
+    """
+    if not isinstance(spec, list | tuple) or not spec or spec[0] != AUTOGROW_TYPE:
+        return None
+    template = _opts(spec).get("template") or {}
+    if "names" in template:
+        names = [str(n) for n in template.get("names") or []]
+    elif "prefix" in template:
+        try:
+            maximum = int(template.get("max") or 0)
+        except (TypeError, ValueError):
+            return None
+        names = [f"{template['prefix']}{i}" for i in range(maximum)]
+    else:
+        return None
+    if not names:
+        return None
+    try:
+        minimum = max(0, int(template.get("min") or 0))
+    except (TypeError, ValueError):
+        minimum = 0
+    # the per-slot spec: the template's single declared input, whichever section
+    # it sits in ("required" only means `min` of them are mandatory)
+    item_spec: Any = ["*", {}]
+    for section in ("required", "optional"):
+        entries = (template.get("input") or {}).get(section) or {}
+        if entries:
+            item_spec = next(iter(entries.values()))
+            break
+    return {"names": names, "min": min(minimum, len(names)), "item_spec": item_spec}
+
+
+def autogrow_slots(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """{marker input name: autogrow_template(...)} for one node schema."""
+    found: dict[str, dict[str, Any]] = {}
+    for name, spec in _iter_schema_inputs(schema):
+        template = autogrow_template(spec)
+        if template is not None:
+            found[name] = template
+    return found
+
+
+def autogrow_resolve(
+    schema: dict[str, Any], input_name: str
+) -> tuple[str, Any] | None:
+    """``(dotted API key, per-slot spec)`` for an autogrow socket, else None.
+
+    Accepts either spelling - the bare canvas name (``image0``) or the dotted API
+    name (``images.image0``) - and always answers with the dotted one. Both are
+    accepted deliberately: a caller naturally writes what `get_node_info` shows on
+    the canvas, while an imported workflow carries whatever the frontend wrote,
+    and renaming an imported socket to "canonicalize" it would silently rewrite
+    the user's file. Normalizing at the one place that matters (`to_api`) keeps
+    both spellings runnable and neither rewritten.
+    """
+    for marker, template in autogrow_slots(schema).items():
+        for slot in template["names"]:
+            if input_name in (slot, f"{marker}.{slot}"):
+                return f"{marker}.{slot}", template["item_spec"]
+    return None
+
+
+def autogrow_api_key(schema: dict[str, Any], input_name: str) -> str | None:
+    """The dotted key `to_api` must emit for this socket, or None if it isn't an
+    autogrow slot (in which case its own name is already the key)."""
+    resolved = autogrow_resolve(schema, input_name)
+    return resolved[0] if resolved is not None else None
 
 
 def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bool:

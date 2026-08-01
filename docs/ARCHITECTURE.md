@@ -264,6 +264,48 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
     and is handled separately (`widgets.is_dynamic_combo`); it is excluded from
     `_is_custom_widget` by the earlier `is_widget_input` check, not by the meta
     carve-out.
+- **ComfyUI declares which inputs are widgets; believe it over the type name.**
+  V3's `WidgetInput.as_dict` serializes `socketless` (the frontend draws a widget
+  and never a socket) and `widgetType` (which widget renders a bespoke or union
+  io type). `widgets.is_widget_input` honours both, ahead of any type-name
+  reasoning — but **after** `forceInput`, which is the node author's explicit
+  "draw a socket" and appears together with `socketless` on 7 inputs (a type
+  whose class defaults to socketless, overridden per node). Note `socketless`
+  is serialized as a real `false` too, so test truthiness, not key presence.
+  Before round 21 these were ignored and 26 classes on a stock instance had a
+  declared widget treated as a required connection socket: `ColorToRGBInt`
+  (whose only parameter is a socketless COLOR) got a phantom socket, no widget
+  value, and a *blocking* `unconnected-input` for a graph that was fine, and
+  `TextOverlay` dropped `color` and shifted every later widget up a slot.
+  `widgets.widget_kind` uses `widgetType` for value checks, since a union like
+  `"FLOAT,INT"` names no single checkable kind.
+- **An autogrow input is a growing socket LIST, and its API key is dotted.**
+  `COMFY_AUTOGROW_V3` (66 inputs on a stock instance) declares only a *marker*
+  plus a `template`; the real sockets are synthesized from `prefix`+index
+  (`image0`…`image49`) or an explicit `names` list, with the first `min`
+  mandatory. Three separate traps, all hit in round 21:
+  - *The marker is not a socket.* Reported as an unconnected required input, it
+    blocked 56 required markers on a stock instance. `validate` now checks the
+    real requirement instead (`autogrow-underfilled`), and `lint` mirrors the
+    exemption — lint contradicting validate is noise, and `save_workflow` nags
+    about an unclean lint.
+  - *The prefix is not the marker name* (`images` → `image0`). It must be read
+    from the template, never derived.
+  - **The prompt key is `{marker}.{slot}` (`images.image0`), not the bare canvas
+    name.** Confirmed twice — from `parse_class_inputs`/`finalize_prefix`, which
+    prefixes the marker id onto every expanded name, and independently from the
+    frontend bundle, which builds each slot as
+    ``{name: `${marker}.${slot}`, display_name: slot}``. Emitting the bare name
+    does **not** error: the backend simply never matches it and the node runs
+    with that input silently missing. `to_api` normalizes
+    (`widgets.autogrow_api_key`), `connect` accepts either spelling, and an
+    imported socket is never renamed — canonicalizing one would silently rewrite
+    the user's file. **Gaps are legal**: the backend collects whichever names the
+    prompt carries, so `image0`+`image2` runs as written and nothing needs
+    renumbering.
+  - `/object_info` names only the marker, so `get_node_info` expands the slot
+    names (capped, `catalog._AUTOGROW_NAMES_SHOWN`) — without that they are
+    undiscoverable and `connect` has nothing to aim at.
 - **A remediation string must name an op that exists.** Every finding on a node
   inside a subgraph used to end "edit_workflow can't reach inside; rebuild flat
   to change it" — written before the `*_in_definition` ops landed and never
@@ -382,37 +424,16 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
-- **[OPEN] The remaining V3 meta types are tolerated, not supported.** Round 20
-  stopped `COMFY_AUTOGROW_V3` / `COMFY_DYNAMICSLOT_V3` from corrupting widget
-  reads, but draftsman cannot *author* with them: `edit_workflow` can only
-  connect to an autogrow slot the schema already declares (`value0..valueN`, so
-  a node's declared `max` is the real ceiling), and it never grows or prunes the
-  socket list the way the frontend does as wires come and go. Nothing observed
-  has needed it — core autogrow nodes declare their full slot range up front, so
-  connecting works — but a pack that declares `min` slots and relies on the
-  frontend to add more would hit the wall. Revisit with a real workflow that
-  needs it; `widgets.is_v3_meta_type` is where the classification lives.
-- **[OPEN] `_is_custom_widget` is a shape heuristic, and shapes collide.** "A
-  custom-typed input the node didn't serialize as a socket" identifies a pack's
-  JS widget correctly, but it is inference, not knowledge — ComfyUI's own meta
-  types matched it exactly (round 20) and anything else that is declared-but-not-
-  serialized will too. There is no flag in `/object_info` that distinguishes
-  them, so the carve-out list is the mechanism; it needs re-checking whenever
-  ComfyUI adds an input kind. A schema-level marker upstream would retire this
-  whole heuristic.
-- **[OPEN] `roll_primitive_control`'s randomize is index-uniform, not
-  value-weighted**, matching `roll_seed_controls`' own seed randomize (uniform
-  over the numeric range) rather than doing anything smarter - a combo with
-  wildly uneven option counts across categories has no notion of "fair" here,
-  and neither does the frontend it mirrors. Revisit only if a real workflow
-  needs weighted sampling.
-- **[OPEN] Nested primitive chains (primitive -> Reroute -> primitive) are
-  unhandled.** `_forward_widget_targets` sees through a `Reroute` to find the
-  widget a primitive drives, but a second `PrimitiveNode` sitting between two
-  reroutes has no widget to mirror and nothing resolves it. Not a data-loss risk
-  (`primitive-unbound` catches it as a warning), just an authoring pattern
-  nobody has asked for yet - a chained primitive is meaningless in the
-  frontend too.
+- **[OPEN] `COMFY_DYNAMICSLOT_V3` is classified but never exercised.** It is
+  excluded from widget inference like the other meta types
+  (`widgets.is_v3_meta_type`), but **zero** inputs on a stock ComfyUI 0.29
+  instance with ~3,700 classes declare one, so nothing here has been tested
+  against reality — unlike `COMFY_AUTOGROW_V3` (66 inputs) and
+  `COMFY_MATCHTYPE_V3` (36), which round 20/21 could verify. Its shape
+  (`slotType` + a nested `inputs` dict, expanded under a dotted prefix) is close
+  enough to autogrow that `graph/widgets.py`'s autogrow helpers are the model to
+  copy. Do not implement it speculatively — wait for a pack that uses it, then
+  verify against a real serialized node the way round 21 did.
 - **[OPEN] Widget-backed custom-JS inputs stay a loud stop, by design.** Packs
   like LoraManager (`text` / `AUTOCOMPLETE_TEXT_LORAS`) and StyleStringInjector2
   (`gallery` / `ZIPN_STYLE_GALLERY_BUTTON`) expose an input as a widget-backed
@@ -433,9 +454,45 @@ Open:
   this is the *widget-backed slot* case only; a custom input the node did not
   serialize as a socket at all is handled and now survives the write path too —
   see the `socket_names` gotcha above.
+  - **Round 21 narrowed this precisely, and the boundary is now evidence-backed
+    rather than assumed.** The blocked types carry **no schema flags at all** on
+    a live instance — `AUTOCOMPLETE_TEXT_LORAS` (4 nodes), `RANDOMIZER_CONFIG`,
+    `LORA_POOL_CONFIG`, `LORAS` are all bare `["TYPE", {}]`. Meanwhile the
+    LoraManager nodes that *are* ordinary widgets declare
+    `widgetType: AUTOCOMPLETE_TEXT_PROMPT` on a `AUTOCOMPLETE_TEXT_PROMPT,STRING`
+    union, and round 21's `socketless`/`widgetType` rule picks exactly those up
+    while leaving the four JS-state ones blocked. So the flags double as the
+    discriminator: **flagged ⇒ the value is a plain widget value the API can
+    carry; unflagged bespoke type ⇒ pack JS state.** Confirmed over 60 of the
+    user's real saved workflows — the surviving `js-widget-input` blocks are all
+    and only the unflagged ones. If a pack ever flags a genuinely JS-resolved
+    input, that rule breaks and this becomes a real bug; there is no test that
+    can catch it locally, so it is written here.
 
 Recently closed:
 
+- **[DONE, round 21] Widget flags + autogrow authoring.** Closed four of round
+  20's five open TODOs, two of which rested on a premise that turned out to be
+  false — a reminder to re-check a TODO's *claim* before implementing around it:
+  - *"No flag in `/object_info` distinguishes a widget from a socket."* There are
+    two, `socketless` and `widgetType`. Using them fixed 26 classes.
+  - *"Core autogrow nodes declare their full slot range up front, so connecting
+    works."* They declare only the marker; connecting was impossible and the
+    marker was reported as an unconnected required input.
+  - *"Nested primitive chains are unhandled."* They are **unrepresentable** — a
+    `PrimitiveNode` has no inputs at all, so `connect` refuses by name with the
+    available list. Better than resolving it would have been; closed, not built.
+  - *"`roll_primitive_control`'s randomize should maybe be value-weighted."*
+    Decided WONTFIX: it mirrors the frontend's `addValueControlWidget`, which is
+    index-uniform, and a combo with uneven option counts per category has no
+    defensible notion of "fair". Matching the frontend IS the correct behaviour,
+    so this was never pending work.
+
+    Measured over 60 of the user's real saved workflows: 15 blocking false errors
+    removed (`unconnected-input` 24→10, `js-widget-input` 16→15, lint
+    `unconnected-input` 30→24) with every other finding count unchanged —
+    `missing-node-class` 176, `invalid-combo-value` 87, `null-widget-value` 32,
+    `out-of-range` 1 — and every surviving error verified genuine.
 - **[DONE, round 20] V3 meta types + honest subgraph remedies.** From a live
   session that logged its snags while building a Krea-2 + LM Studio workflow;
   three of seven were real, two more surfaced while verifying those.
