@@ -226,6 +226,62 @@ def _autogrow_findings(
     ]
 
 
+def _connected_source_finding(
+    wf: Workflow, node: Node, input_label: str, slot: Any
+) -> dict[str, Any] | None:
+    """A wired slot whose source resolves to nothing, or to a MUTED node, leaves
+    `to_api` emitting a dangling `[node_id, slot]` reference - the muted node is
+    dropped from the API document entirely, so ComfyUI's own validator raises a
+    raw KeyError instead of a clean rejection. Whether the slot is schema-required
+    or optional only gates "must it be wired" - a wired source's realness matters
+    either way, so both callers (required and optional loops) share this check."""
+    link = wf.links.get(slot.link)
+    origin = wf._trace_origin(link.origin_id, link.origin_slot, 0) if link is not None else None
+    if origin is None:
+        return _finding(
+            "error",
+            "dead-input-source",
+            f"{node.type} #{node.id}: input '{input_label}' is wired but the chain "
+            "feeding it resolves to nothing - a bypassed node passes its input "
+            "through, so a bypassed node with that input unconnected forwards a "
+            "hole. Connect the upstream source, or unbypass the node that should "
+            "produce this value",
+            node.id,
+            input=input_label,
+        )
+    src = wf.nodes.get(origin[0])
+    if src is not None and src.mode == MODE_MUTE:
+        return _finding(
+            "error",
+            "muted-input-source",
+            f"{node.type} #{node.id}: input '{input_label}' is fed by muted node "
+            f"#{src.id} ({src.type}) - a muted node never runs, so the graph would "
+            f"fail at execution with a missing input. Unmute #{src.id} (set_mode 0) "
+            "or rewire it to an active source",
+            node.id,
+            input=input_label,
+        )
+    return None
+
+
+def _autogrow_source_findings(
+    wf: Workflow, node: Node, marker: str, template: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Each wired synthesized socket of an autogrow container needs the same
+    dead/muted-source check as an ordinary slot. The marker name itself is never
+    a real socket on the node, so neither the required nor optional loop's
+    by-name lookup ever reaches these - they have to be walked separately."""
+    findings: list[dict[str, Any]] = []
+    for n in template["names"]:
+        slot = node.input_by_name(n) or node.input_by_name(f"{marker}.{n}")
+        if slot is None or slot.link is None:
+            continue
+        finding = _connected_source_finding(wf, node, f"{marker}.{n}", slot)
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
 def _primitive_findings(
     wf: Workflow, object_info: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -620,56 +676,13 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 # error on 56 required markers across a stock instance. What the
                 # backend actually requires is the first `min` synthesized slots.
                 findings.extend(_autogrow_findings(node, name, autogrow))
+                findings.extend(_autogrow_source_findings(wf, node, name, autogrow))
                 continue
             slot = node.input_by_name(name)
             if slot is not None and slot.link is not None:
-                # Connected - but a MUTE (mode 2) producer is dropped entirely at
-                # run time (to_api skips it; _trace_origin sees through Reroute and
-                # bypass but not mute), leaving a dangling [muted_id, slot] reference
-                # ComfyUI rejects. Catch it here so the failure is early and named
-                # instead of a confusing run-time error on a graph that "validated".
-                link = wf.links.get(slot.link)
-                origin = (
-                    wf._trace_origin(link.origin_id, link.origin_slot, 0)
-                    if link is not None
-                    else None
-                )
-                src = wf.nodes.get(origin[0]) if origin is not None else None
-                if origin is None:
-                    # The slot is wired, but the chain resolves to no producer:
-                    # a BYPASSED node with nothing feeding its matching input
-                    # (bypass is a passthrough, so it forwards a hole), or a
-                    # link whose origin node is gone. to_api drops the input
-                    # entirely and ComfyUI rejects the prompt - name it here.
-                    findings.append(
-                        _finding(
-                            "error",
-                            "dead-input-source",
-                            f"{node.type} #{node.id}: required input '{name}' is wired "
-                            "but the chain feeding it resolves to nothing - a bypassed "
-                            "node passes its input through, so a bypassed node with "
-                            "that input unconnected forwards a hole. Connect the "
-                            "upstream source, or unbypass the node that should "
-                            "produce this value",
-                            node.id,
-                            input=name,
-                        )
-                    )
-                    continue
-                if src is not None and src.mode == MODE_MUTE:
-                    findings.append(
-                        _finding(
-                            "error",
-                            "muted-input-source",
-                            f"{node.type} #{node.id}: required input '{name}' is fed by "
-                            f"muted node #{src.id} ({src.type}) - a muted node never "
-                            "runs, so the graph would fail at execution with a missing "
-                            f"input. Unmute #{src.id} (set_mode 0) or rewire '{name}' to "
-                            "an active source",
-                            node.id,
-                            input=name,
-                        )
-                    )
+                finding = _connected_source_finding(wf, node, name, slot)
+                if finding is not None:
+                    findings.append(finding)
                 continue
             if slot is not None and slot.link is None and slot.widget_name:
                 # a custom-typed input the node exposes as a widget-backed slot
@@ -701,6 +714,28 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         input=name,
                     )
                 )
+
+        # Optional inputs are never required to be wired, but a wired one still
+        # reaches to_api the same way a required one does - an optional slot fed
+        # by a dead or muted source produces the identical dangling-reference
+        # crash. This is the gap that let a live session mute a node feeding
+        # ClownsharKSampler_Beta's optional `options_group` autogrow and hit a raw
+        # ComfyUI KeyError instead of a validate() rejection: the required-only
+        # loop above never even looks at optional specs.
+        for name, spec in (schema.get("input", {}).get("optional", {}) or {}).items():
+            if w.is_widget_input(spec) or w._is_custom_widget(name, spec, socket_names):
+                continue
+            autogrow = w.autogrow_template(spec)
+            if autogrow is not None:
+                findings.extend(_autogrow_findings(node, name, autogrow))
+                findings.extend(_autogrow_source_findings(wf, node, name, autogrow))
+                continue
+            slot = node.input_by_name(name)
+            if slot is None or slot.link is None:
+                continue  # optional and unwired - nothing to check
+            finding = _connected_source_finding(wf, node, name, slot)
+            if finding is not None:
+                findings.append(finding)
     findings.extend(_primitive_findings(wf, object_info))
     findings.extend(_link_type_findings(wf, object_info))
     if disabled:

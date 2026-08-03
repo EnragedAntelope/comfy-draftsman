@@ -132,6 +132,16 @@ async def test_list_models_no_search_returns_all(wired):
     assert "search" not in result
 
 
+async def test_list_models_empty_search_hints_at_loader_specific_scope(wired):
+    """A live session lost time to this: a Chroma checkpoint was invisible to
+    list_models(folder="checkpoints") but present in ClownModelLoader's own
+    combo (which scans extra folders). An empty search result should point that
+    out instead of implying the file isn't on the instance at all."""
+    result = await server.list_models(folder="checkpoints", search="chroma1-hd")
+    assert result["files"] == []
+    assert "get_node_info" in result["hint"]
+
+
 async def test_list_workflows_and_search(wired):
     all_ = await server.list_workflows()
     assert all_["workflows"] == ["menu", "subdir/legacy"]

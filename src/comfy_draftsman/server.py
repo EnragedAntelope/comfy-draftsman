@@ -16,7 +16,7 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
 from mcp.server.fastmcp import FastMCP
@@ -55,6 +55,14 @@ class _State:
     registry: RegistryClient | None = None
     session: Session | None = None
     tracker: ProgressTracker | None = None
+    # prompt_id -> workflow_id for prompts THIS process queued via run_workflow.
+    # A live session reported the queue as unattributable - a run_workflow
+    # timeout was ambiguous between "queued behind the user's own jobs" and
+    # "actually hung" - because manage_queue/get_run_status only ever had the raw
+    # ComfyUI prompt_id to go on. Bounded (_SUBMITTED_CAP) and best-effort: a
+    # server restart, or a prompt queued from the ComfyUI UI directly, is simply
+    # unattributed, not an error.
+    submitted: ClassVar[dict[str, str]] = {}
 
 
 # INVARIANT: the lazy accessors below (_config/_client/_registry/_session/
@@ -157,6 +165,25 @@ def _clip(v: Any) -> Any:
 _LEVEL_RANK = {"error": 0, "warning": 1, "info": 2}
 _FINDINGS_CAP = 40
 
+# How many prompt_id -> workflow_id mappings to remember (see _State.submitted).
+# A handful of in-flight/recent runs is all manage_queue/get_run_status ever need
+# to attribute; older entries are dropped oldest-first.
+_SUBMITTED_CAP = 200
+
+
+def _record_submission(prompt_id: str, workflow_id: str) -> None:
+    if len(_State.submitted) >= _SUBMITTED_CAP:
+        _State.submitted.pop(next(iter(_State.submitted)))
+    _State.submitted[prompt_id] = workflow_id
+
+
+def _workflow_tag(prompt_id: str) -> dict[str, str]:
+    """`{"workflow_id": ...}` if THIS process queued prompt_id, else `{}` - splat
+    into a result dict so an unattributed prompt (someone else's job, or queued
+    before this server started) costs nothing extra."""
+    workflow_id = _State.submitted.get(prompt_id)
+    return {"workflow_id": workflow_id} if workflow_id else {}
+
 # search_nodes(detail=True) folds a full node schema into each hit; only the top
 # few get one, or a default-limit search becomes a multi-thousand-token response.
 _DETAIL_SCHEMA_CAP = 8
@@ -219,6 +246,19 @@ def _cap_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
     )
     return capped
+
+
+def _similar_class_hint(name: str, object_info: dict[str, Any]) -> str:
+    """`get_node_info` naming an installed lookalike saves the round-trip through
+    search_nodes a live session needed for "SigmasRescale" (not installed) vs
+    the real "Sigmas Rescale" (RES4LYF, with a space) - a plain substring search
+    doesn't bridge that gap either, since neither name contains the other."""
+    close = difflib.get_close_matches(name.lower(), [c.lower() for c in object_info], n=3, cutoff=0.6)
+    if not close:
+        return ""
+    by_lower = {c.lower(): c for c in object_info}
+    names = [by_lower[c] for c in close if c in by_lower]
+    return "; installed classes with a similar name: " + ", ".join(names)
 
 
 def _subgraph_edit_hint(findings: list[dict[str, Any]]) -> dict[str, str]:
@@ -529,7 +569,8 @@ async def get_node_info(
         except KeyError:
             results[name] = {
                 "error": f"'{name}' is not installed on this instance",
-                "hint": "resolve_missing_nodes can find which pack provides it",
+                "hint": "resolve_missing_nodes can find which pack provides it"
+                + _similar_class_hint(name, object_info),
             }
     if class_types is None and class_type:  # single-lookup back-compat shape
         return results[class_type]
@@ -578,6 +619,17 @@ async def list_models(
         result["hint"] = (
             f"showing {_MODEL_FILES_CAP} of {len(files)}; pass search='substring' "
             "to narrow (matching is case-insensitive on the filename)"
+        )
+    elif search and not files:
+        # a live session lost time here: a workflow referenced a Chroma checkpoint
+        # invisible to list_models(folder="checkpoints"), but ClownModelLoader's
+        # own combo listed it fine - some loader nodes scan additional folders
+        # (diffusion_models, unet, ...) beyond this type's standard listing, so an
+        # empty result here does not mean the file is missing from the instance.
+        result["hint"] = (
+            f"no '{folder}' file matched {search!r} - if a specific loader node "
+            "should see this file, get_node_info(class_type=<that loader>) shows "
+            "its own combo, which can scan additional folders this listing doesn't"
         )
     return result
 
@@ -1532,6 +1584,10 @@ async def run_workflow(
     wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
     workflow works before saving/delivering.
 
+    Text-only caller (no image input)? Pass return_preview=False and set save_dir
+    (or COMFYUI_MOUNT_DIR) so the result carries a file path instead of an inline
+    thumbnail - a vision-only tool or the user can open the file directly.
+
     roll_seeds=True (default) mirrors the browser: every seed AND PrimitiveNode
     whose control_after_generate is randomize/increment/decrement is re-rolled
     before submit and the new value persisted. The raw /prompt API never does this,
@@ -1612,6 +1668,7 @@ async def run_workflow(
             )
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
+        _record_submission(queued["prompt_id"], workflow_id)
         response: dict[str, Any] = {"status": "queued", "prompt_id": queued["prompt_id"]}
         if save_dir:
             # relocation happens after a run finishes, and this call returns
@@ -1631,6 +1688,7 @@ async def run_workflow(
         )
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
+    _record_submission(result["prompt_id"], workflow_id)
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
     # relocating/previewing whatever DID render, but downgrade to "partial" so the
     # dropped outputs aren't mistaken for a clean run.
@@ -1932,6 +1990,7 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
             "status": "error" if error else "success",
             "prompt_id": prompt_id,
             "outputs": client._collect_outputs(history),
+            **_workflow_tag(prompt_id),
         }
         # a pure parser over the history document, so it is called on the CLASS:
         # tests (and any sandboxed caller) substitute lightweight fake clients that
@@ -1969,13 +2028,14 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
     pending = [entry[1] for entry in queue.get("queue_pending", [])]
     snapshot = _tracker().snapshot(prompt_id)
     if prompt_id in running:
-        return {"status": "running", "prompt_id": prompt_id, **snapshot}
+        return {"status": "running", "prompt_id": prompt_id, **snapshot, **_workflow_tag(prompt_id)}
     if prompt_id in pending:
         return {
             "status": "pending",
             "prompt_id": prompt_id,
             "queue_position": pending.index(prompt_id) + 1,
             "queue_pending": len(pending),
+            **_workflow_tag(prompt_id),
         }
     return {
         "status": "unknown",
@@ -2047,7 +2107,9 @@ async def manage_queue(
     prompt_ids: list[str] | None = None,
     unload_models: bool = False,
 ) -> dict[str, Any]:
-    """Inspect or manage the instance's run queue: status (prompt ids only),
+    """Inspect or manage the instance's run queue: status (prompt ids, plus
+    draftsman_submitted mapping the ones THIS session queued to their
+    workflow_id - the rest are someone else's job, e.g. the user's own queue),
     interrupt (stop the currently running prompt), clear (drop ALL pending),
     delete (drop specific pending prompt_ids), free (release cached VRAM/RAM;
     unload_models=True also unloads models). clear/delete/interrupt discard
@@ -2057,7 +2119,22 @@ async def manage_queue(
         queue = await client.get_queue()
         running = [entry[1] for entry in queue.get("queue_running", [])]
         pending = [entry[1] for entry in queue.get("queue_pending", [])]
-        return {"running": running, "pending": pending, "pending_count": len(pending)}
+        result: dict[str, Any] = {"running": running, "pending": pending, "pending_count": len(pending)}
+        # attribute whichever of these prompt_ids THIS process queued via
+        # run_workflow - the rest are someone else's job (the user's own queue,
+        # or queued before this server started), which is exactly the ambiguity
+        # that made a run_workflow timeout unreadable without it
+        mine = {pid: wf for pid in (*running, *pending) if (wf := _State.submitted.get(pid))}
+        if mine:
+            result["draftsman_submitted"] = mine
+            unattributed = len(running) + len(pending) - len(mine)
+            if unattributed:
+                result["note"] = (
+                    f"{unattributed} queued prompt(s) not in draftsman_submitted - "
+                    "not queued by this session (the user's own job, another agent, "
+                    "or queued before this server started)"
+                )
+        return result
     if action == "interrupt":
         await client.interrupt()
         return {"done": "interrupt sent to the running prompt"}

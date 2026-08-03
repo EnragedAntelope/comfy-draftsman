@@ -212,6 +212,23 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `dead-input-source` (bypass is a passthrough, so a bypassed node with its own
   input unconnected forwards a hole and `to_api` silently drops the consumer's
   input).
+- **The muted/dead-source check must cover OPTIONAL inputs too, not just
+  required ones.** Round 21 added `muted-input-source`/`dead-input-source` but
+  only walked `schema["input"]["required"]` — a node's required/optional split
+  governs whether an input must be wired, not whether a *wired* source is real,
+  and `to_api` drops a muted node's own entry from the API document regardless
+  of which section declared the consumer's input. A live session muted a node
+  feeding RES4LYF's `ClownsharKSampler_Beta.options_group` (`required: false`
+  on a live instance) and got a clean `validate()` result, then a raw
+  ComfyUI-side `KeyError` at `/prompt` time instead of a normal draftsman
+  rejection. `_connected_source_finding` (validate.py) is now shared by a
+  parallel walk over `optional` specs — skipping the required-only checks
+  (`unconnected-input`, `js-widget-input`) that don't apply when a slot is
+  legitimately allowed to be empty. Autogrow markers needed a second fix on top:
+  the marker name is never a real socket (see the autogrow gotcha below), so
+  neither the required nor optional by-name lookup ever reaches the actual
+  synthesized sockets — `_autogrow_source_findings` walks them directly and is
+  called from both the required and optional autogrow branches.
 - **`socket_names` is required on every path that REBUILDS an existing node's
   `widgets_values`.** A pack's custom JS-widget input is only recognizable
   per-instance (`widgets._is_custom_widget`), so a slot walk without the node's
@@ -471,6 +488,20 @@ Open:
 
 Recently closed:
 
+- **[DONE, round 22] Optional-input muted-source check, queue attribution.**
+  From a live Chroma-HD-Flash troubleshooting session's bug report (one real
+  bug, several UX gaps; two reported items were host/ComfyUI behavior, not
+  draftsman defects). See Gotchas for the muted/dead-source mechanics. Also:
+  `get_node_info`'s "not installed" error now suggests installed lookalikes
+  (a live report hit `SigmasRescale` vs. the real `Sigmas Rescale`, with a
+  space); `manage_queue(status)`/`get_run_status` now attribute prompt_ids this
+  process itself queued via `run_workflow` (`draftsman_submitted` /
+  `workflow_id`), closing the "was that timeout my run or the user's queue"
+  ambiguity; `list_models` names `get_node_info` as the loader-specific escape
+  hatch when a search comes up empty (a loader node can scan folders beyond
+  the standard type-to-folder mapping); `run_workflow`'s docstring names the
+  text-only-caller path (`return_preview=False` + `save_dir`) explicitly. Full
+  writeup in the CHANGELOG, including what was deliberately NOT changed and why.
 - **[DONE, round 21] Widget flags + autogrow authoring.** Closed four of round
   20's five open TODOs, two of which rested on a premise that turned out to be
   false — a reminder to re-check a TODO's *claim* before implementing around it:

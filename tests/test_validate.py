@@ -220,3 +220,87 @@ def test_muted_source_seen_through_reroute(object_info):
     assert any(
         f["code"] == "muted-input-source" and f["node_id"] == sampler.id for f in findings
     ), findings
+
+
+# An input's schema required/optional flag only gates whether it must be wired -
+# a wired optional input reaches to_api exactly the same way a required one
+# does, so a muted or dead source behind it produces the identical dangling
+# [node_id, slot] reference. Live report: muting a node feeding
+# ClownsharKSampler_Beta's optional `options_group` autogrow validated clean and
+# then crashed ComfyUI's own /prompt validation with a raw KeyError instead of
+# a normal draftsman rejection.
+OPTIONAL_SOCKET_NODE = {
+    "input": {
+        "required": {"model": ["MODEL", {}]},
+        "optional": {"extra_latent": ["LATENT", {}]},
+    },
+    "output": ["MODEL"],
+    "name": "OptionalSocketNode",
+}
+OPTIONAL_AUTOGROW_NODE = {
+    "input": {
+        "optional": {
+            "options_group": [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"optional": {"options": ["MODEL", {}]}},
+                        "prefix": "options",
+                        "min": 0,
+                        "max": 6,
+                    }
+                },
+            ]
+        }
+    },
+    "output": ["MODEL"],
+    "name": "OptionalAutogrowNode",
+}
+
+
+def test_muted_producer_feeding_optional_socket_is_flagged(object_info):
+    """The required-only loop never even looks at optional specs - this is the
+    gap that let the live bug through validate() entirely."""
+    from comfy_draftsman.graph.model import MODE_MUTE
+
+    oi = {**object_info, "OptionalSocketNode": OPTIONAL_SOCKET_NODE}
+    wf = Workflow.new()
+    ckpt = wf.add_node("CheckpointLoaderSimple", object_info=oi)
+    choices = oi["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    wf.set_widget(ckpt.id, "ckpt_name", choices[0], oi)
+    latent = wf.add_node("EmptyLatentImage", object_info=oi)
+    consumer = wf.add_node("OptionalSocketNode", object_info=oi)
+    wf.connect(ckpt.id, "MODEL", consumer.id, "model")
+    wf.connect(latent.id, "LATENT", consumer.id, "extra_latent")
+
+    assert not any(f["code"] == "muted-input-source" for f in validate(wf, oi))
+
+    latent.mode = MODE_MUTE
+    findings = validate(wf, oi)
+    muted = [f for f in findings if f["code"] == "muted-input-source"]
+    assert muted and muted[0]["node_id"] == consumer.id and muted[0]["input"] == "extra_latent"
+    # optional and unconnected would be fine - it must not also read as required
+    assert not any(f["code"] == "unconnected-input" and f["node_id"] == consumer.id for f in findings)
+
+
+def test_muted_producer_feeding_optional_autogrow_is_flagged(object_info):
+    """The marker itself is never a real socket, so this needs the dedicated
+    per-slot walk, not just the by-name lookup the plain-socket case uses."""
+    from comfy_draftsman.graph.model import MODE_MUTE
+
+    oi = {**object_info, "OptionalAutogrowNode": OPTIONAL_AUTOGROW_NODE}
+    wf = Workflow.new()
+    ckpt = wf.add_node("CheckpointLoaderSimple", object_info=oi)
+    choices = oi["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+    wf.set_widget(ckpt.id, "ckpt_name", choices[0], oi)
+    detail = wf.add_node("OptionalAutogrowNode", object_info=oi)  # a stand-in producer
+    consumer = wf.add_node("OptionalAutogrowNode", object_info=oi)
+    wf.connect(detail.id, "MODEL", consumer.id, "options_group.options0", oi)
+
+    assert not any(f["code"] == "muted-input-source" for f in validate(wf, oi))
+
+    detail.mode = MODE_MUTE
+    findings = validate(wf, oi)
+    muted = [f for f in findings if f["code"] == "muted-input-source"]
+    assert muted and muted[0]["node_id"] == consumer.id
+    assert muted[0]["input"] == "options_group.options0"

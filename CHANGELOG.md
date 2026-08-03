@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.13.0 — Optional-input muted-source check, queue attribution
+
+From a live session's Chroma-HD-Flash troubleshooting log (real bug found and
+fixed, four smaller UX findings addressed; two other findings turned out to be
+inherent ComfyUI/host behavior, not draftsman defects — see "Not changed"
+below).
+
+### Fixed
+
+- **A muted producer feeding another node's OPTIONAL input validated clean,
+  then crashed ComfyUI's own `/prompt` validation with a raw `KeyError`.**
+  Round 21 added the `muted-input-source`/`dead-input-source` checks, but they
+  only ever walked a node's schema-*required* inputs — an input's required-ness
+  gates whether it must be wired, not whether a wired source is real, and
+  `to_api` drops a muted node's own entry from the API document either way,
+  leaving the same dangling `[node_id, slot]` reference regardless of which
+  section declared the input. Confirmed against the live instance: RES4LYF's
+  `ClownsharKSampler_Beta.options_group` (the DetailBoost hookup) is declared
+  `required: false`, so muting its producer sailed through `validate()` and
+  only failed inside ComfyUI's own executor. Autogrow markers got the same gap
+  closed for the same reason — the marker name is never a real socket, so the
+  fix needed a dedicated per-synthesized-slot walk (`_autogrow_source_findings`)
+  on top of the existing undercount check, applied to both required and
+  optional autogrow inputs. See `graph/validate.py`'s `_connected_source_finding`.
+
+### Improved
+
+- `get_node_info`'s "not installed" error now names installed lookalikes
+  (difflib over class names) — the live report hit `SigmasRescale` (not
+  installed) vs. the real `Sigmas Rescale` (RES4LYF, with a space), a gap a
+  plain substring search doesn't bridge either since neither name contains the
+  other.
+- `manage_queue(status)` and `get_run_status` now attribute prompt_ids this
+  MCP process itself queued via `run_workflow` (`draftsman_submitted` /
+  `workflow_id`, bounded to the last 200). The live session's queue-etiquette
+  problem — a `run_workflow` timeout was ambiguous between "queued behind the
+  user's own jobs" and "actually hung" — is exactly what this closes; a job
+  with no attribution is still legitimately someone else's (the user's own
+  queue, another agent, or queued before this server started).
+- `list_models` names the loader-specific escape hatch when a search comes up
+  empty: a loader node (e.g. `ClownModelLoader`) can scan folders beyond the
+  standard type-to-folder mapping, so an empty result here does not mean the
+  file is missing from the instance.
+- `run_workflow`'s docstring names the text-only-caller path explicitly
+  (`return_preview=False` + `save_dir`) instead of leaving it to be discovered
+  from a failed inline-image render.
+
+### Not changed (session findings that were host/ComfyUI behavior, not bugs)
+
+- The inline preview thumbnail failing for a text-only orchestrating model is
+  the calling host's limitation, not something a return value can detect or
+  route around — MCP does not expose caller modality to the server.
+  `return_preview=False` + `save_dir` already existed as the correct escape
+  hatch (now documented, see above); no new inference behavior was added.
+- `list_models(folder="checkpoints")` genuinely not listing a file a
+  custom loader's own combo shows is standard ComfyUI folder-scanning
+  behavior (different node types scan different extra-model-path folders) —
+  documented with a pointer to `get_node_info`, not "fixed", since there is
+  nothing incorrect to change.
+
 ## 0.12.0 — Widget flags, autogrow authoring
 
 Closes four of 0.11.0's five open TODOs. Two of them rested on a premise that

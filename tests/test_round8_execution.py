@@ -454,6 +454,29 @@ async def test_manage_queue_status_is_compact(wired):
     assert result == {"running": ["r1"], "pending": ["p1"], "pending_count": 1}
 
 
+async def test_manage_queue_attributes_prompts_this_session_queued(wired):
+    """A live session couldn't tell its own run_workflow timeout apart from the
+    user's own jobs filling the same queue. run_workflow's prompt_id is now
+    remembered, so manage_queue(status) can say which of the queue is ours."""
+    client, wf_id = wired
+    queued = await server.run_workflow(wf_id, wait=False)
+    client.queue = {
+        "queue_running": [],
+        "queue_pending": [[0, queued["prompt_id"], {}], [1, "someone-elses-job", {}]],
+    }
+    result = await server.manage_queue("status")
+    assert result["draftsman_submitted"] == {queued["prompt_id"]: wf_id}
+    assert "1 queued prompt(s)" in result["note"]
+
+
+async def test_manage_queue_status_omits_attribution_when_nothing_matches(wired):
+    client, _ = wired
+    client.queue = {"queue_running": [], "queue_pending": [[0, "someone-elses-job", {}]]}
+    result = await server.manage_queue("status")
+    assert "draftsman_submitted" not in result
+    assert "note" not in result
+
+
 async def test_manage_queue_delete_requires_ids(wired):
     assert "requires prompt_ids" in (await server.manage_queue("delete"))["error"]
 
