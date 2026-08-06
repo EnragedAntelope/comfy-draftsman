@@ -1,0 +1,34 @@
+# Class-name-pattern -> one-line tradeoff, for well-known speed/quality
+# techniques a generic widget glossary can't explain (the tradeoff belongs to
+# the TECHNIQUE, not to any one widget name). Matched against a node's class
+# name (case-insensitive regex search) by graph/knobs.py's technique_note().
+#
+# Keep entries short and framed as a tradeoff ("faster but X"), never a
+# recommended value - the right setting depends on the model/hardware and
+# this file has no way to verify one.
+
+- match: ["easycache", "teacache", "magcache"]
+  note: >-
+    Step-caching: raising the threshold makes runs faster but progressively
+    softens fine detail and motion. Start low; raise until quality visibly
+    drops, then back off.
+- match: ["sageattention", "sage_attention", "sol.?attention", "flash.?attention"]
+  note: >-
+    Attention kernel swap: faster and lower-VRAM at near-identical quality.
+    Safe to leave on if it runs; bypass it (mode 4) if you hit a shape or
+    dtype error.
+- match: ["torchcompile", "torch_compile"]
+  note: >-
+    Compiles the model: slow first run, faster afterwards. Recompiles
+    whenever resolution or batch size changes, which pays the slow-compile
+    cost again.
+- match: ["freeu", "free_u"]
+  note: >-
+    Reweights U-Net skip connections for sharper output at no extra compute
+    cost - but the tuned defaults are per-model-family; wrong values smear or
+    oversaturate detail.
+- match: ["lcm", "lightning", "hyper.?(sd|flux)"]
+  note: >-
+    A distillation-aware sampling shortcut: needs far fewer steps and a very
+    low (often 1.0) CFG - copying settings from a non-distilled workflow
+    produces burnt, oversaturated output.

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import knowledge
+from . import knobs
 from .layout import X_GUTTER, Y_GAP, apply_staged_layout, is_text_display, resolve_overlaps
 from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Node, Workflow
 
@@ -483,10 +484,29 @@ def _note_text(
             lines.append("👇 Type what you want in the green prompt box(es) here.")
             if notes.get("conditioning"):
                 lines.append(notes["conditioning"])
-    if not lines:
+    # a knob table and technique tradeoffs apply to ANY stage generically (a
+    # LoRA's strength_model in Models, a sampler's steps in Sampling, an
+    # upscale node's feather in Post, ...) - knob_rows/technique_note only
+    # ever match nodes that actually carry a glossary-known widget/pattern,
+    # so this naturally comes back empty for stages with nothing to say
+    table_rows = knobs.knob_rows(members, object_info, guidance)
+    technique_lines = [
+        f"⚡ **{n.title or n.type}**: {note}"
+        for n in members
+        if (note := knobs.technique_note(n.type))
+    ]
+    if not lines and not table_rows and not technique_lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
-    return f"### {note_title}\n\n" + "\n\n".join(_wrap(line, wrap_width) for line in lines)
+    parts = [f"### {note_title}"]
+    if lines:
+        parts.append("\n\n".join(_wrap(line, wrap_width) for line in lines))
+    if table_rows:
+        header = "| knob | now | range / choices | effect |\n|---|---|---|---|"
+        parts.append(header + "\n" + "\n".join(table_rows))
+    if technique_lines:
+        parts.append("\n\n".join(_wrap(line, wrap_width) for line in technique_lines))
+    return "\n\n".join(parts)
 
 
 def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> int:
