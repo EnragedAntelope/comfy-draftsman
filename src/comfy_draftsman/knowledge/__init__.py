@@ -29,7 +29,21 @@ from typing import Any
 
 import yaml
 
-_MODEL_WIDGETS = {"ckpt_name", "unet_name", "model_name", "model", "checkpoint"}
+# Widgets that name the DIFFUSION MODEL itself - the only reference family
+# detection may trust. A LoRA/VAE/CLIP/ControlNet filename can carry any other
+# family's name in its own filename (a placeholder LoRA named "LTX23_..." on an
+# H3 graph, a "SDXL" merge with "Flux" in its marketing name) without saying
+# anything about what the checkpoint/UNet loader actually is.
+_PRIMARY_MODEL_WIDGETS = {
+    "ckpt_name", "unet_name", "model_name", "model", "checkpoint", "model_path", "diffusion_model",
+}
+# Auxiliary widgets that can NEVER name the diffusion model - excluded from
+# detection even when their value happens to end in a model extension.
+_AUX_WIDGET_RE = re.compile(
+    r"(^|_)(lora|vae|clip|clip_vision|control_?net|style_model|upscale_model|"
+    r"ipadapter|embedding|t5|text_encoder|gligen|photomaker)",
+    re.IGNORECASE,
+)
 
 
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -133,11 +147,18 @@ def save_learning(
     return path
 
 
-def _model_refs(wf, object_info: dict[str, Any]) -> list[tuple[str, str]]:
-    """(widget_name, filename) pairs that look like model file references."""
+def _model_refs(wf, object_info: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(widget_name, filename, role) triples for model file references.
+
+    role is "primary" (names the diffusion model/checkpoint itself - the only
+    thing family DETECTION may trust), "aux" (LoRA/VAE/CLIP/ControlNet/... -
+    can carry any other family's name in its own filename), or "other" (a
+    model-shaped filename on a widget that's neither - a fallback detection
+    signal, weaker than primary but still real).
+    """
     from ..graph import widgets as w  # local import to avoid cycle
 
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, str]] = []
     for node in wf.nodes.values():
         schema = object_info.get(node.type)
         if schema is None:
@@ -149,14 +170,34 @@ def _model_refs(wf, object_info: dict[str, Any]) -> list[tuple[str, str]]:
         for key, value in named.items():
             if not isinstance(value, str):
                 continue
-            if key in _MODEL_WIDGETS or re.search(r"\.(safetensors|ckpt|sft|gguf|pt)$", value):
-                found.append((key, value))
+            is_model_ref = key in _PRIMARY_MODEL_WIDGETS or re.search(
+                r"\.(safetensors|ckpt|sft|gguf|pt)$", value
+            )
+            if not is_model_ref:
+                continue
+            if key in _PRIMARY_MODEL_WIDGETS and not _AUX_WIDGET_RE.search(key):
+                role = "primary"
+            elif _AUX_WIDGET_RE.search(key):
+                role = "aux"
+            else:
+                role = "other"
+            found.append((key, value, role))
     return found
 
 
 def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
-    """String widget values that look like model file references."""
-    return [filename for _, filename in _model_refs(wf, object_info)]
+    """String widget values that look like model file references (all roles -
+    used for search/matching, where a LoRA name is a legitimate signal)."""
+    return [filename for _, filename, _ in _model_refs(wf, object_info)]
+
+
+def primary_model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
+    """Filenames that actually name the diffusion model - primary refs first,
+    then other model-shaped refs, never aux (LoRA/VAE/CLIP/...). Use this for
+    anything that should describe THE model (variant matching, guidance)."""
+    primary = [f for _, f, role in _model_refs(wf, object_info) if role == "primary"]
+    other = [f for _, f, role in _model_refs(wf, object_info) if role == "other"]
+    return primary + other
 
 
 def _detect_index(learned_dir: Path | str | None) -> dict[str, dict[str, Any]]:
@@ -183,27 +224,15 @@ def _detect_index(learned_dir: Path | str | None) -> dict[str, dict[str, Any]]:
     return index
 
 
-def detect_family(
-    wf, object_info: dict[str, Any], learned_dir: Path | str | None = None
-) -> str | None:
-    """Family detection from model filenames, disambiguated by loader topology
-    and pattern specificity.
-
-    Merge names lie ("...XLFluxPony...DMD" is an SDXL merge, not FLUX), so a
-    filename pattern match alone scores 1; a match whose loader widget agrees
-    with the family's loader style (ckpt_name for checkpoint families,
-    unet_name for split-loader families) scores 2. Ties break on the length of
-    the matched pattern, so a specific pattern ("krea2") wins over a generic
-    substring of it ("krea") when two families share a loader topology.
-    """
+def _detect_over_refs(
+    refs: list[tuple[str, str, str]], index: dict[str, dict[str, Any]]
+) -> tuple[str | None, str | None, str | None]:
+    """Best (family, matched_pattern, widget) over the given refs, or all Nones."""
     best_key: tuple[int, int] = (0, 0)
-    best_family = None
-    # built once: _detect_index globs the learned dir and parses every YAML in
-    # it, and find_workflow calls detect_family for each of up to 400 saved
-    # workflows - rebuilding it per model reference made that quadratic in disk
-    # reads for no benefit (the index can't change mid-call).
-    index = _detect_index(learned_dir)
-    for widget_name, filename in _model_refs(wf, object_info):
+    best_family: str | None = None
+    best_pattern: str | None = None
+    best_widget: str | None = None
+    for widget_name, filename, _role in refs:
         for family, data in index.items():
             patterns = (data.get("detect") or {}).get("checkpoint_patterns", [])
             matched = [p for p in patterns if _matches(filename, [p])]
@@ -215,7 +244,54 @@ def detect_family(
                 widget_name in ("unet_name", "model_name") and loader == "unet_clip_vae"
             ):
                 loader_score = 2
-            key = (loader_score, max(len(p) for p in matched))
+            longest = max(matched, key=len)
+            key = (loader_score, len(longest))
             if key > best_key:
-                best_key, best_family = key, family
-    return best_family
+                best_key, best_family, best_pattern, best_widget = key, family, longest, widget_name
+    return best_family, best_pattern, best_widget
+
+
+def detect_family_detail(
+    wf, object_info: dict[str, Any], learned_dir: Path | str | None = None
+) -> dict[str, str | None]:
+    """Family detection from model filenames, disambiguated by loader topology
+    and pattern specificity, anchored to the DIFFUSION MODEL - never a LoRA,
+    VAE, CLIP, or other auxiliary reference.
+
+    Merge names lie ("...XLFluxPony...DMD" is an SDXL merge, not FLUX), so a
+    filename pattern match alone scores 1; a match whose loader widget agrees
+    with the family's loader style (ckpt_name for checkpoint families,
+    unet_name for split-loader families) scores 2. Ties break on the length of
+    the matched pattern, so a specific pattern ("krea2") wins over a generic
+    substring of it ("krea") when two families share a loader topology.
+
+    Two passes: primary model references (ckpt_name/unet_name/...) are tried
+    first; only if none of them match anything does the weaker "other"
+    fallback run (a model-shaped filename on some widget that's neither a
+    named primary slot nor a known auxiliary one). Auxiliary references
+    (lora_name, vae_name, clip_name, ...) are never considered - a LoRA named
+    "LTX23_..." on an H3 checkpoint's graph must not detect as LTX.
+
+    Returns {"family", "matched_on", "widget"} - "matched_on" is the specific
+    pattern that won, for a caller to sanity-check a surprising guess.
+    """
+    # built once: _detect_index globs the learned dir and parses every YAML in
+    # it, and find_workflow calls this for each of up to 400 saved workflows -
+    # rebuilding it per model reference made that quadratic in disk reads for
+    # no benefit (the index can't change mid-call).
+    index = _detect_index(learned_dir)
+    refs = _model_refs(wf, object_info)
+    primary = [r for r in refs if r[2] == "primary"]
+    family, pattern, widget = _detect_over_refs(primary, index)
+    if family is None:
+        other = [r for r in refs if r[2] == "other"]
+        family, pattern, widget = _detect_over_refs(other, index)
+    return {"family": family, "matched_on": pattern, "widget": widget}
+
+
+def detect_family(
+    wf, object_info: dict[str, Any], learned_dir: Path | str | None = None
+) -> str | None:
+    """Family detection from model filenames. See detect_family_detail for the
+    full mechanics and matched-pattern provenance."""
+    return detect_family_detail(wf, object_info, learned_dir=learned_dir)["family"]

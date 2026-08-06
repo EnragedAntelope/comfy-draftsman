@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import knowledge
-from .layout import Y_GAP, apply_staged_layout, is_text_display
+from .layout import X_GUTTER, Y_GAP, apply_staged_layout, is_text_display, resolve_overlaps
 from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Group, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
@@ -314,6 +314,7 @@ def _note_text(
     guidance: dict[str, Any] | None,
     members: list[Node],
     title: str | None = None,
+    wrap_width: int = 58,
 ) -> str | None:
     g = guidance or {}
     family = g.get("display_name", "this model")
@@ -399,7 +400,47 @@ def _note_text(
     if not lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
-    return f"### {note_title}\n\n" + "\n\n".join(_wrap(line) for line in lines)
+    return f"### {note_title}\n\n" + "\n\n".join(_wrap(line, wrap_width) for line in lines)
+
+
+def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> int:
+    """Human-authored Note/MarkdownNote nodes are excluded from the staged
+    layout (they aren't classified/positioned), so when the layout moves
+    everything around them, they stay put and land on top of it - the 49
+    overlapping pairs a real session hit with 7 hand-written MarkdownNotes.
+
+    Park only the ones that actually collide with something. A foreign note
+    sitting in clear space was placed there on purpose and must not move -
+    only a note in the way gets relocated, into a column left of the graph."""
+    foreign = [
+        n
+        for n in wf.nodes.values()
+        if n.type in ("Note", "MarkdownNote") and n.properties.get("draftsman") != NOTE_MARKER
+    ]
+    if not foreign:
+        return 0
+    others = [wf.nodes[nid] for nid in stage_of]
+
+    def collides(note: Node) -> bool:
+        x0, y0 = note.pos[0], note.pos[1]
+        x1, y1 = x0 + note.size[0], y0 + note.size[1]
+        return any(
+            x0 < o.pos[0] + o.size[0]
+            and o.pos[0] < x1
+            and y0 < o.pos[1] + o.size[1]
+            and o.pos[1] < y1
+            for o in others
+        )
+
+    to_park = [n for n in foreign if collides(n)]
+    if not to_park:
+        return 0
+    park_x = -max(n.size[0] for n in to_park) - X_GUTTER
+    y_cursor = 0.0
+    for note in to_park:
+        note.pos = [park_x, y_cursor]
+        y_cursor += note.size[1] + Y_GAP
+    return len(to_park)
 
 
 def annotate(
@@ -407,7 +448,14 @@ def annotate(
     object_info: dict[str, Any],
     learned_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Organize, group, title, highlight, and annotate the workflow in place."""
+    """Organize, group, title, highlight, and annotate the workflow in place.
+
+    Four ordered phases so a later one can always see (and fix) what an
+    earlier one produced: (1) lay out nodes into stage bands, (2) place
+    guidance notes above each band, (3) resolve any overlaps that survived -
+    including human-authored notes the layout never touches, (4) compute group
+    bounds from the FINAL positions, so a moved note's group never traps the
+    empty space it left behind."""
     # drop notes we generated on a previous run (idempotency); keep human notes
     for nid in [
         n.id for n in wf.nodes.values() if n.properties.get("draftsman") == NOTE_MARKER
@@ -415,10 +463,14 @@ def annotate(
         wf.remove_node(nid)
     wf.groups = []
 
-    family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
+    detail = knowledge.detect_family_detail(wf, object_info, learned_dir=learned_dir)
+    family = detail["family"]
     guidance = None
     if family:
-        filenames = knowledge.model_filenames(wf, object_info)
+        # variant matching (turbo/lightning/...) must look at the DIFFUSION
+        # MODEL's own filename, never a LoRA's - a LoRA named "...turbo..."
+        # must not select the turbo variant of an unrelated base model
+        filenames = knowledge.primary_model_filenames(wf, object_info)
         guidance = knowledge.get_guidance(
             family, model_filename=filenames[0] if filenames else None, learned_dir=learned_dir
         )
@@ -431,7 +483,9 @@ def annotate(
     # display nodes follow whatever they display (stage + position)
     companion_of = _companion_sources(wf, object_info, stage_of_key)
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}
+    # phase 1: lay out
     band_boxes = apply_staged_layout(wf, object_info, stage_of, companion_of=companion_of)
+    foreign_parked = _park_foreign_notes(wf, stage_of)
 
     titled = _title_nodes(wf, object_info)
     painted = _paint_knobs(wf, object_info, stage_of_key)
@@ -441,17 +495,17 @@ def annotate(
     for nid, stage in stage_of.items():
         members_by_stage.setdefault(stage, []).append(wf.nodes[nid])
 
+    # phase 2: place notes (group bounds are NOT computed yet - they depend on
+    # final, post-resolve positions, which don't exist until phase 3 runs)
+    stage_meta: list[tuple[int, str, str, int | None]] = []
     for stage_index in sorted(band_boxes):
         key, default_title, color = STAGES[stage_index]
         members = members_by_stage.get(stage_index, [])
         if not members:
             continue
-        # shrink-to-fit: group bounds come from the members' real extents,
-        # not the layout band estimate, so groups never trap empty space
         min_x = min(n.pos[0] for n in members)
         min_y = min(n.pos[1] for n in members)
         max_x = max(n.pos[0] + n.size[0] for n in members)
-        max_y = max(n.pos[1] + n.size[1] for n in members)
         # Dynamic title for models stage: only mention LoRAs if a LoRA loader is present
         title = default_title
         if key == "models":
@@ -464,10 +518,13 @@ def annotate(
                 title = "\U0001f9e0 Models"
         elif key == "inputs" and all(_is_canvas_node(n.type) for n in members):
             title = "📐 Image Size"
-        text = _note_text(key, wf, object_info, guidance, members, title=title)
-        top = min_y
+        note_w = max(min(max_x - min_x, 380.0), 300.0)
+        # wrap to the note's REAL width, not a fixed column count, so the
+        # height estimate below matches what actually renders
+        wrap_width = max(20, int(note_w // 7))
+        text = _note_text(key, wf, object_info, guidance, members, title=title, wrap_width=wrap_width)
+        note_id: int | None = None
         if text:
-            note_w = max(min(max_x - min_x, 380.0), 300.0)
             # frontend renders markdown at ~17px/line; blank separator lines
             # collapse, headings add a little
             rendered_lines = sum(1 for line in text.splitlines() if line.strip())
@@ -479,8 +536,31 @@ def annotate(
             note.color, note.bgcolor = NOTE_COLOR
             note.properties["draftsman"] = NOTE_MARKER
             notes_added += 1
-            top = min_y - note_h - Y_GAP
-            max_x = max(max_x, min_x + note_w)
+            note_id = note.id
+        stage_meta.append((stage_index, title, color, note_id))
+
+    # phase 3: resolve overlaps - a too-wide note poking into a neighboring
+    # band, a parked foreign note whose column undershot, or anything else
+    # phases 1-2 couldn't rule out. Nodes only ever move down, never sideways.
+    overlap_warning = None
+    resolve_overlaps(wf)
+    from .lint import lint  # local import: lint.py imports from this module
+
+    surviving = [f for f in lint(wf, object_info) if f["code"] == "overlap"]
+    if surviving:
+        overlap_warning = surviving[0]["message"]
+
+    # phase 4: group bounds from FINAL positions - computed last so a note (or
+    # anything else) that phase 3 moved is never left outside its own group
+    for stage_index, title, color, note_id in stage_meta:
+        members = members_by_stage[stage_index]
+        boxed = list(members)
+        if note_id is not None and note_id in wf.nodes:
+            boxed.append(wf.nodes[note_id])
+        min_x = min(n.pos[0] for n in boxed)
+        min_y = min(n.pos[1] for n in boxed)
+        max_x = max(n.pos[0] + n.size[0] for n in boxed)
+        max_y = max(n.pos[1] + n.size[1] for n in boxed)
         pad = 30.0
         wf.groups.append(
             Group(
@@ -488,14 +568,14 @@ def annotate(
                 title=title,
                 bounding=[
                     min_x - pad,
-                    top - 70.0,
+                    min_y - 70.0,
                     (max_x - min_x) + 2 * pad,
-                    (max_y - top) + 90.0,
+                    (max_y - min_y) + 90.0,
                 ],
                 color=color,
             )
         )
-    return {
+    report: dict[str, Any] = {
         "family": family,
         "variant": (guidance or {}).get("variant"),
         "stages": {STAGES[i][0]: len(m) for i, m in sorted(members_by_stage.items())},
@@ -506,5 +586,18 @@ def annotate(
             "guidance_notes_added": notes_added,
             "nodes_retitled": titled,
             "knobs_highlighted_green": painted,
+            "foreign_notes_parked": foreign_parked,
         },
     }
+    if family:
+        report["family_matched_on"] = detail["matched_on"]
+    else:
+        report["family_note"] = (
+            "no model family detected - notes are generic; get_model_guidance + "
+            "record_learning teach one"
+        )
+    if overlap_warning:
+        # honest failure: organize_workflow must never silently ship a layout
+        # it has itself diagnosed as broken
+        report["warning"] = f"layout still has overlaps after auto-resolve: {overlap_warning}"
+    return report

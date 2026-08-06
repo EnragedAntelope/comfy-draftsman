@@ -223,6 +223,46 @@ def apply_layout(
             y_cursor += note.size[1] + Y_GAP
 
 
+def resolve_overlaps(wf: Workflow, gap: float = Y_GAP, max_passes: int = 12) -> int:
+    """Deterministic overlap-resolution sweep: nodes only ever move DOWN, never
+    sideways, so it terminates and never undoes apply_staged_layout's column
+    x-positions. Returns the count of (node, overlap-that-caused-a-move) pairs
+    resolved, so a caller can tell a clean layout (0) from one it had to fix.
+
+    A staged layout only ever overlaps because of nodes it doesn't position
+    itself - most commonly a human-authored Note/MarkdownNote left at its old
+    position after everything around it moved. Sorting by (x, y, id) and
+    sweeping once per pass, pushing each intersecting box below the tallest
+    box it collides with, converges because every move strictly increases that
+    node's y while every other node's position is a fixed point once visited
+    in a pass with no new collisions.
+    """
+    moved_total = 0
+    for _ in range(max_passes):
+        boxes = sorted(
+            wf.nodes.values(), key=lambda n: (n.pos[0], n.pos[1], n.id)
+        )
+        moved_this_pass = 0
+        placed: list[tuple[int, float, float, float, float]] = []
+        for node in boxes:
+            x0, y0 = node.pos[0], node.pos[1]
+            x1, y1 = x0 + node.size[0], y0 + node.size[1]
+            collisions = [
+                box for box in placed
+                if x0 < box[3] and box[1] < x1 and y0 < box[4] and box[2] < y1
+            ]
+            if collisions:
+                new_y = max(box[4] for box in collisions) + gap
+                node.pos[1] = new_y
+                y0, y1 = new_y, new_y + node.size[1]
+                moved_this_pass += 1
+                moved_total += 1
+            placed.append((node.id, x0, y0, x1, y1))
+        if moved_this_pass == 0:
+            break
+    return moved_total
+
+
 def apply_staged_layout(
     wf: Workflow,
     object_info: dict[str, Any],
