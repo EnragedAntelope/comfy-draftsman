@@ -3,6 +3,12 @@ display_name: SDXL
 detect:
   checkpoint_patterns: ["sdxl", "sd_xl", "xl_", "pony", "illustrious", "noobai", "juggernautxl", "dreamshaperxl", "realvisxl"]
 loader: checkpoint
+# EmptyLatentImage's own width/height widget step (verified against the live
+# ComfyUI schema, round 23) - the 8x VAE downsample factor, not a "trained
+# bucket" preference (SDXL's own trained buckets are all multiples of 64, but
+# 8 is the hard structural floor - not enforcing the tighter 64 here avoids a
+# false positive on a deliberately non-bucket size that still decodes fine).
+multiple_of: 8
 sampling:
   cfg: {min: 4.0, max: 8.0, default: 6.0}
   steps: {min: 20, max: 40, default: 28}

@@ -3,6 +3,10 @@ display_name: Stable Diffusion 1.5
 detect:
   checkpoint_patterns: ["sd15", "sd_15", "v1-5", "1.5", "dreamshaper_8", "realisticvision"]
 loader: checkpoint
+# EmptyLatentImage's own width/height widget step (verified against the live
+# ComfyUI schema, round 23) - the 8x VAE downsample factor, not a "trained
+# bucket" preference.
+multiple_of: 8
 sampling:
   cfg: {min: 5.0, max: 11.0, default: 7.0}
   steps: {min: 20, max: 35, default: 25}

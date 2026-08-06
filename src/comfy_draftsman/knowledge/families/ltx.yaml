@@ -3,6 +3,10 @@ display_name: LTX Video
 detect:
   checkpoint_patterns: ["ltx", "ltxv"]
 loader: checkpoint
+# Confirmed via Lightricks' official LTX-Video docs (round 23): "the model
+# works on resolutions divisible by 32" (frame count separately needs
+# 8n+1 - not checked here, this lint only covers the canvas width/height).
+multiple_of: 32
 sampling:
   cfg: {min: 2.5, max: 4.0, default: 3.0}
   steps: {min: 20, max: 40, default: 25}

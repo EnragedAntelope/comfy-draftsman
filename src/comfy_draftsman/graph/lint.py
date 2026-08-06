@@ -6,6 +6,7 @@ wired workflow lints clean.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from . import widgets as w
@@ -116,7 +117,68 @@ def _missing_prompt_previews(
     return findings
 
 
-def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
+def _resolution_alignment_findings(
+    wf: Workflow, object_info: dict[str, Any], learned_dir: Path | str | None
+) -> list[dict[str, Any]]:
+    """A canvas node's width/height must be a multiple of the detected
+    family's declared alignment (LTX pads/crops otherwise; DiT patchify
+    architectures like FLUX/SD3 need it for the same structural reason).
+
+    Fires ONLY when a caller explicitly threads a learned_dir through AND a
+    family is detected AND it declares multiple_of - "a lint that fires on
+    correct work is worse than no lint" (ARCHITECTURE.md): no family, no
+    claim, rather than guessing at an unknown model's requirement.
+    learned_dir=None (lint()'s default) is a deliberate opt-out, not "no
+    learned overlay" - it keeps every caller that doesn't thread config
+    through (most existing tests, any future direct lint() use) unaffected
+    by this check regardless of what family YAMLs declare multiple_of; only
+    the three server.py call sites (which always pass _config().learned_dir,
+    a real path) turn it on. Never auto-rewrites the value; a workflow may
+    deliberately use an odd size, and rewriting it or injecting a math node
+    to force alignment would silently change the user's graph.
+    """
+    if learned_dir is None:
+        return []
+    from .. import knowledge  # local import: knowledge doesn't import lint
+    from .annotate import _is_canvas_node  # local import: annotate imports lint
+
+    family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
+    if not family:
+        return []
+    guidance = knowledge.get_guidance(family, learned_dir=learned_dir)
+    multiple_of = guidance.get("multiple_of")
+    if not isinstance(multiple_of, int) or multiple_of <= 1:
+        return []
+    findings: list[dict[str, Any]] = []
+    for node in wf.nodes.values():
+        if not _is_canvas_node(node.type):
+            continue
+        try:
+            named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+        except (ValueError, KeyError):
+            continue
+        for dim in ("width", "height"):
+            value = named.get(dim)
+            if not isinstance(value, int | float) or int(value) % multiple_of == 0:
+                continue
+            nearest = round(value / multiple_of) * multiple_of
+            findings.append(
+                _finding(
+                    "resolution-not-aligned",
+                    f"{node.type} #{node.id}: {dim}={int(value)} is not a multiple "
+                    f"of {multiple_of} ({guidance.get('display_name', family)}) - "
+                    f"nearest legal value is {nearest}",
+                    node.id,
+                )
+            )
+    return findings
+
+
+def lint(
+    wf: Workflow,
+    object_info: dict[str, Any],
+    learned_dir: Path | str | None = None,
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     real_nodes = [n for n in wf.nodes.values() if n.type not in NOTE_TYPES]
 
@@ -180,6 +242,7 @@ def lint(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
 
     findings.extend(_missing_prompt_previews(wf, object_info))
     findings.extend(_overlap_findings(wf))
+    findings.extend(_resolution_alignment_findings(wf, object_info, learned_dir))
     return findings
 
 

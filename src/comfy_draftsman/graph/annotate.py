@@ -391,6 +391,34 @@ def _output_medium(members: list[Node], object_info: dict[str, Any]) -> str:
     return "files"
 
 
+_RESOLUTION_SHOWN = 8
+
+
+def _resolution_text(resolutions: Any) -> str | None:
+    """Render a family's resolutions field - list form (["1024x1024", ...])
+    or the richer learned-overlay dict form ({"note": ..., "native": {ratio:
+    [w, h]}}) - into one line for the Inputs band. Never invents a value:
+    returns None when the field is absent or an unrecognized shape."""
+    if isinstance(resolutions, list) and resolutions:
+        shown = ", ".join(str(r) for r in resolutions[:_RESOLUTION_SHOWN])
+        more = len(resolutions) - _RESOLUTION_SHOWN
+        return f"Native resolutions: {shown}" + (f" (+{more} more)." if more > 0 else ".")
+    if isinstance(resolutions, dict):
+        parts: list[str] = []
+        if isinstance(resolutions.get("note"), str):
+            parts.append(resolutions["note"])
+        native = resolutions.get("native")
+        if isinstance(native, dict) and native:
+            pairs = []
+            for ratio, dims in list(native.items())[:_RESOLUTION_SHOWN]:
+                if isinstance(dims, list | tuple) and len(dims) == 2:
+                    pairs.append(f"{ratio} {dims[0]}x{dims[1]}")
+            if pairs:
+                parts.append("Native sizes by aspect: " + ", ".join(pairs) + ".")
+        return " ".join(parts) if parts else None
+    return None
+
+
 def _note_text(
     stage: str,
     wf: Workflow,
@@ -495,6 +523,9 @@ def _note_text(
             lines.append("👇 Load your source image/media here.")
         if any(_is_canvas_node(n.type) for n in members):
             lines.append("👇 Set the image size (width / height / batch) here.")
+            res_text = _resolution_text(g.get("resolutions"))
+            if res_text:
+                lines.append(res_text)
         if any(n.type == PRIMITIVE_TYPE for n in members):
             lines.append(
                 "👇 The green value boxes here feed settings further along the "

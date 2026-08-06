@@ -16,6 +16,12 @@ sources:
   - match: ["ae.safetensors"]
     what: "FLUX VAE (Chroma reuses it)"
     url: "https://huggingface.co/black-forest-labs/FLUX.1-schnell/blob/main/ae.safetensors"
+# Inferred, not independently schema-verified (round 23): Chroma is explicitly
+# FLUX-schnell-derived (see notes below) and reuses FLUX's own VAE file, so it
+# almost certainly shares FLUX's EmptySD3LatentImage + 16x patchify
+# requirement. If a Chroma release turns out NOT to need this, remove it -
+# a wrong constraint here is worse than no constraint.
+multiple_of: 16
 sampling:
   cfg: {min: 3.0, max: 5.0, default: 4.0}
   steps: {min: 26, max: 40, default: 30}

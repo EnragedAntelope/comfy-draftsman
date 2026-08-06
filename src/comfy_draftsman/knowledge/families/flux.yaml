@@ -26,6 +26,11 @@ loader_nodes:
     file_patterns: ["ae.safetensors", "flux"]
     output: VAE
 latent_node: EmptySD3LatentImage
+# Confirmed 16 two ways (round 23): EmptySD3LatentImage's own width/height
+# widget step in the live ComfyUI schema, AND the BFL reference sampling.py
+# (get_noise: "2 * math.ceil(height / 16)") - a structural requirement of the
+# 8x VAE + 2x2 patchify, not merely a trained-bucket preference.
+multiple_of: 16
 # Verified reachable before commit (round 23) - never add a URL here without
 # checking it actually resolves. Diffusion-model checkpoints deliberately
 # excluded: too many gated/ungated variants (dev/schnell/krea/...) to point

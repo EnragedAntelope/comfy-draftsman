@@ -1540,16 +1540,19 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     export_workflow_json shows the full reorganized graph."""
     wf = _wf(workflow_id)
     object_info = await _object_info()
-    report = annotate(wf, object_info, learned_dir=_config().learned_dir)
-    report["lint"] = _cap_lint(lint(wf, object_info))
+    learned_dir = _config().learned_dir
+    report = annotate(wf, object_info, learned_dir=learned_dir)
+    report["lint"] = _cap_lint(lint(wf, object_info, learned_dir=learned_dir))
     return report
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def lint_workflow(workflow_id: str) -> list[dict[str, Any]]:
     """Readability/wiring lint: unlabeled prompts, missing groups/notes, orphan
-    nodes, unconnected required inputs, overlapping nodes. Empty list = clean."""
-    return lint(_wf(workflow_id), await _object_info())
+    nodes, unconnected required inputs, overlapping nodes, misaligned
+    resolution (when a family with a known alignment requirement is detected).
+    Empty list = clean."""
+    return lint(_wf(workflow_id), await _object_info(), learned_dir=_config().learned_dir)
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
@@ -2293,7 +2296,7 @@ async def save_workflow(
             f"local session copy could not be written ({e}) - the ComfyUI save above "
             "still succeeded; set DRAFTSMAN_SESSION_DIR to a writable path to fix. "
         )
-    warnings = lint(wf, object_info)
+    warnings = lint(wf, object_info, learned_dir=_config().learned_dir)
     return {
         "saved": True,
         "saved_to_comfyui": f"workflows/{filename} (visible in the ComfyUI workflow browser)",

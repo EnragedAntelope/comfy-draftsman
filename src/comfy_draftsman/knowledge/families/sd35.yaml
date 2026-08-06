@@ -3,6 +3,10 @@ display_name: Stable Diffusion 3.5
 detect:
   checkpoint_patterns: ["sd3.5", "sd3_5", "sd35", "sd3"]
 loader: checkpoint
+# EmptySD3LatentImage's own width/height widget step (verified against the
+# live ComfyUI schema, round 23) - the node this family's own sampling note
+# already names ("Use the SD3-type empty latent").
+multiple_of: 16
 sampling:
   cfg: {min: 3.5, max: 6.0, default: 4.5}
   steps: {min: 25, max: 40, default: 30}
