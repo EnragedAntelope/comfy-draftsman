@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -292,6 +293,20 @@ def _named_widgets(node: Node, object_info: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+_MODEL_FILE_RE = re.compile(r"\.(safetensors|ckpt|sft|gguf|pt)$", re.IGNORECASE)
+
+
+def _member_filenames(members: list[Node], object_info: dict[str, Any]) -> list[str]:
+    """String widget values on these nodes that look like model file
+    references - for matching against a family's curated download sources."""
+    names: list[str] = []
+    for n in members:
+        for value in _named_widgets(n, object_info).values():
+            if isinstance(value, str) and _MODEL_FILE_RE.search(value):
+                names.append(value)
+    return names
+
+
 def _wired_input(node: Node, name: str) -> bool:
     """True if this widget has been converted to an input and has a link feeding
     it - i.e. the value comes from upstream and is NOT hand-editable."""
@@ -389,10 +404,17 @@ def _note_text(
     family = g.get("display_name", "this model")
     notes = g.get("notes", {})
     lines: list[str] = []
+    source_lines: list[str] = []
     if stage == "models":
         lines.append("👇 Swap models here to change the whole look.")
         if notes.get("loaders"):
             lines.append(notes["loaders"])
+        # curated download links only - never a synthesized URL. Matched
+        # against this band's actual filenames, so an unrelated family's
+        # sources entry (a different checkpoint) never appears here.
+        for src in knowledge.matching_sources(g, _member_filenames(members, object_info)):
+            if src["url"]:
+                source_lines.append(f"- {src['what']}: {src['url']}")
     elif stage == "prompt_build":
         # a producer node (wildcard bank, concatenator, LLM/VLM prompt step) -
         # the reader edits ITS pieces, not the wired encoder box further along
@@ -495,7 +517,7 @@ def _note_text(
         for n in members
         if (note := knobs.technique_note(n.type))
     ]
-    if not lines and not table_rows and not technique_lines:
+    if not lines and not table_rows and not technique_lines and not source_lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
     parts = [f"### {note_title}"]
@@ -506,6 +528,10 @@ def _note_text(
         parts.append(header + "\n" + "\n".join(table_rows))
     if technique_lines:
         parts.append("\n\n".join(_wrap(line, wrap_width) for line in technique_lines))
+    if source_lines:
+        # bare URLs are never passed through _wrap - textwrap would break a
+        # long link across physical lines and cost it its copy-pastability
+        parts.append("📦 Where to get these files:\n" + "\n".join(source_lines))
     return "\n\n".join(parts)
 
 

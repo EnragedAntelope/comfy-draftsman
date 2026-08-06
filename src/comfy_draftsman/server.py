@@ -212,6 +212,29 @@ _MODEL_FILES_CAP = 60
 _TEMPLATES_CAP = 40
 _TEMPLATE_DESC_CAP = 110
 
+# Curated per-family download links (knowledge.matching_sources). A handful of
+# hand-curated entries per family in practice, but this is user-writable via
+# record_learning, so it gets the same bounded-list treatment as everything
+# else a session can grow without limit.
+_SOURCES_CAP = 12
+_SOURCE_URL_CAP = 300
+
+
+def _cap_sources(guidance: dict[str, Any]) -> dict[str, Any]:
+    sources = guidance.get("sources")
+    if not isinstance(sources, list):
+        return guidance
+    clipped = [
+        {**s, "url": s["url"][:_SOURCE_URL_CAP] + "…" if len(s.get("url", "")) > _SOURCE_URL_CAP else s.get("url", "")}
+        if isinstance(s, dict)
+        else s
+        for s in sources[:_SOURCES_CAP]
+    ]
+    guidance["sources"] = clipped
+    if len(sources) > _SOURCES_CAP:
+        guidance["sources_truncated"] = len(sources)
+    return guidance
+
 
 def _cap_lint(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Cap advisory lint output. Lint findings carry no severity (they never
@@ -2339,7 +2362,7 @@ async def get_model_guidance(family: str = "", model_filename: str = "") -> dict
     if not family:
         return {"families": knowledge.list_families(learned)}
     try:
-        return knowledge.get_guidance(family, model_filename or None, learned_dir=learned)
+        return _cap_sources(knowledge.get_guidance(family, model_filename or None, learned_dir=learned))
     except KeyError:
         return {
             "error": f"no knowledge for '{family}'",
@@ -2355,7 +2378,12 @@ async def record_learning(family: str, updates: dict[str, Any], source: str) -> 
     {"techniques": {"face_detailer": {"denoise": 0.4}}}. source = URL/model page.
     Any family name works; for a NEW family also include a "detect" block so it's
     auto-recognized next session: {"detect": {"checkpoint_patterns": ["mymodel"]},
-    "loader": "unet_clip_vae"}."""
+    "loader": "unet_clip_vae"}.
+
+    A "sources" list teaches organize_workflow's Models note where to download
+    each file - it never invents a URL, so this is the only way one appears:
+    {"sources": [{"match": ["mymodel_v1.safetensors"], "what": "checkpoint",
+    "url": "https://..."}]}. Verify the URL resolves before recording it."""
     path = knowledge.save_learning(_config().learned_dir, family, updates, source)
     return {"saved": str(path), "guidance_now": knowledge.get_guidance(family, learned_dir=_config().learned_dir)}
 

@@ -185,6 +185,29 @@ def _model_refs(wf, object_info: dict[str, Any]) -> list[tuple[str, str, str]]:
     return found
 
 
+def matching_sources(guidance: dict[str, Any], filenames: list[str]) -> list[dict[str, str]]:
+    """Curated download-source entries (``what``/``url``) whose ``match``
+    patterns hit one of the given filenames - never invents a URL, only
+    surfaces ones a family YAML or a record_learning call already curated.
+
+    NOT the same key as ``learned_sources`` (research provenance - dates and
+    a source string for what record_learning wrote, tracked separately by
+    get_guidance). This is model-file download links, keyed ``sources`` on
+    the family data itself, e.g.::
+
+        sources:
+          - match: ["ae.safetensors"]
+            what: "FLUX VAE"
+            url: "https://huggingface.co/..."
+    """
+    hits: list[dict[str, str]] = []
+    for entry in guidance.get("sources") or []:
+        patterns = entry.get("match") or []
+        if any(_matches(fn, patterns) for fn in filenames):
+            hits.append({"what": str(entry.get("what", "")), "url": str(entry.get("url", ""))})
+    return hits
+
+
 def model_filenames(wf, object_info: dict[str, Any]) -> list[str]:
     """String widget values that look like model file references (all roles -
     used for search/matching, where a LoRA name is a legitimate signal)."""

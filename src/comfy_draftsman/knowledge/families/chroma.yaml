@@ -6,6 +6,16 @@ loader: unet_clip_vae
 components:
   text_encoders: ["t5xxl fp8/fp16 (CLIPLoader, type=chroma)"]
   vae: "ae.safetensors (FLUX VAE)"
+# Verified reachable before commit (round 23). Chroma1-HD is one specific
+# checkpoint release; earlier/other Chroma releases are not this file - check
+# the model card for the exact release in use, per the research note below.
+sources:
+  - match: ["chroma1-hd", "chroma1_hd"]
+    what: "Chroma1-HD checkpoint"
+    url: "https://huggingface.co/lodestones/Chroma1-HD"
+  - match: ["ae.safetensors"]
+    what: "FLUX VAE (Chroma reuses it)"
+    url: "https://huggingface.co/black-forest-labs/FLUX.1-schnell/blob/main/ae.safetensors"
 sampling:
   cfg: {min: 3.0, max: 5.0, default: 4.0}
   steps: {min: 26, max: 40, default: 30}

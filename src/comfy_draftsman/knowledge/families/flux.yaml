@@ -26,6 +26,20 @@ loader_nodes:
     file_patterns: ["ae.safetensors", "flux"]
     output: VAE
 latent_node: EmptySD3LatentImage
+# Verified reachable before commit (round 23) - never add a URL here without
+# checking it actually resolves. Diffusion-model checkpoints deliberately
+# excluded: too many gated/ungated variants (dev/schnell/krea/...) to point
+# at one file safely; the shared text-encoder/VAE files below apply to all.
+sources:
+  - match: ["clip_l.safetensors"]
+    what: "FLUX CLIP-L text encoder"
+    url: "https://huggingface.co/comfyanonymous/flux_text_encoders/blob/main/clip_l.safetensors"
+  - match: ["t5xxl_fp16", "t5xxl_fp8"]
+    what: "FLUX T5-XXL text encoder (pick fp16 for quality, fp8 for low VRAM)"
+    url: "https://huggingface.co/comfyanonymous/flux_text_encoders"
+  - match: ["ae.safetensors"]
+    what: "FLUX VAE"
+    url: "https://huggingface.co/black-forest-labs/FLUX.1-schnell/blob/main/ae.safetensors"
 sampling:
   cfg: {min: 1.0, max: 1.0, default: 1.0}
   guidance: {min: 1.5, max: 5.0, default: 3.5}
