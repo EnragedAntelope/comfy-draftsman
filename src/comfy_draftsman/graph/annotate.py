@@ -90,7 +90,19 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
     name = node.type.lower()
     if schema is not None:
         category = (schema.get("category") or "").lower()
-        if schema.get("output_node"):
+        # out_types is needed by BOTH checks below, so compute it once, ahead
+        # of the output_node branch it now gates.
+        out_types = {str(t).upper() for t in (schema.get("output") or [])}
+        # output_node is NOT "writes a file to disk" - some packs set it on a
+        # pure text-producing node too (confirmed live: EA Nodes' EA_LMStudio,
+        # a vision-LLM prompt enhancer with three STRING outputs, declares
+        # output_node: true - almost certainly for UI-preview reasons, not
+        # because it terminates the pipeline). Landing that node in "Output"
+        # buried the very prompt-building step the Inputs/Prompt Building
+        # bands exist to surface. A real save node has no output slots at
+        # all (or a non-STRING one), so gating on "not STRING-only" keeps
+        # genuine terminal writers in Output without over-trusting the flag.
+        if schema.get("output_node") and not (out_types and out_types <= {"STRING"}):
             return "output"
         if "loaders" in category:
             return "models"
@@ -101,7 +113,6 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
         if category.startswith("image") or category.startswith("mask"):
             return "post"
         # category didn't decide - infer from the data types flowing through
-        out_types = {str(t).upper() for t in (schema.get("output") or [])}
         if out_types and out_types <= {"STRING"}:
             # pure text machinery (wildcards, concatenators, LLM/VLM prompt
             # steps) - the reader wants to see what feeds the final prompt one
@@ -517,7 +528,10 @@ def _note_text(
             lines.append(f"⚙️ Extra image steps applied after generation: {listed}.")
     elif stage == "output":
         medium = _output_medium(members, object_info)
-        lines.append(f"💾 Finished {medium} land here (check the filename prefix).")
+        # "video"/"audio" are mass nouns (singular verb); "images"/"files" are
+        # plural - confirmed live: "Finished video land here" read wrong
+        verb = "lands" if medium in ("video", "audio") else "land"
+        lines.append(f"💾 Finished {medium} {verb} here (check the filename prefix).")
     elif stage == "inputs":
         if any(n.type in _INPUT_CLASSES for n in members):
             lines.append("👇 Load your source image/media here.")

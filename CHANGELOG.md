@@ -43,6 +43,15 @@ correct and are unchanged) plus a separate design review of
   declares none — `connect` raised "has no input" before the `force` check
   ever ran. `force: true` now creates the socket, typed as the origin
   output's own type.
+- **A pure text-producing node marked `output_node: true` landed in the
+  Output band instead of Prompt Building.** Caught live re-running
+  `organize_workflow` on the exact reported MiniMax H3 workflow: EA Nodes'
+  `EA_LMStudio` (a vision-LLM prompt enhancer, three STRING outputs)
+  declares `output_node: true`, and `classify` trusted that flag
+  unconditionally — burying the very prompt-enhancement step this release's
+  reader-priority reorganization exists to surface. The `output_node` check
+  now also requires the outputs NOT be STRING-only; a genuine terminal
+  writer (no output slots, or a non-STRING one) is unaffected.
 
 ### Added
 

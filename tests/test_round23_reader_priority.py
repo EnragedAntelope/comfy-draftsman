@@ -86,6 +86,47 @@ def test_wildcard_producer_classifies_as_prompt_build_even_when_unwired(object_i
     assert classify(bank, info) == "prompt_build"
 
 
+def test_output_node_llm_with_string_outputs_stays_prompt_build(object_info):
+    """Confirmed live (round 23, MiniMax H3 workflow): EA Nodes' EA_LMStudio -
+    a vision-LLM prompt enhancer with three STRING outputs - declares
+    output_node: true in its real /object_info schema, almost certainly for
+    UI-preview reasons rather than because it terminates the pipeline.
+    Trusting the flag unconditionally buried it in the Output band, directly
+    undermining "prompt-building machinery gets its own band, early"."""
+    info = dict(object_info)
+    info["EA_LMStudio"] = {
+        "category": "EA/LMStudio",
+        "output_node": True,
+        "input": {
+            "required": {
+                "prompt": ["STRING", {"default": ""}],
+                "system_message": ["STRING", {"default": ""}],
+            }
+        },
+        "output": ["STRING", "STRING", "STRING"],
+        "output_name": ["response", "reasoning", "troubleshooting"],
+    }
+    wf = Workflow.new()
+    node = wf.add_node("EA_LMStudio", object_info=info)
+    assert classify(node, info) == "prompt_build"
+
+
+def test_output_node_with_no_outputs_still_classifies_as_output(object_info):
+    """A genuine terminal writer (no output slots at all, or a non-STRING
+    one) must still land in Output - the fix above narrows the output_node
+    trust, it doesn't remove it."""
+    info = dict(object_info)
+    info["FakeSaveThing"] = {
+        "category": "custom/save",
+        "output_node": True,
+        "input": {"required": {"images": ["IMAGE", {}]}},
+        "output": [],
+    }
+    wf = Workflow.new()
+    node = wf.add_node("FakeSaveThing", object_info=info)
+    assert classify(node, info) == "output"
+
+
 def test_text_overlay_with_incidental_text_widget_stays_post(object_info):
     """A node whose PRIMARY job is image-in/image-out (e.g. a text overlay
     effect) must not be hijacked into Inputs just because it happens to also

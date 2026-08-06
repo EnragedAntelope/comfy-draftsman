@@ -525,6 +525,24 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   against a live schema step or a vendor's own docs (see the round-23
   changelog entry for which families and how); left unset for families where
   it could not be confirmed rather than guessed.
+- **`output_node: true` does not mean "writes a file to disk" - a pack can
+  set it on a pure text-producing node too.** Confirmed live against the
+  exact reported MiniMax H3 workflow, post-fix: EA Nodes' `EA_LMStudio` (the
+  vision-LLM prompt enhancer, three STRING outputs) declares
+  `output_node: true` in its real `/object_info` schema - almost certainly
+  for UI-preview reasons, not because it terminates the pipeline. `classify`
+  used to trust the flag unconditionally (checked first, before the
+  STRING-only-output → `prompt_build` heuristic could run), so this node and
+  its companion Show Text boxes landed in the **Output** band - directly
+  undermining round 23's own "prompt-building machinery gets its own band,
+  early" goal. The `output_node` branch now also requires the node's outputs
+  NOT be STRING-only (`_classify_by_schema`); a genuine terminal writer has
+  no output slots at all (or a non-STRING one), so real save nodes are
+  unaffected. Caught by re-running `organize_workflow` on the live reported
+  workflow after the rest of round 23 landed, not by the fixture-based test
+  suite - the fixture object_info doesn't happen to contain a node shaped
+  like this. `tests/test_round23_reader_priority.py` now pins both the
+  narrowed case and the still-must-still-work terminal-writer case.
 
 ## Remaining TODOs
 
