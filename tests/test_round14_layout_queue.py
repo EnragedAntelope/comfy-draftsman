@@ -138,8 +138,17 @@ def test_canvas_node_leftmost_and_green(object_info):
     assert latent.color == "#232"  # touch-me green
     for decode_id, _ in chains.values():
         assert latent.pos[0] < wf.nodes[decode_id].pos[0]
-    size_groups = [g for g in wf.groups if "size" in g.title.lower()]
-    assert size_groups, f"no image-size group: {[g.title for g in wf.groups]}"
+    # this fixture's Inputs band also holds a genuinely hand-typed negative
+    # prompt box (the "neg" CLIPTextEncode, whose own text widget is never
+    # wired) - reader-priority ordering puts both in the same leftmost band on
+    # purpose, so the band no longer collapses to a homogeneous "Image Size"
+    # title. The size guidance must still reach the reader, in the note text.
+    note_texts = [
+        n.widgets_values[0]
+        for n in wf.nodes.values()
+        if n.type == "MarkdownNote" and n.widgets_values
+    ]
+    assert any("image size" in t.lower() for t in note_texts), note_texts
 
 
 # --- 3. run_workflow queue etiquette -------------------------------------------

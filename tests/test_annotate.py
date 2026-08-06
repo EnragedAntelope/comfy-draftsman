@@ -43,13 +43,24 @@ def txt2img(object_info):
 
 
 def test_groups_created_per_stage(txt2img, object_info):
+    """Reader-priority reordering (round 23) puts a bare hand-typed prompt box
+    in the leftmost Inputs band, not a separate Prompts band - so the group
+    TITLE no longer says "prompt" for this fixture's shape (two unwired
+    CLIPTextEncode boxes + the canvas node, together in Inputs). The guidance
+    to type into the prompt box must still reach the reader, in the note."""
     wf, _ = txt2img
     annotate(wf, object_info)
     titles = [g.title for g in wf.groups]
     assert len(titles) >= 4
     joined = " ".join(titles).lower()
-    for word in ("model", "prompt", "sampl", "output"):
+    for word in ("input", "model", "sampl", "output"):
         assert word in joined, f"expected a group about '{word}', got {titles}"
+    note_texts = [
+        n.widgets_values[0]
+        for n in wf.nodes.values()
+        if n.type == "MarkdownNote" and n.widgets_values
+    ]
+    assert any("prompt" in t.lower() for t in note_texts), note_texts
 
 
 def test_groups_have_distinct_colors_and_contain_members(txt2img, object_info):
@@ -187,7 +198,7 @@ def test_models_group_title_with_lora(txt2img, object_info):
 # --- classification of category-less utility nodes ---
 
 
-def test_classify_string_builders_as_prompts():
+def test_classify_string_builders_as_prompt_build():
     from comfy_draftsman.graph.annotate import classify
     from comfy_draftsman.graph.model import Node
 
@@ -197,7 +208,7 @@ def test_classify_string_builders_as_prompts():
         "output": ["STRING"],
     }
     node = Node(id=1, type="TextConcat")
-    assert classify(node, {"TextConcat": schema}) == "prompts"
+    assert classify(node, {"TextConcat": schema}) == "prompt_build"
 
 
 def test_classify_image_in_image_out_as_post():

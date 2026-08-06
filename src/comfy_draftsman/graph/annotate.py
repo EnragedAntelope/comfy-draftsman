@@ -26,10 +26,16 @@ GREEN = ("#232", "#353")  # touch-me
 NOTE_COLOR = ("#432", "#653")
 
 STAGES: list[tuple[str, str, str]] = [
-    # (key, group title, group color)
+    # (key, group title, group color) - ordered by how OFTEN a reader touches
+    # it, not purely by dataflow rank: the things a user changes every run
+    # (source media, the prompt box itself) sit on the left edge, ahead of
+    # machinery (loaders, conditioning wiring) most runs never touch. Data
+    # still flows strictly left to right: inputs -> prompt_build ->
+    # conditioning (models also feeds conditioning + sampling directly).
     ("inputs", "📥 Inputs", "#88553d"),
+    ("prompt_build", "✍️ Prompt Building", "#3d5c47"),
     ("models", "🧠 Models & LoRAs", "#3f5159"),
-    ("prompts", "✍️ Prompts", "#335c33"),
+    ("conditioning", "🔌 Conditioning", "#4a3d59"),
     ("sampling", "🎛️ Sampling", "#42425c"),
     ("post", "✨ Post-Processing", "#5c5029"),
     ("output", "💾 Output", "#653d3d"),
@@ -39,6 +45,7 @@ _STAGE_INDEX = {key: i for i, (key, _, _) in enumerate(STAGES)}
 _INPUT_CLASSES = {"LoadImage", "LoadImageMask", "LoadAudio", "LoadVideo", "VHS_LoadVideo"}
 _POST_HINTS = ("detailer", "upscale", "facerestore", "interpolat", "rife", "segs", "postprocess")
 _KNOB_WIDGETS = {"text", "prompt", "wildcard_text", "width", "height", "image"}
+_PROMPT_WIDGETS = {"text", "prompt", "wildcard_text"}
 
 
 def _is_canvas_node(class_type: str) -> bool:
@@ -58,6 +65,25 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
         # frontend gives it control_after_generate), so it belongs on the left
         # edge with the other tweakables - not in the middle of the sampler band
         return "inputs"
+    stage = _classify_by_schema(node, object_info)
+    # An UNWIRED prompt box on a conditioning ENCODER (CLIPTextEncode & kin) is
+    # the classic single "type your prompt here" box - the most commonly
+    # edited thing in almost any workflow, so it belongs on the left edge with
+    # the other hand-tweakable inputs. A node already destined for
+    # "prompt_build" (a wildcard bank, concatenator, LLM/VLM step) stays there
+    # even when unwired - it's the entry point of a multi-step prompt
+    # pipeline, and splitting the first node of that pipeline into a
+    # different band than the rest of it would break the very thing this
+    # reorganization is for. Anything else (TextOverlay-style image effects
+    # with an incidental "text" widget) is never redirected by this rule.
+    if stage == "conditioning":
+        prompt_widgets = _PROMPT_WIDGETS & set(_safe_slots(node, object_info))
+        if prompt_widgets and all(not _wired_input(node, w) for w in prompt_widgets):
+            return "inputs"
+    return stage
+
+
+def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
     schema = object_info.get(node.type)
     name = node.type.lower()
     if schema is not None:
@@ -67,7 +93,7 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
         if "loaders" in category:
             return "models"
         if "conditioning" in category:
-            return "prompts"
+            return "conditioning"
         if "sampling" in category or "latent" in category:
             return "sampling"
         if category.startswith("image") or category.startswith("mask"):
@@ -75,9 +101,10 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
         # category didn't decide - infer from the data types flowing through
         out_types = {str(t).upper() for t in (schema.get("output") or [])}
         if out_types and out_types <= {"STRING"}:
-            # pure text machinery (wildcards, concatenators, templates)
-            # belongs with the prompts, not dumped into sampling
-            return "prompts"
+            # pure text machinery (wildcards, concatenators, LLM/VLM prompt
+            # steps) - the reader wants to see what feeds the final prompt one
+            # step before the encoder, not buried in Conditioning wiring
+            return "prompt_build"
         in_types = {
             str(spec[0]).upper()
             for section in ("required", "optional")
@@ -277,10 +304,14 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
     for node in wf.nodes.values():
         stage = stage_of_key.get(node.id)
         slots = set(_safe_slots(node, object_info))
-        prompt_knobs = slots & {"text", "prompt", "wildcard_text"}
+        prompt_knobs = slots & _PROMPT_WIDGETS
         # a text/prompt knob that is wired from upstream isn't editable - don't
-        # paint it "touch me" green (that combination misleads a human reader)
-        editable_prompt_knob = stage == "prompts" and any(
+        # paint it "touch me" green (that combination misleads a human reader).
+        # "inputs" (a bare encoder box) and "prompt_build" (a wildcard bank/
+        # LLM step's own text) are the two stages where a prompt knob can be
+        # genuinely hand-typed; classify() never routes a WIRED one into
+        # either, so the wired check below is redundant-but-cheap insurance.
+        editable_prompt_knob = stage in ("inputs", "prompt_build") and any(
             not _wired_input(node, name) for name in prompt_knobs
         )
         is_knob = (
@@ -361,26 +392,23 @@ def _note_text(
         lines.append("👇 Swap models here to change the whole look.")
         if notes.get("loaders"):
             lines.append(notes["loaders"])
-    elif stage == "prompts":
-        text_nodes = [
-            n for n in members if "text" in _safe_slots(n, object_info) or n.type == "CLIPTextEncode"
-        ]
-        any_editable = any(
-            not _wired_input(n, name)
-            for n in text_nodes
-            for name in ("text", "prompt", "wildcard_text")
-            if name in _safe_slots(n, object_info)
+    elif stage == "prompt_build":
+        # a producer node (wildcard bank, concatenator, LLM/VLM prompt step) -
+        # the reader edits ITS pieces, not the wired encoder box further along
+        lines.append(
+            "🧩 Builds the final prompt automatically (word banks, concatenation, "
+            "or an LLM/VLM step) — edit the pieces here; the wired prompt box "
+            "further along can't be typed into."
         )
-        if any_editable:
-            lines.append("👇 Type what you want in the green Positive Prompt node.")
-        else:
-            lines.append(
-                "✍️ The prompt text here is built automatically from the upstream "
-                "green string nodes — edit those (word banks / inputs) to change the "
-                "result, not the prompt box (it's wired, so it can't be typed into)."
-            )
         if notes.get("conditioning"):
             lines.append(notes["conditioning"])
+    elif stage == "conditioning":
+        # pure wiring: an encoder/apply node fed either by a hand-typed prompt
+        # box in Inputs or by Prompt Building - nothing here is user-editable
+        lines.append(
+            "🔌 Wires the prompt into the model — nothing to edit here; change "
+            "the prompt itself upstream (Inputs or Prompt Building)."
+        )
     elif stage == "sampling":
         graph_knobs = _graph_knobs(members, object_info)
         sampler = next(
@@ -449,6 +477,12 @@ def _note_text(
                 "👇 The green value boxes here feed settings further along the "
                 "graph — change them here, not at the node they connect to."
             )
+        # classify() only ever routes an UNWIRED prompt/wildcard box here, so
+        # every prompt-widget member in this band is directly hand-editable
+        if any(_PROMPT_WIDGETS & set(_safe_slots(n, object_info)) for n in members):
+            lines.append("👇 Type what you want in the green prompt box(es) here.")
+            if notes.get("conditioning"):
+                lines.append(notes["conditioning"])
     if not lines:
         return None
     note_title = title or dict((k, t) for k, t, _ in STAGES)[stage]
@@ -570,6 +604,10 @@ def annotate(
                 title = "\U0001f9e0 Models"
         elif key == "inputs" and all(_is_canvas_node(n.type) for n in members):
             title = "📐 Image Size"
+        elif key == "inputs" and all(
+            _PROMPT_WIDGETS & set(_safe_slots(n, object_info)) for n in members
+        ):
+            title = "✍️ Prompts"
         note_w = max(min(max_x - min_x, 380.0), 300.0)
         # wrap to the note's REAL width, not a fixed column count, so the
         # height estimate below matches what actually renders
