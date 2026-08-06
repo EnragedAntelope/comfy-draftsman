@@ -570,13 +570,23 @@ class Workflow:
             # input" action. Keeps the widgets_values slot; the link overrides it.
             in_slot = self._materialize_widget_input(target, target_input, object_info)
             materialized = in_slot is not None
+        if in_slot is None and force:
+            # some packs (rgthree switches, dynamic collectors) build their
+            # inputs in frontend JS, so /object_info declares none - there is
+            # no schema to check the name against, so this is force-only.
+            # Typed as the origin's own output, since that's the only type
+            # information available for an undeclared socket.
+            in_slot = InputSlot(name=target_input, type=out_slot.type)
+            target.inputs.append(in_slot)
         if in_slot is None:
             widget_hint = ""
             if object_info is None:
                 widget_hint = " (pass object_info to connect into widget inputs)"
             raise ValueError(
                 f"node {target_id} ({target.type}) has no input '{target_input}'; "
-                f"available: {[i.name for i in target.inputs]}{widget_hint}"
+                f"available: {[i.name for i in target.inputs]}{widget_hint} - some "
+                "packs (rgthree switches, dynamic collectors) build inputs in "
+                'frontend JS, so /object_info declares none; "force": true creates it'
             )
         if not force and not types_compatible(out_slot.type, in_slot.type):
             if materialized:

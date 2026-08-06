@@ -1218,10 +1218,11 @@ async def edit_workflow(
                 # a link already feeding the target input gets replaced - say so
                 replaced = ""
                 target = wf.nodes.get(int(op["to_node"]))
+                pre_slot = None
                 if target is not None:
-                    slot = target.input_by_name(op["to_input"])
-                    if slot is not None and slot.link is not None:
-                        old = wf.links.get(slot.link)
+                    pre_slot = target.input_by_name(op["to_input"])
+                    if pre_slot is not None and pre_slot.link is not None:
+                        old = wf.links.get(pre_slot.link)
                         if old is not None:
                             replaced = f" (replaced existing link from #{old.origin_id}[{old.origin_slot}])"
                 wf.connect(
@@ -1233,9 +1234,25 @@ async def edit_workflow(
                     force=bool(op.get("force")),
                 )
                 touched.update((int(op["from_node"]), int(op["to_node"])))
+                # a slot that didn't exist before and isn't a declared widget
+                # was force-created as an undeclared (frontend-only) socket -
+                # flag it so the caller knows to verify with a test run
+                undeclared_note = ""
+                if target is not None and pre_slot is None and op.get("force"):
+                    try:
+                        is_declared_widget = op["to_input"] in all_slot_names(
+                            target.type, object_info
+                        )
+                    except ValueError:
+                        is_declared_widget = False
+                    if not is_declared_widget:
+                        undeclared_note = (
+                            f" - created undeclared input '{op['to_input']}' on "
+                            f"{target.type} (frontend-created slot, verify with a test run)"
+                        )
                 applied.append(
                     f"connected #{op['from_node']}.{op['from_output']} -> "
-                    f"#{op['to_node']}.{op['to_input']}{replaced}"
+                    f"#{op['to_node']}.{op['to_input']}{replaced}{undeclared_note}"
                 )
             elif kind == "set_widget":
                 node_id = int(op["node_id"])
