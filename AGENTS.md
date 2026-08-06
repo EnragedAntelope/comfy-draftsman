@@ -18,7 +18,7 @@ A local-first MCP server that drafts, organizes, validates, and runs ComfyUI wor
 | Directory | Purpose |
 |-----------|---------|
 | `src/comfy_draftsman/server.py` | MCP tools/prompts — thin wiring only, no logic |
-| `src/comfy_draftsman/graph/` | Workflow model, widgets, subgraph flattening, validate, lint, annotate, layout, port |
+| `src/comfy_draftsman/graph/` | Workflow model, widgets, subgraph flattening, validate, lint, annotate, layout, knobs, port |
 | `src/comfy_draftsman/comfy/` | httpx client, object_info catalog, websocket progress, Comfy Registry |
 | `src/comfy_draftsman/knowledge/` | Per-family tuning floor (YAML) + learned overlay |
 | `src/comfy_draftsman/config.py` | Env-driven config (COMFYUI_URL, DRAFTSMAN_SESSION_DIR, ...) |
@@ -59,6 +59,7 @@ uv run mypy
 - Validation gates: `run_workflow` and `save_workflow` refuse on `validate()` errors unless `allow_invalid=True`.
 - `lint()` is advisory only — it never blocks.
 - `edit_workflow` ops deliberately do NOT reach inside subgraph definitions — rebuild flat to modify internals.
+- `organize_workflow` never synthesizes a download URL or an alignment (`multiple_of`) requirement — both only ever come from a curated family YAML or a `record_learning` call; a guessed one is worse than none.
 
 ## Security
 

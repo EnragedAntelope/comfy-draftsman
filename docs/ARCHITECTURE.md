@@ -436,6 +436,95 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   empty), value-clipped and total-budgeted the same way findings are capped
   elsewhere in this server - `FILE_OUTPUT_KEYS` stays the file-only source for
   relocation, untouched.
+- **Family detection is anchored to the diffusion-model loader, and NEVER a
+  LoRA.** `knowledge._model_refs` used to return every string widget matching
+  a model file extension with no notion of which one names the diffusion
+  model - a placeholder LoRA named `LTX23_The_Cook_….safetensors` on a
+  MiniMax H3 graph outscored everything, and `organize_workflow` stamped LTX
+  Video's CFG guidance onto a graph with no CFG node at all (a prior session
+  hit the identical bug with an SDXL LoRA, explaining an old "the notes talk
+  about SDXL checkpoints" complaint). `_model_refs` now tags each reference
+  `primary` (`ckpt_name`/`unet_name`/…), `aux` (any widget name matching
+  `lora|vae|clip|control_net|…` - can never name the diffusion model), or
+  `other`. `detect_family_detail` scores `primary` refs first, only falling
+  back to `other` if none match, and **never** considers `aux`. Variant
+  matching (turbo/lightning/…) uses `primary_model_filenames` for the same
+  reason - a LoRA named `…turbo…` must not select an unrelated base model's
+  turbo notes. `model_filenames` (all roles) is kept for search/matching,
+  where a LoRA name is a legitimate signal - only *detection* needs the
+  narrower view.
+- **`apply_staged_layout` does not position Note/MarkdownNote nodes - if
+  `annotate` doesn't handle that itself, they land on top of the new
+  layout.** A real session's 7 hand-written `MarkdownNote` nodes stayed at
+  their old position while everything around them moved, producing 49
+  overlapping pairs across 11 nodes - which `organize_workflow`'s own
+  returned `lint` block then reported, meaning the tool shipped a layout it
+  had already diagnosed as broken. `annotate()` is now four explicit phases:
+  (1) lay out via `apply_staged_layout`, (2) `_park_foreign_notes` relocates
+  ONLY human-authored notes that actually collide with something (one sitting
+  in clear space was placed there on purpose and must not move) into a column
+  left of the graph, (3) place generated notes above each band with `_wrap`
+  columns sized to the note's REAL width (not a fixed 58 - the previous
+  mismatch between the wrap width and the height *estimate* was a secondary
+  contributor to the same overlap), (4) `layout.resolve_overlaps` sweeps
+  anything still colliding (nodes only ever move down, never sideways, so it
+  terminates and never undoes a band's x-position), and group bounds are
+  computed LAST, from these final positions, via the shared
+  `Workflow.group_from_nodes`/`group_bounding_for` helper `edit_workflow`'s
+  `add_group`/`set_group` ops also call - a hand-made group and a generated
+  one end up geometrically identical. If an overlap still survives all four
+  phases, `organize_workflow` says so in a top-level `warning` instead of
+  silently shipping it.
+- **A note's `Safe ranges:` line must check the graph has the knob before
+  claiming a range for it.** The line used to render unconditionally from
+  whatever a family's guidance carried; a learned overlay whose `cfg` block
+  is prose-only (H3: `{"note": "No CFG - guidance-distilled"}`, no numeric
+  `min`/`max`) rendered the literal string `Safe ranges: CFG None-None, steps
+  None-None.` - and the same code would assert a CFG range on any
+  guidance-distilled chain (`BasicGuider`, `SamplerCustomAdvanced`) that has
+  no `cfg` widget at all. `annotate._graph_knobs` collects the widget/input
+  names actually present on a stage's nodes; each range clause now requires
+  BOTH a real numeric `min`/`max` AND membership in that set, and a prose-only
+  `cfg.note` is emitted as prose instead of a fabricated range. The output
+  note is read from the output nodes' own declared input types
+  (`_output_medium`: `IMAGE`→images, `VIDEO`→video, `AUDIO`→audio, mixed→the
+  honest generic "files") instead of the old hardcoded "Finished images land
+  here" on a video/audio workflow.
+- **`force: true` on `connect` can create a socket `/object_info` never
+  declared - a DIFFERENT case from the `js-widget-input` TODO below, and the
+  two must not be conflated.** Some packs (rgthree's "Any Switch", dynamic
+  collectors) build their inputs in frontend JS, so the schema declares none
+  at all; `Workflow.connect` used to raise "has no input" BEFORE the `force`
+  check ever ran, so there was no override. The `in_slot is None and force`
+  branch (`model.py`) now creates the slot typed as the origin output's own
+  type (there is no schema to check against) and links it - `to_api` emits it
+  as an ordinary link and ComfyUI accepts it normally. This differs from
+  `js-widget-input`: that block is a *declared widget-backed slot* whose
+  VALUE is unreplayable pack-specific frontend state (LoraManager's active-tag
+  resolution); this is a *missing socket* carrying an ordinary link. Confusing
+  the two would either wrongly loosen the honest `js-widget-input` stop or
+  wrongly re-block a working rgthree wire.
+- **A curated `sources:`/`multiple_of:` value is a claim about a specific
+  model, and a wrong one is worse than none.** Two new family-YAML fields,
+  both opt-in and both scoped so a caller who threads no state gets the old
+  behavior unchanged: `sources` (list of `{match, what, url}`, surfaced by
+  `knowledge.matching_sources` into the Models note's "Where to get these
+  files" list - checked reachable by hand before being committed, never
+  synthesized; `record_learning`'s docstring documents the key so an agent
+  can add one after verifying); `multiple_of` (the VAE/patchify structural
+  alignment requirement, checked by `lint._resolution_alignment_findings`
+  against a canvas node's width/height, naming the nearest legal value -
+  never auto-rewritten or forced via an injected math node, since an odd size
+  may be deliberate). `lint()`'s new `learned_dir` parameter **defaults to
+  `None`, which skips the resolution check entirely** - this is a deliberate
+  opt-out, not "no learned overlay so use the floor" - so no existing caller
+  that doesn't thread `_config().learned_dir` through starts seeing the new
+  finding just because a family YAML gains `multiple_of`. Only the three
+  server.py call sites (`organize_workflow`, `lint_workflow`, `save_workflow`)
+  pass the real configured path. Seeded `multiple_of` only where confirmed
+  against a live schema step or a vendor's own docs (see the round-23
+  changelog entry for which families and how); left unset for families where
+  it could not be confirmed rather than guessed.
 
 ## Remaining TODOs
 
@@ -485,9 +574,69 @@ Open:
     and only the unflagged ones. If a pack ever flags a genuinely JS-resolved
     input, that rule breaks and this becomes a real bug; there is no test that
     can catch it locally, so it is written here.
+- **[OPEN] `multiple_of` unset for wan, qwen_image, krea2.** Round 23
+  investigated all three: LTX's 32 came from Lightricks' own docs, and
+  sd15/sdxl/sd35/flux came straight from their empty-latent node's own live
+  `/object_info` step (8 or 16) - but WAN's ComfyUI tutorial docs don't state
+  a divisibility requirement, and neither qwen_image nor krea2 have a
+  dedicated empty-latent node in the trimmed test fixture to check against a
+  live schema. Chroma got `16` anyway on strong architectural inference
+  (explicitly FLUX-schnell-derived, reuses FLUX's own VAE file) but is flagged
+  as inferred, not schema-verified, in its own YAML comment. Verify each
+  against a live instance's `/object_info` (whichever Empty*LatentImage/Video
+  node the family's template uses) or the model's own release notes before
+  adding - do not guess from general video-DiT conventions.
 
 Recently closed:
 
+- **[DONE, round 23] Family detection anchored to the diffusion model;
+  organize_workflow overlap fix; reader-priority reorganization; layout/group
+  edit ops; force-socket creation; knob cards; curated sources; resolution
+  alignment.** From a live bug report building a MiniMax H3 R2V+Voice
+  workflow (`organize_workflow` claimed the graph was LTX Video from a
+  placeholder LoRA's filename, and shipped a layout with 49 overlapping node
+  pairs it had already diagnosed as broken in its own returned lint) plus a
+  separate design review of the default organization itself. See the Gotchas
+  above for the mechanics of each; summary:
+  - `detect_family` now scores only the diffusion-model loader widget
+    (primary refs), never a LoRA/VAE/CLIP filename (aux refs) - see the
+    family-detection gotcha above.
+  - `annotate()` restructured into four ordered phases (layout → place notes
+    → resolve overlaps → group bounds from final positions) with a new
+    `layout.resolve_overlaps` sweep and a park-only-if-colliding pass for
+    human-authored notes - `organize_workflow` never again ships a layout its
+    own lint has flagged as broken; it says so in a `warning` if one survives.
+  - `_note_text`'s `Safe ranges:` line and output-medium line are now graph-
+    aware (`_graph_knobs`, `_output_medium`) instead of asserting whatever a
+    family's guidance carried regardless of what's actually on the canvas.
+  - `edit_workflow` gained `set_pos`/`add_group`/`set_group`/`remove_group` -
+    the reported session's #1 pain point was no way to fix layout without
+    `export_workflow_json` → hand-edit → re-`import_workflow`, the single
+    largest token cost of that session. Docstrings were compressed to hold
+    the tool-schema token ceiling despite the four new ops.
+  - `Workflow.connect(force=True)` can now create a socket `/object_info`
+    never declared (rgthree's Any Switch and similar frontend-JS-built
+    inputs) - distinct from the `js-widget-input` TODO below; see the gotcha.
+  - Default organization reorganized from six pipeline-order bands into seven
+    reader-priority bands (Inputs, Prompt Building, Models & LoRAs,
+    Conditioning, Sampling, Post-Processing, Output): an unwired encoder
+    prompt box (the classic hand-typed box) now lives in the leftmost Inputs
+    band instead of a middle "Conditioning" band, while a multi-step prompt-
+    building pipeline (wildcard bank → concatenator → LLM step) stays
+    together in its own band even when its root producer is itself unwired.
+  - New `graph/knobs.py` + `knowledge/techniques.yaml`: every note now
+    renders a markdown table of that band's editable knobs (current value,
+    live-schema range/choices, a tradeoff sentence) plus any matching
+    technique's tradeoff (EasyCache/TeaCache, SageAttention, TorchCompile,
+    FreeU, LCM/Lightning/Hyper) - range/choices always come straight from
+    `/object_info` via the same cap `get_node_info` uses, never invented, and
+    a wired knob is shown as `(wired)` with no claim made.
+  - `knowledge.matching_sources` surfaces a family's curated model-file
+    download links into the Models note - never synthesizes a URL; two
+    families seeded with URLs verified reachable before commit.
+  - New `resolution-not-aligned` lint check for families with a confirmed
+    alignment requirement (`multiple_of`), gated behind `lint()`'s
+    `learned_dir` parameter so no untouched caller starts seeing it.
 - **[DONE, round 22] Optional-input muted-source check, queue attribution.**
   From a live Chroma-HD-Flash troubleshooting session's bug report (one real
   bug, several UX gaps; two reported items were host/ComfyUI behavior, not

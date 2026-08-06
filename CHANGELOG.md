@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.14.0 — Family detection, honest layout, reader-priority organization, knob cards
+
+From a live bug report building a MiniMax H3 R2V+Voice workflow (two real
+bugs, two capability gaps; three checks the report doubted turned out to be
+correct and are unchanged) plus a separate design review of
+`organize_workflow`'s default output.
+
+### Fixed
+
+- **`organize_workflow` inferred the model family from a LoRA's filename.** A
+  placeholder LoRA named `LTX23_The_Cook_….safetensors` on a MiniMax H3 graph
+  outscored the real diffusion-model reference, so the tool stamped LTX
+  Video's CFG guidance onto a graph with no CFG node at all — a prior session
+  hit the identical bug with an SDXL LoRA, explaining an old "the notes talk
+  about SDXL checkpoints" complaint. `knowledge._model_refs` now tags every
+  model-shaped reference `primary` (`ckpt_name`/`unet_name`/…), `aux`
+  (LoRA/VAE/CLIP/ControlNet/… — can never name the diffusion model), or
+  `other`; detection scores `primary` first and never considers `aux`.
+  Variant matching (turbo/lightning/…) uses the same primary-only filenames.
+- **`organize_workflow` shipped layouts it had already diagnosed as
+  broken.** `apply_staged_layout` never positioned human-authored
+  Note/MarkdownNote nodes, so when everything around them moved, they landed
+  on top of the new layout — 7 hand-written `MarkdownNote`s in the reported
+  session produced 49 overlapping pairs, which the tool's own returned `lint`
+  block then reported. `annotate()` is now four explicit phases (layout →
+  place notes → resolve overlaps → group bounds from final positions), with
+  a new deterministic `layout.resolve_overlaps` sweep and a park-only-if-
+  colliding pass for foreign notes. A surviving overlap now produces a loud
+  `warning` instead of shipping silently.
+- **A note's "Safe ranges" line could render the literal string `None`.**
+  The line rendered unconditionally from a family's guidance regardless of
+  whether the graph had the knob being described — a learned overlay whose
+  `cfg` block is prose-only (no numeric bounds, e.g. H3: "No CFG - guidance-
+  distilled") produced `Safe ranges: CFG None-None, steps None-None.`, and
+  the same code would assert a CFG range on any guidance-distilled chain
+  (`BasicGuider`) that has no `cfg` widget at all. Each range clause now
+  requires both a real numeric bound AND the knob's actual presence on the
+  graph (`annotate._graph_knobs`); a prose-only note is shown as prose.
+- **`force: true` on `connect` could not wire a frontend-only input.** Some
+  packs (rgthree's "Any Switch") build inputs in frontend JS, so `/object_info`
+  declares none — `connect` raised "has no input" before the `force` check
+  ever ran. `force: true` now creates the socket, typed as the origin
+  output's own type.
+
+### Added
+
+- **Layout/group edit ops**: `set_pos`, `add_group`, `set_group`,
+  `remove_group` on `edit_workflow`. The reported session's #1 pain point —
+  no way to fix layout without `export_workflow_json` → hand-edit in Python
+  → re-`import_workflow` — was also, by a wide margin, that session's largest
+  single token cost. Groups are addressed by member `node_ids`; bounding is
+  computed from their own extents via `Workflow.group_from_nodes`/
+  `group_bounding_for`, the same helper `organize_workflow`'s own group
+  computation now calls.
+- **Reader-priority default organization**: six pipeline-order bands became
+  seven ordered by how often a reader actually touches something — Inputs,
+  Prompt Building, Models & LoRAs, Conditioning, Sampling, Post-Processing,
+  Output. An unwired encoder prompt box (the classic hand-typed box) now
+  lands in the leftmost Inputs band instead of a middle "Conditioning" band;
+  a multi-step prompt-building pipeline (wildcard bank → concatenator → LLM
+  step) stays together in its own band even when its root producer is itself
+  unwired, so splitting the pipeline across bands never happens.
+- **Knob cards**: every note now renders a markdown table of that band's
+  editable knobs — current value, legal range/choices straight from the live
+  schema (never invented, capped the same way `get_node_info` caps combo
+  lists), and a one-line tradeoff sourced from a small glossary
+  (`graph/knobs.py`) or a family's own per-knob guidance when it exists. A
+  new `knowledge/techniques.yaml` adds tradeoff notes for well-known
+  techniques a per-widget glossary can't explain (EasyCache/TeaCache/
+  MagCache step-caching, SageAttention's kernel swap, TorchCompile's
+  recompile cost, FreeU, LCM/Lightning/Hyper distillation requirements). A
+  knob wired from upstream is shown as `(wired)` with nothing claimed.
+- **Curated model-file sources**: `knowledge.matching_sources` surfaces a
+  family's curated `{match, what, url}` entries into the Models note's
+  "Where to get these files" list — never synthesizes a URL. `flux.yaml`
+  (CLIP-L/T5-XXL text encoders, VAE) and `chroma.yaml` (Chroma1-HD checkpoint,
+  shared FLUX VAE) seeded with URLs verified reachable before commit.
+  `record_learning`'s docstring documents the `sources` key for future
+  research to extend.
+- **Resolution alignment**: family YAML gained an optional `multiple_of`
+  field (the VAE/patchify structural requirement) and a new
+  `resolution-not-aligned` lint finding naming the nearest legal value —
+  never auto-rewritten, never forced via an injected math node. Seeded only
+  where confirmed against a live `/object_info` schema step or a vendor's
+  own docs: 8 for sd15/sdxl, 16 for sd35/flux (also confirmed against BFL's
+  reference `sampling.py`), 32 for ltx (Lightricks' own docs); chroma got 16
+  by strong architectural inference, flagged as such. `lint()`'s new
+  `learned_dir` parameter defaults to `None`, which is a deliberate opt-out —
+  every existing caller that doesn't thread config through is unaffected
+  regardless of what family YAMLs declare.
+- The Inputs band note now renders a family's `resolutions` field (list or
+  the richer learned-overlay dict form) next to the canvas node — this data
+  already existed but was never rendered into any note.
+
+### Not changed (session findings that were already correct, or out of scope)
+
+- **`muted-input-source`** — the reporting session doubted this check, then
+  tested it and confirmed draftsman was right: ComfyUI raises a raw
+  `KeyError` and fails the entire prompt when a muted node feeds a connected
+  input, even an optional one. Left untouched.
+- **`null-widget-value`** — correctly caught `LoadAudio.audio = null` /
+  `VHS_LoadVideo.video = null` before they crashed the editor. Left
+  untouched.
+- **`get_model_guidance` returning the research directive for an unknown
+  family** — behaved exactly as designed; the reporting session researched
+  MiniMax H3 and wrote it back via `record_learning`. Left untouched.
+- **`MarkdownNote` via `add_node`** — works fine. An earlier session's claim
+  that it fails, and its fallback to the virtual `Note` class, was wrong and
+  cost link rendering and table formatting in its notes. Not a regression to
+  fix; noted here so it isn't "fixed" again.
+- **Dimension alignment is a lint warning, not an auto-rewrite or an injected
+  math node.** A workflow may deliberately use an odd size; forcing alignment
+  would silently change the user's graph and add a dependency the workflow
+  didn't ask for. The lint names the nearest legal value and stops there.
+
 ## 0.13.0 — Optional-input muted-source check, queue attribution
 
 From a live session's Chroma-HD-Flash troubleshooting log (real bug found and
