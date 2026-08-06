@@ -499,6 +499,39 @@ class Workflow:
                 if slot.link == lid:
                     slot.link = None
 
+    def group_bounding_for(self, node_ids: list[int]) -> list[float]:
+        """Bounding box enclosing exactly these nodes' real extents, with the
+        same padding/title-band geometry organize_workflow's own bands use
+        (graph/annotate.py) - hand-authored and generated groups end up
+        geometrically identical."""
+        members = [self.nodes[nid] for nid in node_ids]  # KeyError names the bad id
+        if not members:
+            raise ValueError("add_group/set_group needs at least one node_id")
+        min_x = min(n.pos[0] for n in members)
+        min_y = min(n.pos[1] for n in members)
+        max_x = max(n.pos[0] + n.size[0] for n in members)
+        max_y = max(n.pos[1] + n.size[1] for n in members)
+        pad = 30.0
+        return [
+            min_x - pad,
+            min_y - 70.0,
+            (max_x - min_x) + 2 * pad,
+            (max_y - min_y) + 90.0,
+        ]
+
+    def group_from_nodes(
+        self, title: str, node_ids: list[int], color: str = "#3f789e"
+    ) -> Group:
+        """Build a group from its members' extents, append it, and return it."""
+        group = Group(
+            id=len(self.groups) + 1,
+            title=title,
+            bounding=self.group_bounding_for(node_ids),
+            color=color,
+        )
+        self.groups.append(group)
+        return group
+
     def connect(
         self,
         origin_id: int,

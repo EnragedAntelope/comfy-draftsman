@@ -194,7 +194,7 @@ def test_annotate_reports_applied_changes(object_info):
 
     report = annotate(wf, object_info)
     applied = report["applied"]
-    assert applied["groups"] == [g.title for g in wf.groups] and applied["groups"]
+    assert applied["groups"] == [f"#{g.id} {g.title}" for g in wf.groups] and applied["groups"]
     assert applied["guidance_notes_added"] >= 1
     assert applied["nodes_retitled"] >= 1  # positive prompt got a role title
     assert applied["knobs_highlighted_green"] >= 1

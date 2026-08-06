@@ -17,7 +17,7 @@ from typing import Any
 
 from .. import knowledge
 from .layout import X_GUTTER, Y_GAP, apply_staged_layout, is_text_display, resolve_overlaps
-from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Group, Node, Workflow
+from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
 
@@ -603,30 +603,15 @@ def annotate(
         overlap_warning = surviving[0]["message"]
 
     # phase 4: group bounds from FINAL positions - computed last so a note (or
-    # anything else) that phase 3 moved is never left outside its own group
+    # anything else) that phase 3 moved is never left outside its own group.
+    # Same helper edit_workflow's add_group/set_group ops use, so a hand-made
+    # group and a generated one are geometrically identical.
     for stage_index, title, color, note_id in stage_meta:
         members = members_by_stage[stage_index]
         boxed = list(members)
         if note_id is not None and note_id in wf.nodes:
             boxed.append(wf.nodes[note_id])
-        min_x = min(n.pos[0] for n in boxed)
-        min_y = min(n.pos[1] for n in boxed)
-        max_x = max(n.pos[0] + n.size[0] for n in boxed)
-        max_y = max(n.pos[1] + n.size[1] for n in boxed)
-        pad = 30.0
-        wf.groups.append(
-            Group(
-                id=len(wf.groups) + 1,
-                title=title,
-                bounding=[
-                    min_x - pad,
-                    min_y - 70.0,
-                    (max_x - min_x) + 2 * pad,
-                    (max_y - min_y) + 90.0,
-                ],
-                color=color,
-            )
-        )
+        wf.group_from_nodes(title, [n.id for n in boxed], color=color)
     report: dict[str, Any] = {
         "family": family,
         "variant": (guidance or {}).get("variant"),
@@ -634,7 +619,7 @@ def annotate(
         "applied": {
             "layout": "staged pipeline bands (nodes repositioned; preview/Show Text "
             "nodes sit beside their source)",
-            "groups": [g.title for g in wf.groups],
+            "groups": [f"#{g.id} {g.title}" for g in wf.groups],
             "guidance_notes_added": notes_added,
             "nodes_retitled": titled,
             "knobs_highlighted_green": painted,

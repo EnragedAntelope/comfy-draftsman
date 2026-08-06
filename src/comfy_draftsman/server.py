@@ -158,6 +158,15 @@ def _wf(workflow_id: str) -> Workflow:
     return _session().get(workflow_id)
 
 
+def _find_group(wf: Workflow, group_id: int):
+    for g in wf.groups:
+        if g.id == group_id:
+            return g
+    # ValueError, not KeyError: the batch's KeyError handler says "unknown
+    # node id", which would misname a missing GROUP id
+    raise ValueError(f"no group #{group_id}; available: {[g.id for g in wf.groups]}")
+
+
 def _clip(v: Any) -> Any:
     return v[:120] + "…" if isinstance(v, str) and len(v) > 120 else v
 
@@ -407,7 +416,8 @@ def _summary(workflow_id: str, wf: Workflow) -> dict[str, Any]:
             and wf.nodes[ln.origin_id].type not in NOTE_TYPES
             and wf.nodes[ln.target_id].type not in NOTE_TYPES
         ],
-        "groups": [g.title for g in wf.groups],
+        # "#N title" - the id is what set_group/remove_group address
+        "groups": [f"#{g.id} {g.title}" for g in wf.groups],
     }
 
 
@@ -1054,6 +1064,10 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "set_widget": ({"node_id", "input", "value"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
+    "set_pos": ({"node_id", "pos"}, {"size"}),
+    "add_group": ({"title", "node_ids"}, {"color"}),
+    "set_group": ({"group_id"}, {"title", "node_ids", "color"}),
+    "remove_group": ({"group_id"}, set()),
     "add_node_to_definition": (
         {"definition_id", "class_type"},
         {"title", "widgets", "force"},
@@ -1116,17 +1130,22 @@ async def edit_workflow(
     remove_node_from_definition, and connect/set_widget/set_title/
     set_mode_in_definition. A malformed op reports its own required keys.
 
-    Slot and widget names come from get_node_info. Virtual (UI-only) classes:
-    "Note"/"MarkdownNote" take a single widget 'text'; "Reroute" and
-    "PrimitiveNode" take none at add time - connect a PrimitiveNode to a widget
-    input and it mirrors that socket's type (combos included), then set_widget
-    'value' and, for a number/combo, 'control_after_generate'
-    (fixed/randomize/increment/decrement) to advance it on every run.
+    Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
+    add_group {title, node_ids:[int,...], color?}; set_group {group_id, title?,
+    node_ids?, color?}; remove_group {group_id}. Groups are addressed by member
+    node_ids - bounding comes from their own extents. organize_workflow re-lays
+    out and re-groups everything, so run these AFTER it, not before.
 
-    Ops apply in order; a failing op stops the batch, reports what succeeded, and
-    leaves the graph unchanged by the failing op. Widget VALUES and link TYPES are
-    checked against the live schema at write time - add "force": true to a
-    set_widget/add_node/connect op to override.
+    Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
+    take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
+    PrimitiveNode to a widget input to mirror its type, then set_widget 'value'
+    (+ 'control_after_generate' for number/combo, to advance each run).
+
+    Ops apply in order; a failing op stops the batch (graph unchanged past that
+    point). Widget values and link types are checked live - "force": true on
+    set_widget/add_node/connect overrides; on connect it also lets a
+    frontend-only input (no /object_info entry - rgthree switches, dynamic
+    collectors) be wired by creating the socket.
 
     Result is a compact delta (applied ops + changed nodes); pass summary=true
     or call inspect_workflow for the full graph.
@@ -1250,6 +1269,41 @@ async def edit_workflow(
                 wf.nodes[int(op["node_id"])].mode = int(op["mode"])
                 touched.add(int(op["node_id"]))
                 applied.append(f"mode #{op['node_id']} = {op['mode']}")
+            elif kind == "set_pos":
+                node_id = int(op["node_id"])
+                node = wf.nodes[node_id]
+                pos = op["pos"]
+                if not (isinstance(pos, list | tuple) and len(pos) == 2):
+                    raise ValueError(f"set_pos: 'pos' must be [x, y]; got {pos!r}")
+                node.pos = [float(pos[0]), float(pos[1])]
+                if "size" in op:
+                    size = op["size"]
+                    if not (isinstance(size, list | tuple) and len(size) == 2):
+                        raise ValueError(f"set_pos: 'size' must be [w, h]; got {size!r}")
+                    node.size = [float(size[0]), float(size[1])]
+                touched.add(node_id)
+                applied.append(
+                    f"moved #{node_id} to {node.pos}"
+                    + (f", size {node.size}" if "size" in op else "")
+                )
+            elif kind == "add_group":
+                node_ids = [int(nid) for nid in op["node_ids"]]
+                group = wf.group_from_nodes(op["title"], node_ids, color=op.get("color", "#3f789e"))
+                applied.append(f"added group #{group.id} {group.title!r} ({len(node_ids)} nodes)")
+            elif kind == "set_group":
+                group = _find_group(wf, int(op["group_id"]))
+                if "title" in op:
+                    group.title = op["title"]
+                if "color" in op:
+                    group.color = op["color"]
+                if "node_ids" in op:
+                    node_ids = [int(nid) for nid in op["node_ids"]]
+                    group.bounding = wf.group_bounding_for(node_ids)
+                applied.append(f"updated group #{group.id} {group.title!r}")
+            elif kind == "remove_group":
+                group = _find_group(wf, int(op["group_id"]))
+                wf.groups = [g for g in wf.groups if g.id != group.id]
+                applied.append(f"removed group #{group.id}")
             elif kind == "add_node_to_definition":
                 definition_id = op["definition_id"]
                 class_type = op["class_type"]
@@ -1447,10 +1501,6 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     wf = _wf(workflow_id)
     object_info = await _object_info()
     report = annotate(wf, object_info, learned_dir=_config().learned_dir)
-    report["note"] = (
-        "workflow layout updated in place; save_workflow persists it, "
-        "export_workflow_json shows the reorganized graph"
-    )
     report["lint"] = _cap_lint(lint(wf, object_info))
     return report
 
@@ -1584,27 +1634,25 @@ async def run_workflow(
     wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
     workflow works before saving/delivering.
 
-    Text-only caller (no image input)? Pass return_preview=False and set save_dir
-    (or COMFYUI_MOUNT_DIR) so the result carries a file path instead of an inline
-    thumbnail - a vision-only tool or the user can open the file directly.
+    Text-only caller (no image input)? Pass return_preview=False - the result then
+    carries a file path instead of a thumbnail if save_dir/COMFYUI_MOUNT_DIR is set.
 
     roll_seeds=True (default) mirrors the browser: every seed AND PrimitiveNode
     whose control_after_generate is randomize/increment/decrement is re-rolled
-    before submit and the new value persisted. The raw /prompt API never does this,
-    so headless runs would otherwise repeat forever - and this is the only way to
-    advance a combo across runs. False re-runs the exact stored values.
+    before submit and the new value persisted - the raw /prompt API never does
+    this, so headless runs would otherwise repeat forever. False re-runs the
+    exact stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
     final judge; use it if a valid graph is wrongly blocked). save_dir (or the
     configured COMFYUI_MOUNT_DIR) relocates every finished output file - images,
-    video, audio alike - out of ComfyUI's output tree into a folder the caller can
-    reach, returning saved_paths, so a render is presentable in one call.
-    Relocation needs finished files: wait=True only; a background run relocates
+    video, audio alike - into a folder the caller can reach, returning
+    saved_paths. Needs finished files (wait=True); a background run relocates
     later via save_output(prompt_id=...).
 
-    front: None (default) refuses to queue when >=2 prompts are already pending and
-    returns {status: queue_busy} so the USER can choose; True runs next (pending
-    jobs untouched, never deleted); False waits at the back of the line."""
+    front: None (default) refuses to queue when >=2 prompts are already pending
+    and returns {status: queue_busy} so the USER can choose; True runs next
+    (pending jobs untouched); False waits at the back of the line."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
