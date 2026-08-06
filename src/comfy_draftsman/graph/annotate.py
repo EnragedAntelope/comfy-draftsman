@@ -307,6 +307,43 @@ def _wrap(text: str, width: int = 58) -> str:
     return "\n".join(textwrap.fill(line, width) for line in text.splitlines())
 
 
+def _graph_knobs(members: list[Node], object_info: dict[str, Any]) -> set[str]:
+    """Widget + connected-input names actually present on this stage's nodes -
+    the ground truth for what a 'safe ranges' note is allowed to mention. A
+    node without a 'cfg' widget in its schema (BasicGuider/SamplerCustomAdvanced
+    - H3's guidance-distilled chain) must never have CFG guidance asserted
+    about it, however confident the family guidance text is."""
+    knobs: set[str] = set()
+    for n in members:
+        knobs |= set(_safe_slots(n, object_info))
+        knobs |= {slot.name for slot in n.inputs}
+    return knobs
+
+
+_MEDIA_INPUT_TYPES = {"IMAGE": "images", "AUDIO": "audio", "VIDEO": "video"}
+
+
+def _output_medium(members: list[Node], object_info: dict[str, Any]) -> str:
+    """What an output-stage node actually writes, read from its OWN declared
+    input types - never hardcoded. Mixed or undetermined falls back to the
+    honest generic 'files' rather than guessing."""
+    media: set[str] = set()
+    for n in members:
+        schema = object_info.get(n.type) or {}
+        input_types = {
+            str(spec[0]).upper()
+            for section in ("required", "optional")
+            for spec in (schema.get("input", {}).get(section, {}) or {}).values()
+            if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str)
+        }
+        for type_name, label in _MEDIA_INPUT_TYPES.items():
+            if type_name in input_types:
+                media.add(label)
+    if len(media) == 1:
+        return next(iter(media))
+    return "files"
+
+
 def _note_text(
     stage: str,
     wf: Workflow,
@@ -345,6 +382,7 @@ def _note_text(
         if notes.get("conditioning"):
             lines.append(notes["conditioning"])
     elif stage == "sampling":
+        graph_knobs = _graph_knobs(members, object_info)
         sampler = next(
             (n for n in members if "sampling" in (object_info.get(n.type, {}).get("category") or "")),
             None,
@@ -363,12 +401,25 @@ def _note_text(
         if notes.get("latent"):
             lines.append("👇 " + notes["latent"])
         sampling = g.get("sampling", {})
-        if sampling and "cfg" in sampling:
-            cfg = sampling["cfg"]
-            lines.append(
-                f"Safe ranges: CFG {cfg.get('min')}-{cfg.get('max')}, "
-                f"steps {sampling.get('steps', {}).get('min')}-{sampling.get('steps', {}).get('max')}."
-            )
+        cfg_block = sampling.get("cfg") or {}
+        # a prose statement (H3: "No CFG - guidance-distilled") beats a numeric
+        # range when there isn't one - but only when the graph actually has a
+        # cfg knob to talk about (BasicGuider/SamplerCustomAdvanced don't)
+        if isinstance(cfg_block.get("note"), str) and "cfg" in graph_knobs:
+            lines.append(cfg_block["note"])
+        # each clause requires BOTH a real numeric min/max AND the knob being
+        # present on this graph's actual sampling nodes - the bug this fixes
+        # rendered "Safe ranges: CFG None-None, steps None-None." from a
+        # learned overlay whose cfg block was prose-only, with no numbers
+        range_clauses = [
+            f"{label} {block['min']}-{block['max']}"
+            for knob_key, label in (("cfg", "CFG"), ("steps", "steps"))
+            if knob_key in graph_knobs
+            and isinstance((block := sampling.get(knob_key) or {}).get("min"), int | float)
+            and isinstance(block.get("max"), int | float)
+        ]
+        if range_clauses:
+            lines.append("Safe ranges: " + ", ".join(range_clauses) + ".")
     elif stage == "post":
         for technique, settings in (g.get("techniques") or {}).items():
             hint = technique.replace("_", " ")
@@ -386,7 +437,8 @@ def _note_text(
             listed = ", ".join(steps[:4]) + (", …" if len(steps) > 4 else "")
             lines.append(f"⚙️ Extra image steps applied after generation: {listed}.")
     elif stage == "output":
-        lines.append("💾 Finished images land here (check the filename prefix).")
+        medium = _output_medium(members, object_info)
+        lines.append(f"💾 Finished {medium} land here (check the filename prefix).")
     elif stage == "inputs":
         if any(n.type in _INPUT_CLASSES for n in members):
             lines.append("👇 Load your source image/media here.")
