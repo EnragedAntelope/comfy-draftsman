@@ -1695,7 +1695,21 @@ async def run_workflow(
 
     front: None (default) refuses to queue when >=2 prompts are already pending
     and returns {status: queue_busy} so the USER can choose; True runs next
-    (pending jobs untouched); False waits at the back of the line."""
+    (pending jobs untouched); False waits at the back of the line.
+
+    LONG RENDERS / PAID PARTNER JOBS:
+
+    asyncio.timeout cancels the caller's wait, not the ComfyUI job. Submit
+    with wait=False, front=False and poll yourself (prompt_id stays in
+    manage_queue(status).draftsman_submitted for recovery):
+
+        pid = run_workflow(wait=False, front=False)["prompt_id"]
+        while True:
+            s = get_run_status(pid)
+            if s["status"] in ("success", "error", "partial"): break
+            time.sleep(3)
+        save_output(prompt_id=pid, dest_dir=...)
+"""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
@@ -2071,7 +2085,8 @@ def _history_error(history: dict[str, Any]) -> dict[str, Any] | None:
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def get_run_status(prompt_id: str) -> dict[str, Any]:
-    """Status of a run queued with run_workflow(wait=False): queue position, live
+    """Polling tool for runs queued with `run_workflow(wait=False)`. For long/paid renders, see `run_workflow`'s long-render pattern.
+    Status of a run queued with run_workflow(wait=False): queue position, live
     step progress while sampling, and outputs (+ error details) once finished."""
     client = _client()
     history = await client.get_history(prompt_id)

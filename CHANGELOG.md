@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.1 — Long-render pattern documentation
+
+Docs-only round from rtome's 2026-08-07 report on long-render sessions.
+
+### Documentation
+
+- `run_workflow` docstring now spells out the long-render / paid-partner
+  pattern with a poll-loop snippet (`wait=False` + `get_run_status`).
+- `get_run_status` docstring notes itself as the polling tool for `wait=False`.
+- ARCHITECTURE.md gotchas block gains an entry on what `asyncio.timeout`
+  cancels and why there is no auto-convert.
+- README "Run & watch" bullet points at the long-render pattern.
 ## 0.14.0 — Family detection, honest layout, reader-priority organization, knob cards
 
 From a live bug report building a MiniMax H3 R2V+Voice workflow (two real

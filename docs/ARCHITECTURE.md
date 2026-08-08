@@ -200,6 +200,22 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   clears/interrupts anything. The check is best-effort (an unreachable
   `/queue` never blocks a run) and happens before seeds are rolled, so a
   gated run doesn't advance increment seeds.
+- **Long renders and paid partner-node jobs: `wait=True` times out the
+  response, not the job.** The long-render pattern is
+  `run_workflow(wait=False, front=False)` → poll `get_run_status` → `save_output`
+  once it finishes — the only path that survives a render that outlives the
+  response. `asyncio.timeout` (`client.py:345`) cancels the synchronous
+  response, NOT the ComfyUI job: the run continues server-side and the render
+  still lands in ComfyUI's output tree. If the prompt_id was lost mid-run, it
+  is recoverable from `manage_queue(status)`'s `draftsman_submitted` map
+  (`server.py:2218`), or by a direct `/history/<prompt_id>` lookup. draftsman
+  intentionally does NOT auto-convert a timed-out `wait=True` into a background
+  run: the agent that called `wait=True` meant the synchronous contract, and
+  auto-conversion would silently change the response it receives — same logic
+  as front-of-queue never being destructive above. The recovery path is
+  documented here rather than papered over. Trigger: rtome's 2026-08-07 report
+  of a paid partner-node render that timed out on `wait=True` and initially
+  appeared lost.
 - **Muted/bypassed nodes are not validated, by design.** `to_api` drops mode-2
   (mute) and mode-4 (bypass) nodes, so their own widget values and unconnected
   inputs cannot break a run — and muting a branch is *the* standard way to
