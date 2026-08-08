@@ -8,6 +8,12 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # 15-min ceiling: the full suite runs in <60s on every matrix cell
+    # we've measured. Capping the job also surfaces GitHub-hosted
+    # runner-acquisition failures ("not acquired even after multiple
+    # attempts") as a fast, clear failure rather than a 15-minute hang
+    # that burns CI minutes before the runner ever starts.
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]

@@ -1697,19 +1697,11 @@ async def run_workflow(
     and returns {status: queue_busy} so the USER can choose; True runs next
     (pending jobs untouched); False waits at the back of the line.
 
-    LONG RENDERS / PAID PARTNER JOBS:
-
-    asyncio.timeout cancels the caller's wait, not the ComfyUI job. Submit
-    with wait=False, front=False and poll yourself (prompt_id stays in
-    manage_queue(status).draftsman_submitted for recovery):
-
-        pid = run_workflow(wait=False, front=False)["prompt_id"]
-        while True:
-            s = get_run_status(pid)
-            if s["status"] in ("success", "error", "partial"): break
-            time.sleep(3)
-        save_output(prompt_id=pid, dest_dir=...)
-"""
+    LONG RENDERS / PAID PARTNER JOBS: asyncio.timeout cancels the caller's
+    wait, not the ComfyUI job. Submit wait=False, front=False, then poll
+    get_run_status(prompt_id) until status is success/error/partial and call
+    save_output. prompt_id survives in manage_queue(status).draftsman_submitted
+    for recovery if your own session dies mid-poll."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
