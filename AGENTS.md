@@ -4,6 +4,16 @@ A local-first MCP server that drafts, organizes, validates, and runs ComfyUI wor
 
 **Deep reference: `docs/ARCHITECTURE.md` (read it before engine/graph/validation changes)**
 
+## Current state
+
+_Last verified: 2026-08-08_
+
+- **Status:** in development, released to `main` at v0.14.1 (`src/comfy_draftsman/__init__.py` is the single source of truth for the version). CI green. **Not published to PyPI** — installation is from source via `uv sync`.
+- **Works:** the full draft → organize → validate → run → save loop against a live ComfyUI instance; schema 0.4 and 1.0 graphs including subgraph flatten/rebuild; V3 dynamic combos, autogrow inputs and match types round-tripping through the API's dotted-key form; `organize_workflow`'s labeled stage groups, knob cards and guidance notes; workflow import straight from ComfyUI's browser (`list_workflows` + `import_workflow(name=…)`); the per-family knowledge floor plus a persistent learned overlay written by `record_learning`.
+- **In progress:** nothing half-built — each round lands complete. The most recent rounds were bug fixes and docs from live workflow-building reports; `CHANGELOG.md` records what each round changed and, importantly, what was deliberately *not* changed.
+- **Known gaps / next steps:** publishing to PyPI is planned but not done; `COMFY_DYNAMICSLOT_V3` is classified but never exercised (no live instance declares one — do not implement it speculatively); widget-backed custom-JS inputs stay a deliberate loud stop rather than a silently-wrong emit. Both open items are written up in full under `docs/ARCHITECTURE.md` → "Remaining TODOs".
+- **Deep docs:** `docs/ARCHITECTURE.md` (module map, data flow, subgraph mechanics, hard-won gotchas, open TODOs), `docs/PERMISSIONS.md` (which tools are read-only), `CHANGELOG.md`.
+
 ## Architecture in 60 seconds
 
 - **Thin MCP wiring layer.** `server.py` exposes tools/prompts; all logic lives in tested modules underneath. Ground truth is the live ComfyUI instance's `/object_info`.
