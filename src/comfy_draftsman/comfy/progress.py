@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sys
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -65,8 +66,12 @@ class ProgressTracker:
                         self.handle_event(json.loads(frame))
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass  # reconnect below; /history remains the source of truth
+            except Exception as e:
+                print(
+                    f"[draftsman] progress ws disconnected ({type(e).__name__}): {e}",
+                    file=sys.stderr,
+                )
+                # reconnect below; /history remains the source of truth
             finally:
                 self.connected = False
             await asyncio.sleep(_RECONNECT_DELAY)

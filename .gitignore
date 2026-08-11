@@ -33,3 +33,6 @@ Thumbs.db
 # Internal work plans / agent worklogs (keep local; public TODOs live in docs/ARCHITECTURE.md)
 docs/superpowers/
 docs/plans/
+
+# Secrets (API keys, credentials)
+.env*

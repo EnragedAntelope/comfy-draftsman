@@ -38,6 +38,8 @@ class Session:
         return self._titles.get(wf_id, "untitled")
 
     def set_title(self, wf_id: str, title: str) -> None:
+        if wf_id not in self._workflows and not self._load(wf_id):
+            raise KeyError(f"no workflow with id '{wf_id}'")
         self._titles[wf_id] = title
 
     def list(self) -> list[dict[str, Any]]:

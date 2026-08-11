@@ -106,6 +106,9 @@ class ComfyClient:
         return await self._get_json("/templates/index.json")
 
     async def get_template_workflow(self, name: str) -> dict[str, Any]:
+        clean = name.replace("\\", "/")
+        if clean.startswith("/") or ".." in clean.split("/"):
+            raise ValueError(f"invalid template name: {name!r}")
         return await self._get_json(f"/templates/{name}.json")
 
     async def queue_prompt(
