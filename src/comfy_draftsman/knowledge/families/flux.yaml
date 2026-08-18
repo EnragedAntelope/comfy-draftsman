@@ -45,6 +45,16 @@ sources:
   - match: ["ae.safetensors"]
     what: "FLUX VAE"
     url: "https://huggingface.co/black-forest-labs/FLUX.1-schnell/blob/main/ae.safetensors"
+# VRAM floor, not a ceiling: quantized runtimes (GGUF, nunchaku, fp4) move
+# these numbers constantly. Never add a number here without a `source` that
+# states it - test_hardware_fit.py fails the build otherwise.
+hardware:
+  vram_gb: {minimum: 12, recommended: 24}
+  notes: >-
+    12GB runs the fp8 checkpoint; under that ComfyUI offloads to system RAM
+    and renders get slower rather than failing. The full fp16 weights want
+    ~24GB. Swapping t5xxl_fp16 for t5xxl_fp8_e4m3fn saves several GB more.
+  source: "https://docs.comfy.org/tutorials/flux/flux-1-text-to-image"
 sampling:
   cfg: {min: 1.0, max: 1.0, default: 1.0}
   guidance: {min: 1.5, max: 5.0, default: 3.5}

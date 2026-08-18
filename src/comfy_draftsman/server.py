@@ -63,6 +63,11 @@ class _State:
     # server restart, or a prompt queued from the ComfyUI UI directly, is simply
     # unattributed, not an error.
     submitted: ClassVar[dict[str, str]] = {}
+    # /system_stats devices, cached for the process lifetime. VRAM *total* is
+    # what drives the fit verdict and cannot change while ComfyUI is running, so
+    # this is one HTTP call per session rather than one per guidance lookup.
+    # run_workflow's preflight refreshes it, because free VRAM does change.
+    devices: list[dict[str, Any]] | None = None
 
 
 # INVARIANT: the lazy accessors below (_config/_client/_registry/_session/
@@ -139,6 +144,45 @@ def _tracker() -> ProgressTracker:
     if _State.tracker is None:
         _State.tracker = ProgressTracker(_client()._ws_url)
     return _State.tracker
+
+
+async def _load_devices(refresh: bool = False) -> list[dict[str, Any]]:
+    """Cached device list from /system_stats (see _State.devices).
+
+    Async on purpose: the INVARIANT above keeps the lazy accessors synchronous,
+    so this must not become one. Two racing cold calls can both fetch, which is
+    harmless - the result is idempotent and holds no resource."""
+    if _State.devices is None or refresh:
+        stats = await _client().get_system_stats()
+        _State.devices = list(stats.get("devices") or [])
+    return _State.devices
+
+
+def _fit(guidance: dict[str, Any]) -> dict[str, Any] | None:
+    """knowledge.fit_verdict against the cached devices - None (emit nothing)
+    whenever the devices haven't been loaded yet."""
+    return knowledge.fit_verdict(guidance, _State.devices or [])
+
+
+async def _capacity(wf: Workflow, object_info: dict[str, Any]) -> dict[str, Any] | None:
+    """Pre-render fit verdict for the workflow's detected family, or None.
+
+    Best-effort in every direction: an undetectable family, an unreachable
+    instance, or a comfortable fit all return None. It NEVER blocks a run -
+    draftsman gates only on validate() errors, and a curated VRAM floor is not
+    authoritative enough to refuse someone their own hardware."""
+    with contextlib.suppress(Exception):
+        family = knowledge.detect_family(wf, object_info, learned_dir=_config().learned_dir)
+        if not family:
+            return None
+        # refresh: unlike get_model_guidance, this cares about FREE VRAM too,
+        # and that changes with every job the instance runs
+        await _load_devices(refresh=True)
+        guidance = knowledge.get_guidance(family, learned_dir=_config().learned_dir)
+        verdict = _fit(guidance)
+        if verdict:
+            return {"family": family, **verdict}
+    return None
 
 
 def _check_output_ref(filename: str, subfolder: str) -> str | None:
@@ -457,8 +501,19 @@ async def get_instance_info() -> dict[str, Any]:
     the user automatically, so surface that to them before spending a render."""
     stats = await _client().get_system_stats()
     queue = await _client().get_queue()
+    # seed the process-lifetime device cache while we're here - this is the
+    # "call first" tool, so the fit verdict usually costs no extra HTTP call
+    _State.devices = list(stats.get("devices") or [])
     devices = [
-        {"name": d.get("name"), "vram_total": d.get("vram_total"), "vram_free": d.get("vram_free")}
+        {
+            "name": d.get("name"),
+            "vram_total": d.get("vram_total"),
+            "vram_free": d.get("vram_free"),
+            # raw bytes are what ComfyUI reports; GB is what a human (or an
+            # agent comparing against a model's requirement) actually reasons in
+            "vram_total_gb": knowledge.bytes_to_gb(d.get("vram_total")),
+            "vram_free_gb": knowledge.bytes_to_gb(d.get("vram_free")),
+        }
         for d in stats.get("devices", [])
     ]
     return {
@@ -1722,6 +1777,9 @@ async def run_workflow(
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
+    # advisory only, and silent unless it has something to say
+    capacity = await _capacity(wf, object_info)
+    warn = {"capacity": capacity} if capacity else {}
     if roll_seeds and wf.apply_seed_control(object_info):
         # persist so inspect_workflow reflects what ran and increment/decrement
         # advance across calls; best-effort (a read-only session dir shouldn't
@@ -1766,7 +1824,9 @@ async def run_workflow(
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
         _record_submission(queued["prompt_id"], workflow_id)
-        response: dict[str, Any] = {"status": "queued", "prompt_id": queued["prompt_id"]}
+        response: dict[str, Any] = {
+            "status": "queued", "prompt_id": queued["prompt_id"], **warn
+        }
         if save_dir:
             # relocation happens after a run finishes, and this call returns
             # before that - say so rather than silently ignoring save_dir
@@ -1786,6 +1846,7 @@ async def run_workflow(
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
     _record_submission(result["prompt_id"], workflow_id)
+    result.update(warn)
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
     # relocating/previewing whatever DID render, but downgrade to "partial" so the
     # dropped outputs aren't mistaken for a clean run.
@@ -2361,24 +2422,35 @@ async def search_node_packs(query: str) -> list[dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-@mcp.tool(annotations=_READ_LOCAL)
+@mcp.tool(annotations=_READ_INSTANCE)
 async def get_model_guidance(family: str = "", model_filename: str = "") -> dict[str, Any]:
     """Tuned settings for a model family: sampling (CFG/steps/samplers), native
     resolutions, technique blocks (face_detailer, hires_fix...), prompt style notes.
     Variant-aware: pass model_filename so turbo/lightning/distill overrides apply.
     Includes any learned overlay from past research plus a research directive -
-    for brand-new models, verify online and record_learning what you find."""
+    for brand-new models, verify online and record_learning what you find. A `fit`
+    block appears only when this GPU can't comfortably hold the model."""
     learned = _config().learned_dir
     if not family:
         return {"families": knowledge.list_families(learned)}
     try:
-        return _cap_sources(knowledge.get_guidance(family, model_filename or None, learned_dir=learned))
+        guidance = knowledge.get_guidance(family, model_filename or None, learned_dir=learned)
     except KeyError:
         return {
             "error": f"no knowledge for '{family}'",
             "families": knowledge.list_families(learned),
             "hint": "research current best settings online, then record_learning them",
         }
+    # The verdict is best-effort: guidance is the valuable part, and an
+    # unreachable instance must never turn a knowledge lookup into an error.
+    with contextlib.suppress(Exception):
+        await _load_devices()
+    fit = _fit(guidance)
+    # The raw hardware block (both numbers, prose notes, a URL) would otherwise
+    # ride along on EVERY guidance call while being useful only when the verdict
+    # is bad. fit_verdict folds what matters into `fit`; the rest is dropped.
+    guidance.pop("hardware", None)
+    return _cap_sources({**guidance, **({"fit": fit} if fit else {})})
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)

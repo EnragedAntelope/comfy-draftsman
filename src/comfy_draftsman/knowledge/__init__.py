@@ -318,3 +318,111 @@ def detect_family(
     """Family detection from model filenames. See detect_family_detail for the
     full mechanics and matched-pattern provenance."""
     return detect_family_detail(wf, object_info, learned_dir=learned_dir)["family"]
+
+
+# Drivers report a little under the marketing capacity (a "16GB" card reports
+# 15.99GB, and some reserve a slice for display), so a floor is met when the
+# device is within this much of it. Without the slack every exactly-spec'd card
+# would be told it is insufficient.
+_VRAM_SLACK_GB = 0.5
+
+
+def bytes_to_gb(value: Any) -> float | None:
+    """Bytes -> GB, rounded to one decimal. None for anything non-numeric -
+    /system_stats has been seen returning nulls for a CPU-only device."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return round(float(value) / (1024**3), 1)
+
+
+def _largest_device(devices: list[dict[str, Any]]) -> tuple[float, float | None] | None:
+    """(total_gb, free_gb) of the device with the most VRAM, or None if no
+    device reports a usable total. Largest, not first: a laptop with an iGPU at
+    index 0 must not be mistaken for the card the render will actually run on."""
+    best: tuple[float, float | None] | None = None
+    for device in devices or []:
+        total = bytes_to_gb(device.get("vram_total"))
+        if total is None or total <= 0:
+            continue
+        if best is None or total > best[0]:
+            best = (total, bytes_to_gb(device.get("vram_free")))
+    return best
+
+
+def _num(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def fit_verdict(
+    guidance: dict[str, Any], devices: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Will this family's model actually run on this hardware? None when there
+    is nothing worth saying.
+
+    None - not "ok" - is the common answer, and deliberately so: no curated
+    ``hardware`` block, no devices, or a comfortable fit all mean the caller
+    emits no key at all. A block that says "everything is fine" is pure token
+    cost on every call, forever.
+
+    The comparison is against vram_TOTAL, never vram_free. A free-VRAM shortfall
+    is "release the cached model first", not "this model does not fit your GPU" -
+    conflating them produces a wrong verdict every time another job is resident.
+    Free VRAM gets its own, separately actionable ``tight`` verdict.
+
+    ``hardware`` deep-merges from a variant overlay like every other block, so a
+    variant with a genuinely different floor must restate BOTH ``minimum`` and
+    ``recommended`` - lowering only one leaves the family's other number in
+    place (the same convention sdxl/turbo follows for min/max/default).
+    """
+    vram = ((guidance.get("hardware") or {}).get("vram_gb")) or {}
+    minimum = _num(vram.get("minimum"))
+    recommended = _num(vram.get("recommended"))
+    if minimum is None and recommended is None:
+        return None
+    device = _largest_device(devices)
+    if device is None:
+        return None
+    total, free = device
+    hardware = guidance.get("hardware") or {}
+    notes = str(hardware.get("notes") or "").strip()
+    source = str(hardware.get("source") or "")
+
+    def _verdict(kind: str, required: float, advice: str) -> dict[str, Any]:
+        return {
+            "verdict": kind,
+            "vram_total_gb": total,
+            "required_gb": required,
+            "advice": f"{advice} {notes}".strip(),
+            **({"source": source} if source else {}),
+        }
+
+    floor = minimum if minimum is not None else recommended
+    if floor is None:  # unreachable - one of the two is set - but not asserted
+        return None
+    if total + _VRAM_SLACK_GB < floor:
+        return _verdict(
+            "insufficient",
+            floor,
+            f"{total}GB of VRAM is below the {floor}GB this family needs - expect "
+            "heavy offloading to system RAM, or an out-of-memory failure.",
+        )
+    # Enough installed, but something else is holding it. Actionable right now,
+    # so it wins over the headroom note below.
+    if free is not None and free + _VRAM_SLACK_GB < floor:
+        return _verdict(
+            "tight",
+            floor,
+            f"only {free}GB of the card's {total}GB is free - free the cached model "
+            "first with manage_queue(action='free', unload_models=True).",
+        )
+    if recommended is not None and total + _VRAM_SLACK_GB < recommended:
+        return _verdict(
+            "tight",
+            recommended,
+            f"{total}GB runs this family but is under the {recommended}GB recommended - "
+            "expect offloading, and prefer the quantized weights.",
+        )
+    return None
+

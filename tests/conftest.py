@@ -23,3 +23,6 @@ def _isolated_submitted_prompts(monkeypatch):
     from comfy_draftsman import server
 
     monkeypatch.setattr(server._State, "submitted", {})
+    # same story for the process-lifetime device cache: one test's fake 8GB GPU
+    # would otherwise decide another test's fit verdict
+    monkeypatch.setattr(server._State, "devices", None)

@@ -6,6 +6,15 @@ loader: unet_clip_vae
 components:
   text_encoders: ["umt5_xxl fp8 (CLIPLoader, type=wan)"]
   vae: "wan_2.1_vae.safetensors (2.2 uses same VAE except the 5B ti2v model)"
+# Video is the case where VRAM actually decides whether a render happens at
+# all, so this is the family the fit verdict matters most for.
+hardware:
+  vram_gb: {minimum: 8, recommended: 24}
+  notes: >-
+    The 5B model fits in 8GB with ComfyUI's native offloading; the 14B models
+    are the reason for the 24GB figure - between 8 and 24GB video is slow or
+    will not fit at all. fp8_scaled 14B checkpoints are the low-VRAM path.
+  source: "https://docs.comfy.org/installation/system_requirements"
 sampling:
   cfg: {min: 3.0, max: 6.0, default: 5.0}
   steps: {min: 20, max: 30, default: 25}
