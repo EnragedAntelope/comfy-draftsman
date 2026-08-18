@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes to PyPI via Trusted Publishing (OIDC) - no API token is ever stored
+# in this repo. The `pypi` / `testpypi` GitHub environments and the matching
+# pending publishers on (test.)pypi.org are configured once, by hand; see
+# README.md -> "Publishing a release".
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      # A tag that disagrees with comfy_draftsman.__version__ publishes a
+      # surprise version - and PyPI never lets a version number be reused, so
+      # the mistake is permanent. Fail before the build instead.
+      - name: Tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(grep -oP '(?<=^__version__ = ")[^"]+' src/comfy_draftsman/__init__.py)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag package=$version"
+          test "$tag" = "$version" || {
+            echo "::error::tag v$tag does not match __version__ $version"
+            exit 1
+          }
+
+      - name: Build
+        run: uv build
+
+      # Same assertion as CI's `package` job: the wheel ships non-Python data
+      # (knowledge/families/*.yaml) that no unit test can prove landed in it.
+      - name: Knowledge data is importable from the built wheel
+        shell: bash
+        run: |
+          wheel=$(ls dist/*.whl)
+          uv run --isolated --no-project --with "$wheel" python -c "
+          import comfy_draftsman, comfy_draftsman.knowledge as k
+          families = k.list_families()
+          print(comfy_draftsman.__version__, families)
+          assert 'flux' in families and 'sdxl' in families, families
+          assert k.get_guidance('flux')['sampling'], 'guidance YAML did not ship'
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A tag push always goes to the real index; workflow_dispatch picks.
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'pypi' }}
+    permissions:
+      id-token: write # Trusted Publishing supplies the credential via OIDC
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # Two steps rather than a computed `repository-url`: the action defaults
+      # to the real index, and an empty string is not the same as "unset".
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # no API token is passed at all - the credential comes from OIDC
+          repository-url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        if: github.event_name != 'workflow_dispatch' || inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

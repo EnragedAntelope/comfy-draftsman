@@ -31,13 +31,17 @@ Every agent tool for ComfyUI can emit raw API-format JSON — a working but unre
 
 ## Install
 
+```bash
+uv tool install comfy-draftsman     # or: pip install comfy-draftsman
+```
+
 **Claude Code:**
 
 ```bash
 claude mcp add comfy-draftsman \
   -e COMFYUI_URL=http://127.0.0.1:8188 \
   -e COMFYUI_MOUNT_DIR=/path/your/agent/can/reach \
-  -- uvx --from git+https://github.com/EnragedAntelope/comfy-draftsman comfy-draftsman
+  -- uvx comfy-draftsman
 ```
 
 **Claude Desktop / other MCP clients** (`mcpServers` config):
@@ -47,7 +51,7 @@ claude mcp add comfy-draftsman \
   "mcpServers": {
     "comfy-draftsman": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/EnragedAntelope/comfy-draftsman", "comfy-draftsman"],
+      "args": ["comfy-draftsman"],
       "env": {
         "COMFYUI_URL": "http://127.0.0.1:8188",
         "COMFYUI_MOUNT_DIR": "/path/your/agent/can/reach"
@@ -56,6 +60,10 @@ claude mcp add comfy-draftsman \
   }
 }
 ```
+
+**From source** (contributors, or to run an unreleased commit) — replace
+`comfy-draftsman` in either config with
+`--from git+https://github.com/EnragedAntelope/comfy-draftsman comfy-draftsman`.
 
 `COMFYUI_MOUNT_DIR` is optional but recommended: it's a folder your agent (or a
 sandboxed client like Claude Desktop / Cowork) can actually read, and `save_output`
@@ -192,6 +200,20 @@ uv run ruff check .
 ```
 
 The repo's `.comfyui-test/` convention (gitignored) holds a disposable ComfyUI clone for integration testing — see `tests/test_integration_live.py`.
+
+### Publishing a release
+
+`.github/workflows/release.yml` publishes to PyPI via **Trusted Publishing** —
+no API token is stored in this repo. One-time setup: create the `pypi` and
+`testpypi` GitHub environments, then register a pending publisher on
+pypi.org and test.pypi.org (owner `EnragedAntelope`, repo `comfy-draftsman`,
+workflow `release.yml`, matching environment name).
+
+Then: *Actions → Release → Run workflow → `testpypi`* for a dry run, and
+`git tag vX.Y.Z && git push origin vX.Y.Z` for the real thing. The workflow
+refuses to publish when the tag disagrees with `comfy_draftsman.__version__`,
+and re-runs CI's wheel-data assertion before uploading. A PyPI version number
+can never be reused — do the TestPyPI run first.
 
 ## Acknowledgments
 
