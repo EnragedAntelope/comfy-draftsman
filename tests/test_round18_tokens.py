@@ -9,6 +9,10 @@ unbounded list fails here instead of in someone's conversation.
 Ceilings are deliberately loose (roughly 2x the current measured size): they are
 regression guards, not golden-master assertions, and should not need editing for
 ordinary wording changes.
+
+The one exception is the tool-surface ceiling at the bottom of this file. That
+budget is paid on every request rather than only when a tool is called, so it is
+held tight on purpose and raising it is a deliberate decision, not a fix.
 """
 
 import json
@@ -216,3 +220,86 @@ async def test_search_nodes_detail_folds_everything_when_it_fits(
     results = await server.search_nodes(query="KSampler", limit=3, detail=True)
     assert results and all("schema" in r for r in results)
     assert not any("note" in r for r in results)
+
+
+# --- the always-loaded surface: the ceiling that governs every new feature ---
+#
+# Tool descriptions and input schemas are re-sent on EVERY request for the life
+# of the session, whether or not a single tool is called. That makes them the
+# one budget where a "small addition" compounds without limit, and the reason
+# 0.15.0 added four features with one new parameter between them. Measured
+# 21,910 chars / 29 tools at the time of writing; the ceiling leaves ~1% of
+# headroom and no more. If this fails, the fix is to trim an existing docstring,
+# not to raise the number - move the explanation into the response that needs
+# it, where only the caller who hit that path pays for it.
+
+
+async def _surface():
+    tools = await server.mcp.list_tools()
+    return tools, sum(
+        len(t.description or "") + len(json.dumps(t.inputSchema)) for t in tools
+    )
+
+
+@pytest.mark.asyncio
+async def test_total_tool_surface_stays_under_the_ceiling():
+    tools, total = await _surface()
+    assert total <= 22_200, (
+        f"tool descriptions + schemas grew to {total} chars. Pay for new text by "
+        "trimming existing text, or teach it in a response instead."
+    )
+    assert len(tools) == 29, (
+        "a new tool costs its full description on every request, forever - "
+        "extend an existing tool instead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_handshake_block_stays_under_its_ceiling():
+    """Paid once per session, by every session - including the ones that never
+    queue a paid render or touch a small GPU. Gates teach through their own
+    responses precisely so this does not have to grow."""
+    assert len(server.mcp.instructions or "") <= 900
+
+
+@pytest.mark.asyncio
+async def test_the_injected_context_parameter_costs_nothing():
+    """FastMCP hides Context from the JSON schema. The spend gate's whole
+    token story depends on that being true rather than assumed."""
+    tools, _ = await _surface()
+    for tool in tools:
+        assert "ctx" not in (tool.inputSchema.get("properties") or {}), tool.name
+
+
+# --- gate payloads ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_guidance_costs_nothing_extra_on_a_comfortable_gpu(monkeypatch, tmp_path):
+    """The overwhelmingly common call must return exactly what it always did."""
+    monkeypatch.setattr(server._State, "config", server.Config(session_dir=tmp_path))
+    monkeypatch.setattr(server._State, "devices", [
+        {"name": "big", "vram_total": 48 * 1024**3, "vram_free": 48 * 1024**3}
+    ])
+    result = await server.get_model_guidance(family="flux")
+    assert "fit" not in result
+    assert "hardware" not in result  # the raw block never rides along
+
+
+@pytest.mark.asyncio
+async def test_a_fit_verdict_is_a_few_hundred_chars_not_a_lecture(monkeypatch, tmp_path):
+    monkeypatch.setattr(server._State, "config", server.Config(session_dir=tmp_path))
+    monkeypatch.setattr(server._State, "devices", [
+        {"name": "small", "vram_total": 6 * 1024**3, "vram_free": 6 * 1024**3}
+    ])
+    result = await server.get_model_guidance(family="flux")
+    assert result["fit"]["verdict"] == "insufficient"
+    assert _chars(result["fit"]) < 800
+
+
+def test_the_spend_payload_is_capped_no_matter_how_paid_the_graph_is():
+    nodes = [{"node_id": i, "class_type": "SomePartnerNode", "title": "t" * 40} for i in range(60)]
+    payload = server._spend_payload(nodes)
+    assert len(payload["api_nodes"]) == server._API_NODES_CAP
+    assert payload["api_nodes_truncated"] == 60 - server._API_NODES_CAP
+    assert _chars(payload) < 2_000
