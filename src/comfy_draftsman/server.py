@@ -1927,7 +1927,14 @@ async def run_workflow(
         dest_root, mount_error = _resolve_dest("")  # resolves + creates the mount dir
     # Only now that the run is definitely going ahead: rolling seeds MUTATES and
     # persists the stored workflow, and a refused run that still advanced the
-    # seed would drift the user's graph without ever queueing anything.
+    # seed would drift the user's graph without ever queueing anything. Every
+    # early return above this line therefore leaves the stored seed untouched.
+    #
+    # A submit that FAILS (ComfyUI rejects the prompt, or the instance drops) is
+    # deliberately not rolled back. The browser advances the seed at queue time
+    # the same way, and a rollback would be wrong in the ambiguous case that
+    # matters most - a connection lost after the prompt was accepted would
+    # restore a seed that has already rendered.
     if roll_seeds and wf.apply_seed_control(object_info):
         # persist so inspect_workflow reflects what ran and increment/decrement
         # advance across calls; best-effort (a read-only session dir shouldn't

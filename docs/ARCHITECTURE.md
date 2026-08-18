@@ -127,7 +127,12 @@ Detection runs **only in `run_workflow`**, never in validate/lint/organize
 where it would cost payload for no gain. It sits after `to_api` and **before**
 `apply_seed_control`: rolling seeds mutates and persists the stored workflow,
 so a refused run that had already rolled would drift the user's graph on every
-declined prompt without queueing anything.
+declined prompt without queueing anything. Every early return in `run_workflow`
+- queue_busy, invalid, the spend gate, an unusable `save_dir` - is above the
+roll for the same reason. A submit that *fails* is not rolled back: the browser
+advances the seed at queue time too, and a rollback would restore an
+already-rendered seed whenever a connection drops after the prompt was
+accepted.
 
 `_confirm()` carries a three-way degrade shared by all three call sites:
 
