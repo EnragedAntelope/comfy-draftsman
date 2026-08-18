@@ -6,8 +6,10 @@ Three gaps closed against what a local ComfyUI MCP server is expected to do:
 be installable from an index, refuse to let a user sink a render into a GPU
 that cannot hold the model, and refuse to spend credits without consent. All
 three added **without measurably growing what every request pays for** — the
-tool surface went from 21,724 to 21,910 chars across 29 tools (+0.9%), and the
-handshake block is unchanged at 885 chars.
+tool surface went from 21,724 to 21,974 chars across 29 tools (+1.2%, ceiling
+22,200), and the handshake block is unchanged at 885 chars. Two new parameters
+between all four features (`run_workflow.confirm_spend`, `manage_queue.confirm`),
+both optional.
 
 ### Added
 

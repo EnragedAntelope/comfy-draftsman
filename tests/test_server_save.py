@@ -90,6 +90,18 @@ async def test_save_overwrite_asks_when_the_client_can(wired):
     assert "menu" in ctx.messages[0]
 
 
+async def test_save_overwrite_of_a_free_name_asks_nothing(wired):
+    """overwrite=True on a name nobody has taken destroys nothing. Prompting
+    there would claim 'the current file is lost' about a file that does not
+    exist, and a decline would refuse a completely harmless save."""
+    client, wf_id = wired
+    ctx = _Accept(accept=False)
+    result = await server.save_workflow(wf_id, "fresh", overwrite=True, ctx=ctx)
+    assert result["saved"] is True
+    assert client.saved == ["fresh.json"]
+    assert ctx.messages == []
+
+
 async def test_save_overwrite_declined_writes_nothing(wired):
     client, wf_id = wired
     result = await server.save_workflow(wf_id, "menu", overwrite=True, ctx=_Accept(accept=False))

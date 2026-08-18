@@ -99,7 +99,9 @@ the process lifetime, seeded by `get_instance_info` (the "call first" tool) and
 loaded lazily otherwise. This is safe because VRAM *total* cannot change while
 ComfyUI is running, and total is what drives the verdict. `run_workflow`'s
 preflight re-reads live (`_load_devices(refresh=True)`) precisely because free
-VRAM does change. `_load_devices` is `async` on purpose: the lazy accessors
+VRAM does change - and `_fit(guidance, live=False)`, the default, **strips
+`vram_free` before comparing**, so a cached snapshot can never produce a stale
+"only 1GB of your 24GB is free" verdict hours after that job finished. `_load_devices` is `async` on purpose: the lazy accessors
 above it must stay synchronous (see the INVARIANT comment in `server.py`), and
 two racing cold calls here are harmless - the fetch is idempotent and holds no
 resource.
@@ -111,11 +113,21 @@ resource.
 `api_node` boolean; a `category` starting with `api node` is the fallback for
 instances predating the flag. **A missing field means not billable** - failing
 open is deliberate, because over-prompting on every unclassifiable node trains
-users to click through the one prompt that matters. Muted and bypassed nodes
-are excluded: they never reach the executor.
+users to click through the one prompt that matters.
+
+**It reads the API prompt, not the editing graph.** `to_api()` has already
+flattened subgraph instances and dropped muted/bypassed nodes, so the API
+prompt is by definition exactly what `POST /prompt` will execute. Scanning
+`wf.nodes` instead misses a partner node packaged inside a subgraph - whose
+node type is a definition uuid appearing nowhere in `object_info` - and bills
+the user silently. Regression-tested both in `tests/test_spend_gate.py` and
+through the protocol in `tests/test_mcp_offline.py`.
 
 Detection runs **only in `run_workflow`**, never in validate/lint/organize
-where it would cost payload for no gain.
+where it would cost payload for no gain. It sits after `to_api` and **before**
+`apply_seed_control`: rolling seeds mutates and persists the stored workflow,
+so a refused run that had already rolled would drift the user's graph on every
+declined prompt without queueing anything.
 
 `_confirm()` carries a three-way degrade shared by all three call sites:
 
@@ -127,9 +139,19 @@ where it would cost payload for no gain.
 
 That last fork is per call site, not policy. `run_workflow` and `manage_queue`
 refuse by default - a wrong "yes" spends money or destroys someone else's
-render, and neither is recoverable. `save_workflow(overwrite=True)` proceeds,
-because the caller already passed an explicit destructive flag and refusing
-would make the feature unusable on every non-eliciting client.
+render, and neither is recoverable - but each carries an explicit opt-in
+(`confirm_spend`, `confirm`) so a non-eliciting client is inconvenienced, not
+locked out. `save_workflow(overwrite=True)` proceeds instead, because the
+caller already passed an explicit destructive flag; it also only asks once a
+`FileExistsError` proves a real file is about to be replaced, since overwriting
+a free name destroys nothing.
+
+`_Confirmation.confirm` is a **required** field with no default. An optional
+one is a field a client may omit from its form entirely - and then a user who
+pressed Accept comes back as `confirm: false` and is told they declined, the
+opposite of what they chose. Required means the client must collect an answer;
+a response missing it fails validation and lands on the cannot-ask path, which
+is honest about not knowing rather than inventing a refusal.
 
 `manage_queue`'s gate is deliberately **precise**: interrupt/clear/delete only
 prompt when the affected prompt_ids are absent from `_State.submitted`, i.e.

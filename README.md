@@ -31,9 +31,9 @@ Every agent tool for ComfyUI can emit raw API-format JSON — a working but unre
 
 ## Install
 
-```bash
-uv tool install comfy-draftsman     # or: pip install comfy-draftsman
-```
+> **Not on PyPI yet.** The release pipeline is wired and the first tag is
+> pending, so **use the git install below today**; the `comfy-draftsman`
+> shorthand starts working the moment `v0.15.0` is published.
 
 **Claude Code:**
 
@@ -41,7 +41,7 @@ uv tool install comfy-draftsman     # or: pip install comfy-draftsman
 claude mcp add comfy-draftsman \
   -e COMFYUI_URL=http://127.0.0.1:8188 \
   -e COMFYUI_MOUNT_DIR=/path/your/agent/can/reach \
-  -- uvx comfy-draftsman
+  -- uvx --from git+https://github.com/EnragedAntelope/comfy-draftsman comfy-draftsman
 ```
 
 **Claude Desktop / other MCP clients** (`mcpServers` config):
@@ -51,7 +51,7 @@ claude mcp add comfy-draftsman \
   "mcpServers": {
     "comfy-draftsman": {
       "command": "uvx",
-      "args": ["comfy-draftsman"],
+      "args": ["--from", "git+https://github.com/EnragedAntelope/comfy-draftsman", "comfy-draftsman"],
       "env": {
         "COMFYUI_URL": "http://127.0.0.1:8188",
         "COMFYUI_MOUNT_DIR": "/path/your/agent/can/reach"
@@ -61,9 +61,10 @@ claude mcp add comfy-draftsman \
 }
 ```
 
-**From source** (contributors, or to run an unreleased commit) — replace
-`comfy-draftsman` in either config with
-`--from git+https://github.com/EnragedAntelope/comfy-draftsman comfy-draftsman`.
+**Once published**, drop the `git+https` indirection — `uv tool install
+comfy-draftsman` (or `pip install comfy-draftsman`) puts the server on PATH,
+and both configs above shorten to plain `uvx comfy-draftsman` /
+`"args": ["comfy-draftsman"]`.
 
 `COMFYUI_MOUNT_DIR` is optional but recommended: it's a folder your agent (or a
 sandboxed client like Claude Desktop / Cowork) can actually read, and `save_output`

@@ -160,18 +160,36 @@ async def _load_devices(refresh: bool = False) -> list[dict[str, Any]]:
     return _State.devices
 
 
-def _fit(guidance: dict[str, Any]) -> dict[str, Any] | None:
+def _fit(guidance: dict[str, Any], live: bool = False) -> dict[str, Any] | None:
     """knowledge.fit_verdict against the cached devices - None (emit nothing)
-    whenever the devices haven't been loaded yet."""
-    return knowledge.fit_verdict(guidance, _State.devices or [])
+    whenever the devices haven't been loaded yet.
+
+    ``live=False`` strips vram_free before comparing. The cache is only sound
+    for VRAM *total*, which cannot change while ComfyUI is running; a free-VRAM
+    figure snapshotted during someone else's render would otherwise still be
+    reporting "only 1GB of your 24GB is free" hours later. Only a caller that
+    just re-read /system_stats (run_workflow's preflight) passes live=True.
+    """
+    devices = _State.devices or []
+    if not live:
+        devices = [{k: v for k, v in d.items() if k != "vram_free"} for d in devices]
+    return knowledge.fit_verdict(guidance, devices)
 
 
 class _Confirmation(BaseModel):
     """Elicitation form for anything irreversible or billable. One boolean:
     MCP elicitation only allows primitive fields, and anything richer would be
-    a decision the user has already been asked to make in prose."""
+    a decision the user has already been asked to make in prose.
 
-    confirm: bool = Field(default=False, description="Yes, go ahead")
+    REQUIRED, deliberately - no default. An optional field is one a client may
+    omit from its form entirely, and then a user who pressed Accept comes back
+    as ``confirm: false`` and is told they declined, which is the opposite of
+    what they chose. Required means the client has to collect an answer; a
+    response missing it fails validation and lands on the cannot-ask path,
+    which is honest about not knowing rather than inventing a refusal.
+    """
+
+    confirm: bool = Field(description="Yes, go ahead")
 
 
 async def _confirm(
@@ -208,7 +226,8 @@ async def _confirm(
                 return None
             return {
                 "status": f"{prefix}_declined",
-                "hint": "the user declined - nothing was done. Ask what they want instead.",
+                "hint": "the user did not confirm - nothing was done. Ask what they "
+                "want instead; do not re-issue the same call.",
             }
     if fallback_hint is None:
         return None
@@ -250,7 +269,7 @@ async def _capacity(wf: Workflow, object_info: dict[str, Any]) -> dict[str, Any]
         # and that changes with every job the instance runs
         await _load_devices(refresh=True)
         guidance = knowledge.get_guidance(family, learned_dir=_config().learned_dir)
-        verdict = _fit(guidance)
+        verdict = _fit(guidance, live=True)
         if verdict:
             return {"family": family, **verdict}
     return None
@@ -1851,12 +1870,6 @@ async def run_workflow(
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
-    if roll_seeds and wf.apply_seed_control(object_info):
-        # persist so inspect_workflow reflects what ran and increment/decrement
-        # advance across calls; best-effort (a read-only session dir shouldn't
-        # block the run)
-        with contextlib.suppress(OSError):
-            _session().persist(workflow_id)
     if not allow_invalid:
         errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
         if errors:
@@ -1872,12 +1885,14 @@ async def run_workflow(
         api = wf.to_api(object_info)
     except ValueError as e:
         return {"status": "invalid", "error": str(e)}
-    # advisory only, and silent unless it has something to say
+    # advisory only, and silent unless it has something to say. Both checks sit
+    # here, after to_api: they describe what would actually be submitted, and
+    # neither is worth computing for a graph that cannot be.
     capacity = await _capacity(wf, object_info)
     warn = {"capacity": capacity} if capacity else {}
     # Partner/API nodes spend the user's money, so this gate fires BEFORE
     # anything is queued and returns rather than raises.
-    billable = api_nodes(wf, object_info)
+    billable = api_nodes(api, object_info)
     if billable:
         if not _config().comfy_api_key:
             # today this surfaces as an opaque queue-time "Unauthorized"; the
@@ -1900,6 +1915,16 @@ async def run_workflow(
             )
             if refusal is not None:
                 return {**refusal, **_spend_payload(billable), **warn}
+    # Only now that the run is definitely going ahead: rolling seeds MUTATES and
+    # persists the stored workflow, and a refused run that still advanced the
+    # seed would drift the user's graph without ever queueing anything.
+    if roll_seeds and wf.apply_seed_control(object_info):
+        # persist so inspect_workflow reflects what ran and increment/decrement
+        # advance across calls; best-effort (a read-only session dir shouldn't
+        # block the run)
+        with contextlib.suppress(OSError):
+            _session().persist(workflow_id)
+        api = wf.to_api(object_info)  # re-serialize with the rolled values
     # Where to relocate finished renders: an explicit save_dir, else the
     # configured mount dir (auto-relocate). None -> leave outputs in ComfyUI.
     dest_root: Path | None = None
@@ -2360,7 +2385,11 @@ async def upload_image(
 
 
 async def _confirm_destroys_others(
-    ctx: Context | None, client: ComfyClient, action: str, prompt_ids: list[str] | None
+    ctx: Context | None,
+    client: ComfyClient,
+    action: str,
+    prompt_ids: list[str] | None,
+    confirm: bool,
 ) -> dict[str, Any] | None:
     """Confirm interrupt/clear/delete, but ONLY when it would destroy work this
     session did not queue. None = go ahead.
@@ -2372,6 +2401,8 @@ async def _confirm_destroys_others(
     unreachable /queue is not a reason to block: the same best-effort posture
     as run_workflow's queue etiquette check.
     """
+    if confirm:
+        return None  # the user has already been asked
     try:
         queue = await client.get_queue()
         running = [entry[1] for entry in queue.get("queue_running", [])]
@@ -2393,9 +2424,9 @@ async def _confirm_destroys_others(
         f"manage_queue(action='{action}') will discard {len(foreign)} queued render(s) "
         "this session did not submit - most likely the user's own jobs. Continue?",
         f"NOTHING WAS DISCARDED. {len(foreign)} of the affected prompt(s) were queued "
-        "outside this session (the user's own jobs, or another agent's). Confirm with "
-        "the user first; manage_queue(action='status') lists what is queued and which "
-        "prompts are draftsman's.",
+        "outside this session (the user's own jobs, or another agent's). "
+        "manage_queue(action='status') lists what is queued and which prompts are "
+        "draftsman's; show the user, get an explicit yes, then re-run with confirm=True.",
         "queue",
     )
 
@@ -2405,15 +2436,16 @@ async def manage_queue(
     action: Literal["status", "interrupt", "clear", "delete", "free"],
     prompt_ids: list[str] | None = None,
     unload_models: bool = False,
+    confirm: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Inspect or manage the instance's run queue: status (prompt ids, plus
-    draftsman_submitted mapping the ones THIS session queued to their
-    workflow_id - the rest are someone else's job, e.g. the user's own queue),
-    interrupt (stop the currently running prompt), clear (drop ALL pending),
-    delete (drop specific pending prompt_ids), free (release cached VRAM/RAM;
-    unload_models=True also unloads models). clear/delete/interrupt discard
-    other queued work - make sure that's what the user wants."""
+    """Inspect or manage the instance's run queue: status (queued prompt ids;
+    draftsman_submitted maps the ones THIS session queued to their workflow_id -
+    the rest are someone else's job), interrupt (stop the running prompt), clear
+    (drop ALL pending), delete (drop given pending prompt_ids), free (release
+    cached VRAM/RAM; unload_models=True also unloads models). clear/delete/
+    interrupt are gated when they'd discard prompts this session didn't queue;
+    confirm=True once the user agrees."""
     client = _client()
     if action == "status":
         queue = await client.get_queue()
@@ -2438,7 +2470,7 @@ async def manage_queue(
     if action in ("interrupt", "clear", "delete"):
         if action == "delete" and not prompt_ids:
             return {"error": "delete requires prompt_ids"}
-        refusal = await _confirm_destroys_others(ctx, client, action, prompt_ids)
+        refusal = await _confirm_destroys_others(ctx, client, action, prompt_ids, confirm)
         if refusal is not None:
             return refusal
     if action == "interrupt":
@@ -2470,19 +2502,6 @@ async def save_workflow(
     (result.renamed_from says so); overwrite=True replaces deliberately."""
     if ".." in name or any(sep in name for sep in ("/", "\\")):
         return {"error": "name must be a plain filename - no path separators or '..'"}
-    if overwrite:
-        # the only path in this tool that can destroy a file the user authored
-        refusal = await _confirm(
-            ctx,
-            f"Replace the existing workflow '{name}' in ComfyUI's browser? "
-            "The current file is lost.",
-            # no fallback hint: a client that cannot ask goes ahead - overwrite=True
-            # is already an explicit, documented act by the caller
-            None,
-            "overwrite",
-        )
-        if refusal is not None:
-            return {"saved": False, **refusal}
     wf = _wf(workflow_id)
     object_info = await _object_info(refresh=True)
     findings = validate(wf, object_info)
@@ -2503,10 +2522,32 @@ async def save_workflow(
     filename = renamed_from = None
     for candidate in candidates:
         try:
-            filename = await _client().save_userdata_workflow(candidate, document, overwrite=overwrite)
+            # Always try without overwrite first, even when overwrite=True: a free
+            # name destroys nothing, so there is nothing to confirm. Only the
+            # FileExistsError below proves a real file is about to be replaced -
+            # asking before that would claim "the current file is lost" about a
+            # file that does not exist, and a decline would refuse a harmless save.
+            filename = await _client().save_userdata_workflow(candidate, document, overwrite=False)
             renamed_from = None if candidate == name else name
             break
         except FileExistsError:
+            if overwrite and candidate == name:
+                refusal = await _confirm(
+                    ctx,
+                    f"Replace the existing workflow '{name}' in ComfyUI's browser? "
+                    "The current file is lost.",
+                    # no fallback hint: a client that cannot ask goes ahead -
+                    # overwrite=True is already an explicit act by the caller
+                    None,
+                    "overwrite",
+                )
+                if refusal is not None:
+                    return {"saved": False, **refusal}
+                filename = await _client().save_userdata_workflow(
+                    candidate, document, overwrite=True
+                )
+                renamed_from = None
+                break
             continue
     if filename is None:
         return {

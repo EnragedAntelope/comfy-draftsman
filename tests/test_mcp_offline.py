@@ -363,6 +363,58 @@ async def test_an_accept_that_says_no_is_a_decline(with_key):
     assert state["queued"] == []
 
 
+async def test_an_answer_missing_the_field_is_not_read_as_a_refusal(with_key):
+    """`confirm` is a required field precisely so a client cannot drop it. If
+    one does anyway, the honest answer is 'I could not ask' - never 'the user
+    said no', which would put words in their mouth."""
+    server, state = with_key
+    async with await _session(
+        server, elicitation_callback=_elicit("accept", {})
+    ) as mcp_session:
+        wf_id = await _build_paid(mcp_session)
+        result = _json(
+            await mcp_session.call_tool("run_workflow", {"workflow_id": wf_id, "wait": False})
+        )
+    assert result["status"] == "spend_confirmation_required"
+    assert state["queued"] == []
+
+
+async def test_a_partner_node_inside_a_subgraph_is_gated_too(with_key):
+    """The gate reads the API prompt, so a paid node packaged inside a subgraph
+    is caught even though its instance type appears nowhere in object_info."""
+    server, state = with_key
+    async with await _session(server) as mcp_session:
+        wf_id = _json(await mcp_session.call_tool("create_workflow", {"title": "packaged"}))[
+            "workflow_id"
+        ]
+        wf = server._session().get(wf_id)
+        uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        wf.definitions = {
+            "subgraphs": [
+                {
+                    "id": uuid,
+                    "name": "packaged partner",
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {"id": 1, "type": "LumaImageNode", "pos": [0, 0], "size": [200, 100],
+                         "widgets_values": ["a lighthouse", "photon-1", "16:9", 0]}
+                    ],
+                    "links": [],
+                }
+            ]
+        }
+        wf.add_node(uuid)
+        result = _json(
+            await mcp_session.call_tool(
+                "run_workflow", {"workflow_id": wf_id, "wait": False, "allow_invalid": True}
+            )
+        )
+    assert result["status"] == "spend_confirmation_required"
+    assert result["api_nodes"][0]["class_type"] == "LumaImageNode"
+    assert state["queued"] == []
+
+
 async def test_partner_nodes_without_an_api_key_fail_by_name(offline):
     server, state = offline
     async with await _session(
@@ -468,10 +520,31 @@ async def test_the_injected_context_parameter_is_not_on_the_wire(offline):
         assert "ctx" not in tool.inputSchema.get("properties", {}), tool.name
 
 
-async def test_confirm_spend_is_the_only_new_parameter(offline):
+async def test_the_new_parameters_are_optional(offline):
+    """Two, both defaulted: every existing call site keeps working, and neither
+    is required by the schema."""
     server, _state = offline
     async with await _session(server) as mcp_session:
         tools = {t.name: t for t in (await mcp_session.list_tools()).tools}
-    assert "confirm_spend" in tools["run_workflow"].inputSchema["properties"]
-    # ...and it is not required, so every existing call site still type-checks
-    assert "confirm_spend" not in tools["run_workflow"].inputSchema.get("required", [])
+    for tool_name, param in (("run_workflow", "confirm_spend"), ("manage_queue", "confirm")):
+        schema = tools[tool_name].inputSchema
+        assert param in schema["properties"], tool_name
+        assert param not in schema.get("required", []), tool_name
+
+
+async def test_manage_queue_confirm_is_the_escape_hatch(offline):
+    """Without it a client that cannot elicit could never clear a queue holding
+    someone else's job - worse than the behavior this gate replaced."""
+    server, state = offline
+    state["mock"].get(f"{BASE}/queue").mock(
+        return_value=httpx.Response(
+            200, json={"queue_running": [], "queue_pending": [[0, "someone-else", {}]]}
+        )
+    )
+    cleared = state["mock"].post(f"{BASE}/queue").mock(return_value=httpx.Response(200))
+    async with await _session(server) as mcp_session:
+        result = _json(
+            await mcp_session.call_tool("manage_queue", {"action": "clear", "confirm": True})
+        )
+    assert result["done"] == "pending queue cleared"
+    assert cleared.called

@@ -172,3 +172,40 @@ def test_bytes_to_gb_tolerates_a_cpu_only_device():
     assert knowledge.bytes_to_gb(None) is None
     assert knowledge.bytes_to_gb(True) is None
     assert knowledge.bytes_to_gb(_gb(16)) == 16.0
+
+
+# --- the cached-devices path -----------------------------------------------
+
+
+async def test_cached_devices_never_produce_a_free_vram_verdict(monkeypatch, tmp_path):
+    """_State.devices is a process-lifetime snapshot. VRAM *total* cannot change
+    while ComfyUI runs, but free VRAM changes constantly - a snapshot taken
+    during someone else's render would otherwise keep reporting 'only 1GB free'
+    hours after that job finished."""
+    from comfy_draftsman import server
+
+    monkeypatch.setattr(server._State, "config", server.Config(session_dir=tmp_path))
+    monkeypatch.setattr(
+        server._State,
+        "devices",
+        [{"name": "big", "vram_total": _gb(48), "vram_free": _gb(1)}],
+    )
+    guidance = knowledge.get_guidance("flux")
+    assert server._fit(guidance) is None
+    # the same snapshot, read live, is allowed to use it
+    verdict = server._fit(guidance, live=True)
+    assert verdict["verdict"] == "tight"
+    assert "manage_queue" in verdict["advice"]
+
+
+async def test_cached_devices_still_answer_the_total_vram_question(monkeypatch, tmp_path):
+    """Stripping free VRAM must not blind the verdict that actually matters."""
+    from comfy_draftsman import server
+
+    monkeypatch.setattr(server._State, "config", server.Config(session_dir=tmp_path))
+    monkeypatch.setattr(
+        server._State,
+        "devices",
+        [{"name": "small", "vram_total": _gb(6), "vram_free": _gb(6)}],
+    )
+    assert server._fit(knowledge.get_guidance("flux"))["verdict"] == "insufficient"

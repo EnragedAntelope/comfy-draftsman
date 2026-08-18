@@ -83,23 +83,54 @@ def test_missing_field_is_not_billable():
 
 def test_disabled_partner_nodes_are_not_billable(oi):
     """A muted or bypassed node never reaches the executor, so confirming a
-    spend for it would be a prompt for something that cannot happen."""
+    spend for it would be a prompt for something that cannot happen. to_api
+    drops them, which is exactly why detection reads the API prompt."""
     wf = Workflow.new()
     muted = wf.add_node("LumaImageNode", object_info=oi)
     muted.mode = MODE_MUTE
     bypassed = wf.add_node("LumaImageNode", object_info=oi)
     bypassed.mode = MODE_BYPASS
-    assert api_nodes(wf, oi) == []
+    assert api_nodes(wf.to_api(oi), oi) == []
     live = wf.add_node("LumaImageNode", object_info=oi)
-    assert [n["node_id"] for n in api_nodes(wf, oi)] == [live.id]
+    assert [n["node_id"] for n in api_nodes(wf.to_api(oi), oi)] == [str(live.id)]
 
 
-def test_titles_ride_along_only_when_they_say_something(oi):
+def test_a_partner_node_inside_a_subgraph_is_still_billable(oi):
+    """The bug this reads the API prompt to avoid: a subgraph instance's node
+    type is a definition uuid that appears nowhere in object_info, so scanning
+    the top-level graph flags nothing while to_api happily submits the paid
+    node inside."""
+    uuid = "11111111-2222-3333-4444-555555555555"
     wf = Workflow.new()
-    node = wf.add_node("LumaImageNode", object_info=oi)
-    assert "title" not in api_nodes(wf, oi)[0]
-    node.title = "hero shot"
-    assert api_nodes(wf, oi)[0]["title"] == "hero shot"
+    wf.definitions = {
+        "subgraphs": [
+            {
+                "id": uuid,
+                "name": "paid inside",
+                "inputs": [],
+                "outputs": [],
+                "nodes": [
+                    {"id": 1, "type": "LumaImageNode", "pos": [0, 0], "size": [200, 100],
+                     "widgets_values": ["a lighthouse", "photon-1", "16:9", 0]}
+                ],
+                "links": [],
+            }
+        ]
+    }
+    instance = wf.add_node(uuid)
+    assert instance.type not in oi  # nothing in object_info to classify
+    billable = api_nodes(wf.to_api(oi), oi)
+    assert [n["class_type"] for n in billable] == ["LumaImageNode"]
+
+
+def test_node_ids_sort_numerically_not_lexically(oi):
+    """API prompt keys are strings; #2 must not sort before #10 in a list the
+    user is asked to approve."""
+    wf = Workflow.new()
+    for _ in range(12):
+        wf.add_node("LumaImageNode", object_info=oi)
+    ids = [int(n["node_id"]) for n in api_nodes(wf.to_api(oi), oi)]
+    assert ids == sorted(ids)
 
 
 # --- run_workflow's gate ---------------------------------------------------
@@ -157,7 +188,7 @@ async def test_no_capability_returns_the_instructions_and_queues_nothing(billabl
     client, wf_id = billable
     result = await server.run_workflow(wf_id, wait=False)
     assert result["status"] == "spend_confirmation_required"
-    assert result["api_nodes"] == [{"node_id": 1, "class_type": "LumaImageNode"}]
+    assert result["api_nodes"] == [{"node_id": "1", "class_type": "LumaImageNode"}]
     assert "confirm_spend=True" in result["hint"]
     assert client.queued == 0
 
@@ -354,3 +385,50 @@ async def test_an_unreachable_queue_never_blocks_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr(server._State, "config", Config(session_dir=tmp_path))
     result = await server.manage_queue("clear", ctx=FakeCtx(accept=False))
     assert result["done"] == "pending queue cleared"
+
+
+async def test_a_refused_run_does_not_advance_the_seed(billable, oi):
+    """Rolling seeds mutates and persists the stored workflow. A refusal that
+    still advanced it would drift the user's graph on every declined prompt
+    without ever queueing anything."""
+    client, wf_id = billable
+    sampler = server._session().get(wf_id).add_node("KSampler", object_info=oi)
+    sampler.widgets_values[0] = 7
+    sampler.widgets_values[1] = "randomize"
+    result = await server.run_workflow(
+        wf_id, wait=False, allow_invalid=True, ctx=FakeCtx(accept=False)
+    )
+    assert result["status"] == "spend_declined"
+    assert client.queued == 0
+    assert server._session().get(wf_id).nodes[sampler.id].widgets_values[0] == 7
+
+
+async def test_an_accepted_run_still_rolls_the_seed(billable, oi):
+    client, wf_id = billable
+    sampler = server._session().get(wf_id).add_node("KSampler", object_info=oi)
+    sampler.widgets_values[0] = 7
+    sampler.widgets_values[1] = "randomize"
+    result = await server.run_workflow(
+        wf_id, wait=False, allow_invalid=True, ctx=FakeCtx(accept=True)
+    )
+    assert result["status"] == "queued"
+    assert client.queued == 1
+    assert server._session().get(wf_id).nodes[sampler.id].widgets_values[0] != 7
+
+
+async def test_confirm_true_is_the_escape_hatch_on_a_deaf_client(monkeypatch, tmp_path):
+    """Without it, a client that cannot elicit could never clear a queue holding
+    a foreign job again - a regression against the pre-gate behavior."""
+    client = _queue(monkeypatch, tmp_path, pending=["theirs"])
+    result = await server.manage_queue("clear", confirm=True, ctx=DeafCtx())
+    assert result["done"] == "pending queue cleared"
+    assert client.done == ["clear"]
+
+
+async def test_confirm_true_skips_the_prompt_entirely(monkeypatch, tmp_path):
+    client = _queue(monkeypatch, tmp_path, pending=["theirs"])
+    ctx = FakeCtx(accept=False)
+    result = await server.manage_queue("clear", confirm=True, ctx=ctx)
+    assert result["done"] == "pending queue cleared"
+    assert ctx.messages == []  # already authorized; no reason to ask again
+    assert client.done == ["clear"]
