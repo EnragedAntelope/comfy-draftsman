@@ -57,12 +57,55 @@ async def test_save_free_name_needs_no_rename(wired):
     assert result["renamed_from"] is None
 
 
+class _Accept:
+    """A client that supports elicitation and says yes."""
+
+    def __init__(self, accept=True):
+        self.accept = accept
+        self.messages: list[str] = []
+
+    async def elicit(self, message, schema):
+        self.messages.append(message)
+        action = "accept" if self.accept else "decline"
+        data = type("D", (), {"confirm": True})() if self.accept else None
+        return type("R", (), {"action": action, "data": data})()
+
+
 async def test_save_overwrite_true_replaces(wired):
+    """No ctx = a client that cannot ask. overwrite=True is already an explicit
+    destructive flag from the caller, so it proceeds rather than deadlocking on
+    a confirmation the client can never deliver."""
     client, wf_id = wired
     result = await server.save_workflow(wf_id, "menu", overwrite=True)
     assert result["saved"] is True
     assert client.saved == ["menu.json"]
     assert result["renamed_from"] is None
+
+
+async def test_save_overwrite_asks_when_the_client_can(wired):
+    _client, wf_id = wired
+    ctx = _Accept()
+    result = await server.save_workflow(wf_id, "menu", overwrite=True, ctx=ctx)
+    assert result["saved"] is True
+    assert "menu" in ctx.messages[0]
+
+
+async def test_save_overwrite_declined_writes_nothing(wired):
+    client, wf_id = wired
+    result = await server.save_workflow(wf_id, "menu", overwrite=True, ctx=_Accept(accept=False))
+    assert result["saved"] is False
+    assert result["status"] == "overwrite_declined"
+    assert client.saved == []
+
+
+async def test_the_non_overwriting_save_is_never_gated(wired):
+    """The default already renames instead of clobbering - there is nothing to
+    confirm, and a prompt here would be noise on every single save."""
+    _client, wf_id = wired
+    ctx = _Accept(accept=False)
+    result = await server.save_workflow(wf_id, "menu", ctx=ctx)
+    assert result["saved"] is True
+    assert ctx.messages == []
 
 
 class FakeViewClient:
