@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.15.0 — PyPI pipeline, VRAM fit verdict, partner-node spend gate
+
+Three gaps closed against what a local ComfyUI MCP server is expected to do:
+be installable from an index, refuse to let a user sink a render into a GPU
+that cannot hold the model, and refuse to spend credits without consent. All
+three added **without measurably growing what every request pays for** — the
+tool surface went from 21,724 to 21,910 chars across 29 tools (+0.9%), and the
+handshake block is unchanged at 885 chars.
+
+### Added
+
+- **PyPI release pipeline.** `.github/workflows/release.yml` builds on a `v*`
+  tag (or a manual TestPyPI/PyPI dispatch) and publishes over **Trusted
+  Publishing** — no API token is stored in the repo. It refuses to publish when
+  the tag disagrees with `comfy_draftsman.__version__`, and re-runs CI's
+  wheel-data assertion before uploading. `pyproject` moves to Beta and gains
+  Documentation/Changelog project URLs; the README leads with
+  `uv tool install comfy-draftsman` / `pip install comfy-draftsman` and keeps
+  from-source as the contributor path. The one-time account/environment setup
+  is a runbook in the README.
+- **VRAM fit verdict.** `knowledge.fit_verdict()` compares a family's curated
+  VRAM floor against the instance's largest GPU. `get_model_guidance` attaches
+  a `fit` block and `run_workflow` an advisory `capacity` block — **only when
+  the verdict is actionable**. Two verdicts: `insufficient` (installed VRAM
+  below the floor) and `tight` (VRAM held by a resident job — with a pointer at
+  `manage_queue(action="free")` — or under the recommended figure). Comparison
+  is against `vram_total`, never `vram_free`: conflating them produced a wrong
+  verdict every time another job was resident. Neither block ever blocks a run.
+- **`hardware:` blocks in the family knowledge floor**, for flux, sdxl and wan,
+  each with a `source` URL. A 0.5GB slack absorbs drivers reporting 15.99GB for
+  a 16GB card. Variant-level overrides work through the existing deep merge.
+- **Partner/API spend gate.** `graph/spend.py` detects billable nodes from
+  `/object_info`'s `api_node` flag (with a `category` fallback for older
+  instances). `run_workflow` gains `confirm_spend` and gates through MCP
+  elicitation, degrading to a structured refusal that explains how to proceed
+  on clients that cannot elicit. Muted and bypassed nodes are excluded — they
+  never reach the executor.
+- **Precise queue-destruction confirmation.** `manage_queue`'s
+  interrupt/clear/delete now confirm **only** when the affected prompts were not
+  queued by this session, using the attribution draftsman already tracks.
+  Cleaning up after itself stays silent, which is what keeps the prompt
+  meaningful. No new parameter.
+- **`save_workflow(overwrite=True)` confirmation**, on clients that support it.
+- **`get_instance_info` reports normalized `vram_total_gb` / `vram_free_gb`**
+  alongside the raw byte fields.
+- **`tests/test_mcp_offline.py`** — the full tool surface driven through the
+  real MCP protocol against a respx-mocked ComfyUI. Previously the only
+  protocol-level test needed a live instance, so it never ran in CI. It asserts
+  the *silences* as well as the outputs, and covers all three elicitation
+  branches for both gated tools.
+- **A tool-surface budget guard** in `tests/test_round18_tokens.py`: total
+  description + input-schema payload ≤ 22,200 chars, handshake ≤ 900, tool count
+  exactly 29, and proof the FastMCP-injected `ctx` parameter never reaches the
+  wire.
+
+### Changed
+
+- **`get_model_guidance` is now annotated open-world** (`_READ_INSTANCE`): it
+  still only reads, but it reaches the network to produce the fit verdict.
+  Clients keying auto-approval off `openWorldHint` may re-prompt for it once —
+  noted in `docs/PERMISSIONS.md`.
+- **`get_model_guidance` no longer returns the raw `hardware` block.** Both
+  numbers, the prose and the URL would otherwise ride along on every call while
+  being useful only when the verdict is bad; what matters is folded into `fit`.
+- **A partner-node graph with no `COMFY_API_KEY` now fails early by name**
+  (`missing_api_key`) instead of as an opaque queue-time `Unauthorized`.
+- `run_workflow`'s docstring was trimmed to pay for the `confirm_spend` clause,
+  keeping the per-tool budget.
+
+### Not changed (deliberately out of scope)
+
+- **Instance lifecycle** — installing, launching, updating or configuring
+  ComfyUI. Needs a `comfy-cli` dependency and is the official server's moat.
+- **Node-pack installation.** `resolve_missing_nodes` naming the pack and
+  handing the decision to the human stays the right behavior: custom node packs
+  execute arbitrary code.
+- **Model downloading.** Same reason, plus draftsman never synthesizes a
+  download URL — curated `sources` entries only.
+- **No capacity or spend text was added to the handshake `instructions`
+  block.** Every gate in this round fires before anything irreversible, so each
+  teaches reactively through its own response — paid for only by the caller that
+  hit it, rather than by every session including the ones that never queue a
+  paid render.
+- **No new tools.** 29 in, 29 out. A tool costs its full description on every
+  request, forever, whether or not anyone calls it.
+- **sd15 got no `hardware` block.** No citable floor was found, and it runs
+  comfortably on anything ComfyUI itself supports, so the verdict would never
+  fire. A guessed number is worse than none.
+
+### Known gaps
+
+- `api_node` detection is unverified against a live instance; the fixture entry
+  was written from the documented shape. A real elicitation round-trip in a real
+  client, and the TestPyPI dry run, are likewise pending. All three are recorded
+  in `docs/ARCHITECTURE.md` → Remaining TODOs.
+- `AGENTS.md` instructs contributors to run `scripts/check-agents-md.ps1`, which
+  is not in the repo. Flagged rather than silently removed.
+
 ## 0.14.1 — Long-render pattern documentation
 
 Docs-only round from rtome's 2026-08-07 report on long-render sessions.

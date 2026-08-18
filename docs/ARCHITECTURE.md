@@ -18,6 +18,7 @@ src/comfy_draftsman/
 │   ├── subgraph.py    # schema-1.0 subgraph flattening (see below)
 │   ├── validate.py    # live-instance validation + write-time value checks
 │   ├── lint.py        # readability/wiring lint (advisory only)
+│   ├── spend.py       # which nodes bill the user (partner/API detection)
 │   ├── annotate.py    # organize_workflow: titles, groups, notes, knob highlights
 │   ├── layout.py      # staged auto-layout
 │   └── port.py        # cross-family model ports
@@ -47,6 +48,98 @@ UI JSON (schema 0.4/1.0)
   reject invalid widget values (combo membership, ranges, types) immediately
   via `validate.check_widget_value`, with closest-match suggestions; a per-op
   `"force": true` skips the check.
+
+## Capacity and spend: two gates that teach through their responses
+
+Both features added in 0.15.0 answer a question before something irreversible
+happens - a render into a GPU that cannot hold the model, or a submit that
+charges the user's account. Both are built the same way, and the shape is the
+point:
+
+> **Push cost into the response path; keep it out of the always-loaded surface.**
+
+Tool descriptions and input schemas are re-sent on every request whether or not
+a tool is called (~21.9k chars / 29 tools at 0.15.0). A gate that fires *before*
+the irreversible act can therefore explain itself entirely in its own return
+value, read only by the caller that hit it. That is why 0.15.0 added four
+features and exactly one new parameter, and why
+`tests/test_round18_tokens.py` now asserts a ceiling on the whole surface.
+
+### Hardware fit
+
+```
+family YAML `hardware:` ──┐
+                          ├─► knowledge.fit_verdict(guidance, devices) ─► dict | None
+/system_stats `devices` ──┘
+```
+
+- `hardware.vram_gb` is **optional and per-family**, valid at family level and
+  inside a `variants:` entry (it rides `get_guidance`'s existing deep merge - so
+  a variant with a genuinely different floor must restate *both* `minimum` and
+  `recommended`, exactly as sdxl/turbo restates min/max/default).
+- `hardware.source` is **required whenever `vram_gb` is present**, enforced by
+  `tests/test_hardware_fit.py`. Only flux, sdxl and wan carry blocks; the other
+  six report nothing rather than a guessed number.
+- **`None` is the common return, and the design centre.** No block, no devices,
+  or a comfortable fit all mean the caller emits no key at all. A block that
+  says "everything is fine" is pure cost on every call, forever.
+- **Compared against `vram_total`, never `vram_free`.** A free-VRAM shortfall is
+  "release the cached model first", not "this model does not fit your GPU";
+  conflating them is wrong every time another job is resident. Free VRAM gets
+  its own `tight` verdict pointing at `manage_queue(action="free")`.
+- A 0.5GB slack absorbs drivers reporting 15.99GB for a 16GB card.
+- Surfaced as `fit` on `get_model_guidance` (which also **strips the raw
+  `hardware` block** from the payload - the prose is folded into `advice`) and
+  as an advisory `capacity` on `run_workflow`. Neither ever blocks: draftsman
+  gates only on `validate()` errors, and a curated floor is not authoritative
+  enough to refuse someone their own hardware.
+
+**The device cache.** `_State.devices` holds `/system_stats`'s device list for
+the process lifetime, seeded by `get_instance_info` (the "call first" tool) and
+loaded lazily otherwise. This is safe because VRAM *total* cannot change while
+ComfyUI is running, and total is what drives the verdict. `run_workflow`'s
+preflight re-reads live (`_load_devices(refresh=True)`) precisely because free
+VRAM does change. `_load_devices` is `async` on purpose: the lazy accessors
+above it must stay synchronous (see the INVARIANT comment in `server.py`), and
+two racing cold calls here are harmless - the fetch is idempotent and holds no
+resource.
+
+### The spend gate
+
+`graph/spend.py` answers "does submitting this graph cost money?" from the
+`/object_info` snapshot alone. Primary signal is ComfyUI's per-class
+`api_node` boolean; a `category` starting with `api node` is the fallback for
+instances predating the flag. **A missing field means not billable** - failing
+open is deliberate, because over-prompting on every unclassifiable node trains
+users to click through the one prompt that matters. Muted and bypassed nodes
+are excluded: they never reach the executor.
+
+Detection runs **only in `run_workflow`**, never in validate/lint/organize
+where it would cost payload for no gain.
+
+`_confirm()` carries a three-way degrade shared by all three call sites:
+
+| Client | Outcome |
+|---|---|
+| elicits, user accepts | proceed |
+| elicits, user declines | `{prefix}_declined`, nothing happened |
+| cannot elicit | `{prefix}_confirmation_required` + the way forward, **or** proceed |
+
+That last fork is per call site, not policy. `run_workflow` and `manage_queue`
+refuse by default - a wrong "yes" spends money or destroys someone else's
+render, and neither is recoverable. `save_workflow(overwrite=True)` proceeds,
+because the caller already passed an explicit destructive flag and refusing
+would make the feature unusable on every non-eliciting client.
+
+`manage_queue`'s gate is deliberately **precise**: interrupt/clear/delete only
+prompt when the affected prompt_ids are absent from `_State.submitted`, i.e.
+when the action would destroy work this session did not queue. Cleaning up
+after itself stays silent, which is what keeps the prompt meaningful. It needs
+no new parameter because the condition is inferred from state draftsman already
+tracks.
+
+`Context` is FastMCP-injected and hidden from the JSON schema, so `ctx` costs
+nothing on the wire - asserted, not assumed, in `test_round18_tokens.py`.
 
 ## Subgraphs (schema 1.0 `definitions.subgraphs`)
 
@@ -563,6 +656,27 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 ## Remaining TODOs
 
 Open:
+
+- **[OPEN] `api_node` detection is unverified against a live instance.** The
+  test fixture's `LumaImageNode` entry was written by hand from the documented
+  shape; every *real* class in it carries `api_node: false`. If a production
+  ComfyUI omits the field on partner nodes, the `category` fallback is what
+  carries the gate, and only `COMFYUI_TEST_URL=... uv run pytest -m integration`
+  against an instance with partner nodes installed settles it. Failing *open*
+  (unknown is not billable) is the deliberate choice - see the spend-gate
+  section above.
+- **[OPEN] VRAM floors for the six unsourced families.** chroma, krea2, ltx,
+  qwen_image, sd35 and sd15 carry no `hardware` block and correctly report
+  nothing. sd15 in particular was left out on purpose: no citable floor was
+  found for it, and it runs comfortably on anything ComfyUI itself supports, so
+  the verdict would never fire. Add one only from a source that states the
+  number - `hardware.source` is a test-enforced requirement, not a convention.
+  The accepted cost of the silence is that nothing nudges an agent to research
+  them; each family YAML's `research:` directive is the mitigation.
+- **[OPEN] `scripts/check-agents-md.ps1` does not exist.** `AGENTS.md` tells
+  contributors to run it before pushing and there is no `scripts/` directory in
+  the repo (and no `pwsh` on a Linux CI runner). Either restore the script or
+  drop the instruction - right now it is a check nobody can run.
 
 - **[OPEN] `COMFY_DYNAMICSLOT_V3` is classified but never exercised.** It is
   excluded from widget inference like the other meta types

@@ -80,6 +80,11 @@ Then just ask your agent things like:
 >
 > *"Take this workflow I downloaded and make it neat and organized."*
 
+It checks your hardware before you spend forty minutes on a download: ask for
+guidance on a model family your GPU can't comfortably hold and the answer comes
+back with a `fit` verdict — what's needed, what you have, and what to do about
+it. When it fits, it says nothing.
+
 ### Configuration
 
 | Env var | Default | Purpose |
@@ -138,7 +143,7 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 ## Tools
 
-**Discovery** — `get_instance_info` (version, VRAM, queue — and a `relocation` block reporting whether renders can be handed to a sandboxed client; call first), `check_setup` (one-shot doctor: ComfyUI reachable? renders relocatable? — never raises, so it's the first call when something's off), `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering; long lists are capped for chat-friendliness — the true `count` and a `search=` hint always come back — and `metadata_for='file.safetensors'` returns a LoRA's embedded training metadata: base model and top trigger tags, so trigger words come from ground truth, not guesses), `list_templates` (~450 bundled templates — the response carries the true match `count` and a `search=` hint, never a silent truncation), `list_workflows` (what's already in ComfyUI's workflow browser, by name), `find_workflow` (describe a goal — "flux portrait at 1024 with a face detailer" — and get a few **ranked**, compact matches from your saved workflows: family, base model, resolution, feature tags, and why each matched; profiled from the saved JSON so hand-built ones count too. Reuse-before-rebuild without importing every candidate — the fetch/parse happens server-side, only the top summaries come back)
+**Discovery** — `get_instance_info` (version, VRAM in raw bytes *and* GB, queue — and a `relocation` block reporting whether renders can be handed to a sandboxed client; call first), `check_setup` (one-shot doctor: ComfyUI reachable? renders relocatable? — never raises, so it's the first call when something's off), `search_nodes`, `get_node_info` (long combo lists — fonts, model files — are capped for chat-friendliness; `choices_filter='substring'` / `max_choices=N` browse the full list), `list_models` (per-folder, with `search` substring filtering; long lists are capped for chat-friendliness — the true `count` and a `search=` hint always come back — and `metadata_for='file.safetensors'` returns a LoRA's embedded training metadata: base model and top trigger tags, so trigger words come from ground truth, not guesses), `list_templates` (~450 bundled templates — the response carries the true match `count` and a `search=` hint, never a silent truncation), `list_workflows` (what's already in ComfyUI's workflow browser, by name), `find_workflow` (describe a goal — "flux portrait at 1024 with a face detailer" — and get a few **ranked**, compact matches from your saved workflows: family, base model, resolution, feature tags, and why each matched; profiled from the saved JSON so hand-built ones count too. Reuse-before-rebuild without importing every candidate — the fetch/parse happens server-side, only the top summaries come back)
 
 **Authoring** — `create_workflow` (blank or template-seeded), `import_workflow` (paste UI/API-format JSON, **or** `name=...` to load one straight from ComfyUI's workflow browser — no pasting), `inspect_workflow` (for subgraph-packaged workflows — how newer bundled templates ship — it lists each subgraph's inner nodes and wiring, marking which boundary inputs the instance actually exposes as sockets), `edit_workflow` (batched ops with strict per-op schemas — a failing op stops the batch and leaves the graph unchanged; widget **values** are checked against the live schema at write time, so a made-up sampler or model filename fails immediately with closest-match suggestions instead of at run time; supports `Note`/`MarkdownNote` annotation nodes via their single `text` widget; `connect` reports when it replaces an existing link; returns a compact delta — `summary=true` for the full graph), `organize_workflow` (never overwrites human-authored node titles), `lint_workflow` (readability checks, including `no-prompt-preview`: a wildcard-generated positive prompt should reach a Show Text node — inline before the encoder or tapped off the generator — so the user sees the final text)
 
@@ -146,7 +151,7 @@ the mutating tools like `run_workflow` / `save_workflow`).
 
 **Execution & delivery** — `run_workflow` (validates, renders, returns an inline preview thumbnail; `wait=False` queues in the background; `allow_invalid=True` submits past the local validator when you're sure a graph is fine; `save_dir=...` — or a configured `COMFYUI_MOUNT_DIR` — auto-relocates the finished renders and returns their `saved_paths`, so one call gets you a presentable file), `get_run_status` (queue position, live step progress, outputs when done), `view_output` (fetch any rendered image so the agent — and you — can *see* it; downscaled by default, `max_dim=None` for full resolution), `save_output` (copy a finished render — image, video or audio — out of ComfyUI's `output/` tree into a folder the caller can reach; needed because ComfyUI's save nodes only write inside `output/` and reject absolute paths; takes a `prompt_id` or an explicit `filename`), `upload_image` (put a source image/mask into ComfyUI's input folder for img2img / inpaint / ControlNet), `manage_queue` (status / interrupt / clear / delete / free memory), `save_workflow` (validates first — refuses to save a broken workflow unless `allow_invalid=True` — then lands in ComfyUI's workflow browser; never overwrites an existing workflow file unless `overwrite=True` — a taken name saves as `<name> (draftsman)` so your original is preserved), `export_workflow_json`
 
-**Ecosystem & knowledge** — `resolve_missing_nodes`, `search_node_packs`, `get_model_guidance`, `record_learning`
+**Ecosystem & knowledge** — `resolve_missing_nodes`, `search_node_packs`, `get_model_guidance` (tuned per-family settings, plus a `fit` verdict when your GPU can't comfortably hold the model — silent when it can), `record_learning`
 
 **Prompts** — `build_workflow`, `modernize_workflow` (guided flows) · **Resources** — `draftsman://workflow-format`, `draftsman://knowledge/{family}`, `draftsman://capabilities` (relocation readiness, background runs, partner-node key)
 
@@ -187,6 +192,8 @@ agent can reach, so sandboxed clients can hand you the actual file.
 - Runs over stdio only; the server opens no listening port.
 - Talks only to the ComfyUI URL you configure and (read-only) the official Comfy Registry at `api.comfy.org`.
 - It never installs custom nodes. `resolve_missing_nodes` tells you *which* pack provides a missing node and how to install it yourself — custom node packs execute arbitrary code, so that decision stays with you.
+- **Partner/API nodes never run without your say-so.** Luma, Kling, Runway, Seedance and friends execute on the provider's hardware and bill your Comfy Org account per submit, so `run_workflow` asks before queueing one (and tells the agent how to ask you, on clients that can't prompt). A graph needing them without `COMFY_API_KEY` set fails immediately by name instead of as a confusing queue-time `Unauthorized`.
+- **Other people's renders are not draftsman's to discard.** `manage_queue`'s interrupt/clear/delete confirm first when the affected jobs weren't queued by this session — and stay quiet when it's just cleaning up after itself.
 
 ## Development
 
