@@ -432,3 +432,22 @@ async def test_confirm_true_skips_the_prompt_entirely(monkeypatch, tmp_path):
     assert result["done"] == "pending queue cleared"
     assert ctx.messages == []  # already authorized; no reason to ask again
     assert client.done == ["clear"]
+
+
+async def test_a_rejected_save_dir_does_not_advance_the_seed(billable, oi):
+    """Every early return has to happen before the roll, not just the spend
+    gate: a relative save_dir is refused, and refusing must leave the stored
+    workflow exactly as it was."""
+    client, wf_id = billable
+    sampler = server._session().get(wf_id).add_node("KSampler", object_info=oi)
+    sampler.widgets_values[0] = 7
+    sampler.widgets_values[1] = "randomize"
+    result = await server.run_workflow(
+        wf_id,
+        save_dir="relative/outputs",
+        allow_invalid=True,
+        confirm_spend=True,
+    )
+    assert result["status"] == "invalid"
+    assert client.queued == 0
+    assert server._session().get(wf_id).nodes[sampler.id].widgets_values[0] == 7

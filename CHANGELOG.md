@@ -18,10 +18,9 @@ both optional.
   Publishing** — no API token is stored in the repo. It refuses to publish when
   the tag disagrees with `comfy_draftsman.__version__`, and re-runs CI's
   wheel-data assertion before uploading. `pyproject` moves to Beta and gains
-  Documentation/Changelog project URLs; the README leads with
-  `uv tool install comfy-draftsman` / `pip install comfy-draftsman` and keeps
-  from-source as the contributor path. The one-time account/environment setup
-  is a runbook in the README.
+  Documentation/Changelog project URLs. The README keeps the working `git+https`
+  install as the documented default and marks the published commands as pending
+  the first tag; the one-time account/environment setup is a runbook there.
 - **VRAM fit verdict.** `knowledge.fit_verdict()` compares a family's curated
   VRAM floor against the instance's largest GPU. `get_model_guidance` attaches
   a `fit` block and `run_workflow` an advisory `capacity` block — **only when
@@ -37,14 +36,21 @@ both optional.
   `/object_info`'s `api_node` flag (with a `category` fallback for older
   instances). `run_workflow` gains `confirm_spend` and gates through MCP
   elicitation, degrading to a structured refusal that explains how to proceed
-  on clients that cannot elicit. Muted and bypassed nodes are excluded — they
-  never reach the executor.
+  on clients that cannot elicit. Detection reads the **API prompt**, not the
+  editing graph, so it sees exactly what `POST /prompt` will run: subgraphs are
+  already flattened (a partner node packaged inside one is caught, not billed
+  silently) and muted/bypassed nodes are already gone. The gate runs before
+  seeds are rolled, so a refused run never advances the stored workflow.
 - **Precise queue-destruction confirmation.** `manage_queue`'s
   interrupt/clear/delete now confirm **only** when the affected prompts were not
   queued by this session, using the attribution draftsman already tracks.
   Cleaning up after itself stays silent, which is what keeps the prompt
-  meaningful. No new parameter.
-- **`save_workflow(overwrite=True)` confirmation**, on clients that support it.
+  meaningful. `confirm=True` is the escape hatch for clients that cannot elicit
+  — without it such a client could never clear a queue holding a foreign job
+  again, which would be worse than the behavior the gate replaced.
+- **`save_workflow(overwrite=True)` confirmation**, on clients that support it —
+  and only once the name proves to be taken, since overwriting a free name
+  destroys nothing.
 - **`get_instance_info` reports normalized `vram_total_gb` / `vram_free_gb`**
   alongside the raw byte fields.
 - **`tests/test_mcp_offline.py`** — the full tool surface driven through the

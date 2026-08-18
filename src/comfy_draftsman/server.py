@@ -1915,16 +1915,6 @@ async def run_workflow(
             )
             if refusal is not None:
                 return {**refusal, **_spend_payload(billable), **warn}
-    # Only now that the run is definitely going ahead: rolling seeds MUTATES and
-    # persists the stored workflow, and a refused run that still advanced the
-    # seed would drift the user's graph without ever queueing anything.
-    if roll_seeds and wf.apply_seed_control(object_info):
-        # persist so inspect_workflow reflects what ran and increment/decrement
-        # advance across calls; best-effort (a read-only session dir shouldn't
-        # block the run)
-        with contextlib.suppress(OSError):
-            _session().persist(workflow_id)
-        api = wf.to_api(object_info)  # re-serialize with the rolled values
     # Where to relocate finished renders: an explicit save_dir, else the
     # configured mount dir (auto-relocate). None -> leave outputs in ComfyUI.
     dest_root: Path | None = None
@@ -1935,6 +1925,16 @@ async def run_workflow(
             return {"status": "invalid", "error": dest_error}
     elif wait and _config().mount_dir is not None:
         dest_root, mount_error = _resolve_dest("")  # resolves + creates the mount dir
+    # Only now that the run is definitely going ahead: rolling seeds MUTATES and
+    # persists the stored workflow, and a refused run that still advanced the
+    # seed would drift the user's graph without ever queueing anything.
+    if roll_seeds and wf.apply_seed_control(object_info):
+        # persist so inspect_workflow reflects what ran and increment/decrement
+        # advance across calls; best-effort (a read-only session dir shouldn't
+        # block the run)
+        with contextlib.suppress(OSError):
+            _session().persist(workflow_id)
+        api = wf.to_api(object_info)  # re-serialize with the rolled values
     extra_data: dict[str, Any] | None = None
     if _config().comfy_api_key:
         extra_data = {"api_key_comfy_org": _config().comfy_api_key}
