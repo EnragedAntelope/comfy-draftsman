@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import yaml
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
-from . import knowledge
+from . import __version__, knowledge
 from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
 from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
@@ -34,6 +35,7 @@ from .graph.annotate import annotate
 from .graph.lint import lint
 from .graph.model import NOTE_TYPES, PRIMITIVE_TYPE, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
+from .graph.spend import api_nodes
 from .graph.validate import check_primitive_value, check_widget_value, validate
 from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names, widgets_to_named
 from .imaging import downscale_image
@@ -63,6 +65,11 @@ class _State:
     # server restart, or a prompt queued from the ComfyUI UI directly, is simply
     # unattributed, not an error.
     submitted: ClassVar[dict[str, str]] = {}
+    # /system_stats devices, cached for the process lifetime. VRAM *total* is
+    # what drives the fit verdict and cannot change while ComfyUI is running, so
+    # this is one HTTP call per session rather than one per guidance lookup.
+    # run_workflow's preflight refreshes it, because free VRAM does change.
+    devices: list[dict[str, Any]] | None = None
 
 
 # INVARIANT: the lazy accessors below (_config/_client/_registry/_session/
@@ -139,6 +146,133 @@ def _tracker() -> ProgressTracker:
     if _State.tracker is None:
         _State.tracker = ProgressTracker(_client()._ws_url)
     return _State.tracker
+
+
+async def _load_devices(refresh: bool = False) -> list[dict[str, Any]]:
+    """Cached device list from /system_stats (see _State.devices).
+
+    Async on purpose: the INVARIANT above keeps the lazy accessors synchronous,
+    so this must not become one. Two racing cold calls can both fetch, which is
+    harmless - the result is idempotent and holds no resource."""
+    if _State.devices is None or refresh:
+        stats = await _client().get_system_stats()
+        _State.devices = list(stats.get("devices") or [])
+    return _State.devices
+
+
+def _fit(guidance: dict[str, Any], live: bool = False) -> dict[str, Any] | None:
+    """knowledge.fit_verdict against the cached devices - None (emit nothing)
+    whenever the devices haven't been loaded yet.
+
+    ``live=False`` strips vram_free before comparing. The cache is only sound
+    for VRAM *total*, which cannot change while ComfyUI is running; a free-VRAM
+    figure snapshotted during someone else's render would otherwise still be
+    reporting "only 1GB of your 24GB is free" hours later. Only a caller that
+    just re-read /system_stats (run_workflow's preflight) passes live=True.
+    """
+    devices = _State.devices or []
+    if not live:
+        devices = [{k: v for k, v in d.items() if k != "vram_free"} for d in devices]
+    return knowledge.fit_verdict(guidance, devices)
+
+
+class _Confirmation(BaseModel):
+    """Elicitation form for anything irreversible or billable. One boolean:
+    MCP elicitation only allows primitive fields, and anything richer would be
+    a decision the user has already been asked to make in prose.
+
+    REQUIRED, deliberately - no default. An optional field is one a client may
+    omit from its form entirely, and then a user who pressed Accept comes back
+    as ``confirm: false`` and is told they declined, which is the opposite of
+    what they chose. Required means the client has to collect an answer; a
+    response missing it fails validation and lands on the cannot-ask path,
+    which is honest about not knowing rather than inventing a refusal.
+    """
+
+    confirm: bool = Field(description="Yes, go ahead")
+
+
+async def _confirm(
+    ctx: Context | None, message: str, fallback_hint: str | None, prefix: str
+) -> dict[str, Any] | None:
+    """Ask the user before doing something irreversible. None = go ahead.
+
+    Three-way degrade, because elicitation support varies by client and the
+    no-capability path is the common case on some of them:
+
+    1. client elicits and the user accepts -> None, the caller proceeds
+    2. client elicits and the user declines -> ``{prefix}_declined``
+    3. client cannot elicit at all -> ``{prefix}_confirmation_required`` carrying
+       ``fallback_hint``, the instructions for re-running once the user really
+       has agreed - or, when ``fallback_hint`` is None, simply proceed.
+
+    That last choice is per call site, not a global policy. Spending the user's
+    money and discarding someone else's queued render both refuse by default:
+    the cost of a wrong "yes" is unrecoverable. save_workflow(overwrite=True)
+    proceeds, because the caller already passed an explicit destructive flag and
+    refusing would make the feature unusable on every non-eliciting client.
+
+    Cases 2 and 3 are normal returns, not exceptions - same shape as the
+    queue_busy result, because "nothing happened, here is why" is an outcome
+    the calling agent has to read and act on, not an error to retry.
+    """
+    if ctx is not None:
+        try:
+            answer = await ctx.elicit(message=message, schema=_Confirmation)
+        except Exception:
+            answer = None  # client has no elicitation capability
+        if answer is not None:
+            if answer.action == "accept" and getattr(answer.data, "confirm", False):
+                return None
+            return {
+                "status": f"{prefix}_declined",
+                "hint": "the user did not confirm - nothing was done. Ask what they "
+                "want instead; do not re-issue the same call.",
+            }
+    if fallback_hint is None:
+        return None
+    return {"status": f"{prefix}_confirmation_required", "hint": fallback_hint}
+
+
+_SPEND_HINT = (
+    "NOTHING WAS QUEUED. This graph contains partner/API nodes, which run on the "
+    "provider's hardware and charge the user's Comfy Org account for every submit - "
+    "a failed or unwanted render still costs. Show them the api_nodes list, get an "
+    "explicit yes, and only then re-run with confirm_spend=True. confirm_spend "
+    "authorizes THIS submit, not a series of retries."
+)
+
+_API_NODES_CAP = 10
+
+
+def _spend_payload(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The api_nodes list, bounded - a graph with thirty partner nodes must not
+    return thirty rows just to say "this costs money"."""
+    payload: dict[str, Any] = {"api_nodes": nodes[:_API_NODES_CAP]}
+    if len(nodes) > _API_NODES_CAP:
+        payload["api_nodes_truncated"] = len(nodes) - _API_NODES_CAP
+    return payload
+
+
+async def _capacity(wf: Workflow, object_info: dict[str, Any]) -> dict[str, Any] | None:
+    """Pre-render fit verdict for the workflow's detected family, or None.
+
+    Best-effort in every direction: an undetectable family, an unreachable
+    instance, or a comfortable fit all return None. It NEVER blocks a run -
+    draftsman gates only on validate() errors, and a curated VRAM floor is not
+    authoritative enough to refuse someone their own hardware."""
+    with contextlib.suppress(Exception):
+        family = knowledge.detect_family(wf, object_info, learned_dir=_config().learned_dir)
+        if not family:
+            return None
+        # refresh: unlike get_model_guidance, this cares about FREE VRAM too,
+        # and that changes with every job the instance runs
+        await _load_devices(refresh=True)
+        guidance = knowledge.get_guidance(family, learned_dir=_config().learned_dir)
+        verdict = _fit(guidance, live=True)
+        if verdict:
+            return {"family": family, **verdict}
+    return None
 
 
 def _check_output_ref(filename: str, subfolder: str) -> str | None:
@@ -457,8 +591,19 @@ async def get_instance_info() -> dict[str, Any]:
     the user automatically, so surface that to them before spending a render."""
     stats = await _client().get_system_stats()
     queue = await _client().get_queue()
+    # seed the process-lifetime device cache while we're here - this is the
+    # "call first" tool, so the fit verdict usually costs no extra HTTP call
+    _State.devices = list(stats.get("devices") or [])
     devices = [
-        {"name": d.get("name"), "vram_total": d.get("vram_total"), "vram_free": d.get("vram_free")}
+        {
+            "name": d.get("name"),
+            "vram_total": d.get("vram_total"),
+            "vram_free": d.get("vram_free"),
+            # raw bytes are what ComfyUI reports; GB is what a human (or an
+            # agent comparing against a model's requirement) actually reasons in
+            "vram_total_gb": knowledge.bytes_to_gb(d.get("vram_total")),
+            "vram_free_gb": knowledge.bytes_to_gb(d.get("vram_free")),
+        }
         for d in stats.get("devices", [])
     ]
     return {
@@ -484,6 +629,13 @@ async def check_setup() -> dict[str, Any]:
     relocation is a soft check surfaced via `hint`."""
     cfg = _config()
     checks: list[dict[str, Any]] = []
+
+    # First line, deliberately: this is the tool whose output lands in a bug
+    # report, and "which version is that?" was previously unanswerable from
+    # inside a session - __version__ reached no tool response at all.
+    checks.append(
+        {"name": "draftsman_version", "ok": True, "detail": f"comfy-draftsman {__version__}"}
+    )
 
     # Hard requirement: can we talk to ComfyUI at all?
     try:
@@ -1669,6 +1821,8 @@ async def run_workflow(
     save_dir: str = "",
     roll_seeds: bool = True,
     front: bool | None = None,
+    confirm_spend: bool = False,
+    ctx: Context | None = None,
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
     node errors on failure, output file refs, any non-file return values
@@ -1680,11 +1834,10 @@ async def run_workflow(
     Text-only caller (no image input)? Pass return_preview=False - the result then
     carries a file path instead of a thumbnail if save_dir/COMFYUI_MOUNT_DIR is set.
 
-    roll_seeds=True (default) mirrors the browser: every seed AND PrimitiveNode
-    whose control_after_generate is randomize/increment/decrement is re-rolled
-    before submit and the new value persisted - the raw /prompt API never does
-    this, so headless runs would otherwise repeat forever. False re-runs the
-    exact stored values.
+    roll_seeds=True (default) mirrors the browser: every seed/PrimitiveNode set to
+    randomize/increment/decrement is re-rolled and persisted before submit - the
+    raw /prompt API never does, so headless runs repeat forever. False re-runs
+    the stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
     final judge; use it if a valid graph is wrongly blocked). save_dir (or the
@@ -1697,11 +1850,13 @@ async def run_workflow(
     and returns {status: queue_busy} so the USER can choose; True runs next
     (pending jobs untouched); False waits at the back of the line.
 
-    LONG RENDERS / PAID PARTNER JOBS: asyncio.timeout cancels the caller's
-    wait, not the ComfyUI job. Submit wait=False, front=False, then poll
-    get_run_status(prompt_id) until status is success/error/partial and call
-    save_output. prompt_id survives in manage_queue(status).draftsman_submitted
-    for recovery if your own session dies mid-poll."""
+    confirm_spend: partner/API nodes charge the user's account per submit, so a
+    graph containing one is gated - pass True only after they have agreed.
+
+    LONG RENDERS: a timeout cancels the caller's wait, not the ComfyUI job.
+    Submit wait=False, front=False, then poll get_run_status(prompt_id) until
+    success/error/partial and call save_output. prompt_id survives in
+    manage_queue(status).draftsman_submitted if your session dies mid-poll."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
@@ -1722,12 +1877,6 @@ async def run_workflow(
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
-    if roll_seeds and wf.apply_seed_control(object_info):
-        # persist so inspect_workflow reflects what ran and increment/decrement
-        # advance across calls; best-effort (a read-only session dir shouldn't
-        # block the run)
-        with contextlib.suppress(OSError):
-            _session().persist(workflow_id)
     if not allow_invalid:
         errors = [f for f in validate(wf, object_info) if f["level"] == "error"]
         if errors:
@@ -1743,6 +1892,36 @@ async def run_workflow(
         api = wf.to_api(object_info)
     except ValueError as e:
         return {"status": "invalid", "error": str(e)}
+    # advisory only, and silent unless it has something to say. Both checks sit
+    # here, after to_api: they describe what would actually be submitted, and
+    # neither is worth computing for a graph that cannot be.
+    capacity = await _capacity(wf, object_info)
+    warn = {"capacity": capacity} if capacity else {}
+    # Partner/API nodes spend the user's money, so this gate fires BEFORE
+    # anything is queued and returns rather than raises.
+    billable = api_nodes(api, object_info)
+    if billable:
+        if not _config().comfy_api_key:
+            # today this surfaces as an opaque queue-time "Unauthorized"; the
+            # same condition deserves a name and a fix
+            return {
+                "status": "missing_api_key",
+                **_spend_payload(billable),
+                "hint": "this graph needs partner/API nodes, which require COMFY_API_KEY "
+                "in the server's environment. Nothing was queued - ask the user to set it "
+                "(their Comfy Org account key) and restart the MCP server.",
+            }
+        if not confirm_spend:
+            names = ", ".join(f"#{n['node_id']} {n['class_type']}" for n in billable[:_API_NODES_CAP])
+            refusal = await _confirm(
+                ctx,
+                f"This workflow queues {len(billable)} partner/API node(s) ({names}), "
+                "which charge your Comfy Org account. Run it?",
+                _SPEND_HINT,
+                "spend",
+            )
+            if refusal is not None:
+                return {**refusal, **_spend_payload(billable), **warn}
     # Where to relocate finished renders: an explicit save_dir, else the
     # configured mount dir (auto-relocate). None -> leave outputs in ComfyUI.
     dest_root: Path | None = None
@@ -1753,6 +1932,23 @@ async def run_workflow(
             return {"status": "invalid", "error": dest_error}
     elif wait and _config().mount_dir is not None:
         dest_root, mount_error = _resolve_dest("")  # resolves + creates the mount dir
+    # Only now that the run is definitely going ahead: rolling seeds MUTATES and
+    # persists the stored workflow, and a refused run that still advanced the
+    # seed would drift the user's graph without ever queueing anything. Every
+    # early return above this line therefore leaves the stored seed untouched.
+    #
+    # A submit that FAILS (ComfyUI rejects the prompt, or the instance drops) is
+    # deliberately not rolled back. The browser advances the seed at queue time
+    # the same way, and a rollback would be wrong in the ambiguous case that
+    # matters most - a connection lost after the prompt was accepted would
+    # restore a seed that has already rendered.
+    if roll_seeds and wf.apply_seed_control(object_info):
+        # persist so inspect_workflow reflects what ran and increment/decrement
+        # advance across calls; best-effort (a read-only session dir shouldn't
+        # block the run)
+        with contextlib.suppress(OSError):
+            _session().persist(workflow_id)
+        api = wf.to_api(object_info)  # re-serialize with the rolled values
     extra_data: dict[str, Any] | None = None
     if _config().comfy_api_key:
         extra_data = {"api_key_comfy_org": _config().comfy_api_key}
@@ -1766,7 +1962,9 @@ async def run_workflow(
         except ComfyValidationError as e:
             return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
         _record_submission(queued["prompt_id"], workflow_id)
-        response: dict[str, Any] = {"status": "queued", "prompt_id": queued["prompt_id"]}
+        response: dict[str, Any] = {
+            "status": "queued", "prompt_id": queued["prompt_id"], **warn
+        }
         if save_dir:
             # relocation happens after a run finishes, and this call returns
             # before that - say so rather than silently ignoring save_dir
@@ -1786,6 +1984,7 @@ async def run_workflow(
     except ComfyValidationError as e:
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
     _record_submission(result["prompt_id"], workflow_id)
+    result.update(warn)
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
     # relocating/previewing whatever DID render, but downgrade to "partial" so the
     # dropped outputs aren't mistaken for a clean run.
@@ -2199,19 +2398,68 @@ async def upload_image(
     }
 
 
+async def _confirm_destroys_others(
+    ctx: Context | None,
+    client: ComfyClient,
+    action: str,
+    prompt_ids: list[str] | None,
+    confirm: bool,
+) -> dict[str, Any] | None:
+    """Confirm interrupt/clear/delete, but ONLY when it would destroy work this
+    session did not queue. None = go ahead.
+
+    Precision is the whole point. Draftsman already knows which prompt_ids it
+    submitted (_State.submitted), so cleaning up after itself stays silent and
+    a blanket confirmation never trains the user to click through the one
+    prompt that matters - somebody else's render about to be dropped. An
+    unreachable /queue is not a reason to block: the same best-effort posture
+    as run_workflow's queue etiquette check.
+    """
+    if confirm:
+        return None  # the user has already been asked
+    try:
+        queue = await client.get_queue()
+        running = [entry[1] for entry in queue.get("queue_running", [])]
+        pending = [entry[1] for entry in queue.get("queue_pending", [])]
+    except Exception:
+        return None
+    if action == "interrupt":
+        affected = running
+    elif action == "clear":
+        affected = pending
+    else:
+        # only ids actually queued can be destroyed; an unknown id is a no-op
+        affected = [pid for pid in (prompt_ids or []) if pid in (*running, *pending)]
+    foreign = [pid for pid in affected if pid not in _State.submitted]
+    if not foreign:
+        return None
+    return await _confirm(
+        ctx,
+        f"manage_queue(action='{action}') will discard {len(foreign)} queued render(s) "
+        "this session did not submit - most likely the user's own jobs. Continue?",
+        f"NOTHING WAS DISCARDED. {len(foreign)} of the affected prompt(s) were queued "
+        "outside this session (the user's own jobs, or another agent's). "
+        "manage_queue(action='status') lists what is queued and which prompts are "
+        "draftsman's; show the user, get an explicit yes, then re-run with confirm=True.",
+        "queue",
+    )
+
+
 @mcp.tool(annotations=_DESTRUCTIVE_INSTANCE)
 async def manage_queue(
     action: Literal["status", "interrupt", "clear", "delete", "free"],
     prompt_ids: list[str] | None = None,
     unload_models: bool = False,
+    confirm: bool = False,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Inspect or manage the instance's run queue: status (prompt ids, plus
-    draftsman_submitted mapping the ones THIS session queued to their
-    workflow_id - the rest are someone else's job, e.g. the user's own queue),
-    interrupt (stop the currently running prompt), clear (drop ALL pending),
-    delete (drop specific pending prompt_ids), free (release cached VRAM/RAM;
-    unload_models=True also unloads models). clear/delete/interrupt discard
-    other queued work - make sure that's what the user wants."""
+    """Inspect or manage the instance's run queue: status (queued prompt ids;
+    draftsman_submitted maps the ones THIS session queued to their workflow_id -
+    the rest are someone else's job), interrupt (stop the running prompt), clear
+    (drop ALL pending), delete (drop given pending prompt_ids), free (release
+    cached VRAM/RAM; unload_models=True also unloads models). clear/delete/
+    interrupt are gated when they'd discard prompts this session didn't queue;
+    confirm=True once the user agrees."""
     client = _client()
     if action == "status":
         queue = await client.get_queue()
@@ -2233,6 +2481,12 @@ async def manage_queue(
                     "or queued before this server started)"
                 )
         return result
+    if action in ("interrupt", "clear", "delete"):
+        if action == "delete" and not prompt_ids:
+            return {"error": "delete requires prompt_ids"}
+        refusal = await _confirm_destroys_others(ctx, client, action, prompt_ids, confirm)
+        if refusal is not None:
+            return refusal
     if action == "interrupt":
         await client.interrupt()
         return {"done": "interrupt sent to the running prompt"}
@@ -2240,17 +2494,20 @@ async def manage_queue(
         await client.clear_queue()
         return {"done": "pending queue cleared"}
     if action == "delete":
-        if not prompt_ids:
-            return {"error": "delete requires prompt_ids"}
-        await client.delete_queue_items(prompt_ids)
-        return {"done": f"deleted {len(prompt_ids)} pending prompt(s)"}
+        targets = prompt_ids or []
+        await client.delete_queue_items(targets)
+        return {"done": f"deleted {len(targets)} pending prompt(s)"}
     await client.free(unload_models=unload_models)
     return {"done": "freed memory" + (" and unloaded models" if unload_models else "")}
 
 
 @mcp.tool(annotations=_WRITE_INSTANCE)
 async def save_workflow(
-    workflow_id: str, name: str, allow_invalid: bool = False, overwrite: bool = False
+    workflow_id: str,
+    name: str,
+    allow_invalid: bool = False,
+    overwrite: bool = False,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Save the workflow (UI format, with layout/groups/notes) into ComfyUI's
     workflow browser + the session dir. Run organize_workflow first - this is the
@@ -2279,10 +2536,32 @@ async def save_workflow(
     filename = renamed_from = None
     for candidate in candidates:
         try:
-            filename = await _client().save_userdata_workflow(candidate, document, overwrite=overwrite)
+            # Always try without overwrite first, even when overwrite=True: a free
+            # name destroys nothing, so there is nothing to confirm. Only the
+            # FileExistsError below proves a real file is about to be replaced -
+            # asking before that would claim "the current file is lost" about a
+            # file that does not exist, and a decline would refuse a harmless save.
+            filename = await _client().save_userdata_workflow(candidate, document, overwrite=False)
             renamed_from = None if candidate == name else name
             break
         except FileExistsError:
+            if overwrite and candidate == name:
+                refusal = await _confirm(
+                    ctx,
+                    f"Replace the existing workflow '{name}' in ComfyUI's browser? "
+                    "The current file is lost.",
+                    # no fallback hint: a client that cannot ask goes ahead -
+                    # overwrite=True is already an explicit act by the caller
+                    None,
+                    "overwrite",
+                )
+                if refusal is not None:
+                    return {"saved": False, **refusal}
+                filename = await _client().save_userdata_workflow(
+                    candidate, document, overwrite=True
+                )
+                renamed_from = None
+                break
             continue
     if filename is None:
         return {
@@ -2361,24 +2640,35 @@ async def search_node_packs(query: str) -> list[dict[str, Any]]:
         return [{"error": str(e)}]
 
 
-@mcp.tool(annotations=_READ_LOCAL)
+@mcp.tool(annotations=_READ_INSTANCE)
 async def get_model_guidance(family: str = "", model_filename: str = "") -> dict[str, Any]:
     """Tuned settings for a model family: sampling (CFG/steps/samplers), native
     resolutions, technique blocks (face_detailer, hires_fix...), prompt style notes.
     Variant-aware: pass model_filename so turbo/lightning/distill overrides apply.
     Includes any learned overlay from past research plus a research directive -
-    for brand-new models, verify online and record_learning what you find."""
+    for brand-new models, verify online and record_learning what you find. A `fit`
+    block appears only when this GPU can't comfortably hold the model."""
     learned = _config().learned_dir
     if not family:
         return {"families": knowledge.list_families(learned)}
     try:
-        return _cap_sources(knowledge.get_guidance(family, model_filename or None, learned_dir=learned))
+        guidance = knowledge.get_guidance(family, model_filename or None, learned_dir=learned)
     except KeyError:
         return {
             "error": f"no knowledge for '{family}'",
             "families": knowledge.list_families(learned),
             "hint": "research current best settings online, then record_learning them",
         }
+    # The verdict is best-effort: guidance is the valuable part, and an
+    # unreachable instance must never turn a knowledge lookup into an error.
+    with contextlib.suppress(Exception):
+        await _load_devices()
+    fit = _fit(guidance)
+    # The raw hardware block (both numbers, prose notes, a URL) would otherwise
+    # ride along on EVERY guidance call while being useful only when the verdict
+    # is bad. fit_verdict folds what matters into `fit`; the rest is dropped.
+    guidance.pop("hardware", None)
+    return _cap_sources({**guidance, **({"fit": fit} if fit else {})})
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
@@ -2489,6 +2779,7 @@ def capabilities_resource() -> str:
     cfg = _config()
     return json.dumps(
         {
+            "draftsman_version": __version__,
             "comfyui_url": cfg.comfyui_url,
             "relocation": _mount_status(),
             # run_workflow(wait=False) queues in the background; poll get_run_status
@@ -2500,6 +2791,50 @@ def capabilities_resource() -> str:
         },
         indent=2,
     )
+
+
+def _strip_schema_titles() -> int:
+    """Drop the auto-generated ``title`` from every published input schema.
+
+    Pydantic titles every property with a Title-Cased echo of its own name
+    ("workflow_id" -> "Workflow Id") and every argument model with
+    "<tool>Arguments". Both are pure annotation: JSON Schema readers key off the
+    property name, which is already the dict key sitting right next to it.
+
+    That redundancy is ~13% of the tool surface, and the tool surface is re-sent
+    on EVERY request for the life of a session whether or not a tool is ever
+    called - so it is the one place a few thousand characters compound without
+    limit. See test_round18_tokens.py for the ceiling this protects.
+
+    Safe because ``Tool.parameters`` is publish-only: argument validation runs
+    off ``fn_metadata.arg_model``, a separate schema this never touches. The
+    tool's own ``Tool.title`` field is likewise untouched - only the parameter
+    dict is walked.
+
+    Best-effort against a private attribute (``_tool_manager``): a future MCP
+    SDK that renames it costs tokens, never correctness, so this returns 0
+    rather than raising at import time.
+    """
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            node.pop("title", None)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    stripped = 0
+    with contextlib.suppress(AttributeError, TypeError):
+        for tool in mcp._tool_manager._tools.values():
+            walk(tool.parameters)
+            stripped += 1
+    return stripped
+
+
+# Import time, after every @mcp.tool above has registered.
+_strip_schema_titles()
 
 
 def main() -> None:

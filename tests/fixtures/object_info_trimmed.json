@@ -4577,5 +4577,69 @@
   "category": "Dynamic Prompts",
   "display_name": "Random Generator",
   "description": "Randomly generate a prompt from a wildcard template."
+ },
+ "LumaImageNode": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "default": ""
+     }
+    ],
+    "model": [
+     [
+      "photon-1",
+      "photon-flash-1"
+     ],
+     {
+      "default": "photon-1"
+     }
+    ],
+    "aspect_ratio": [
+     [
+      "16:9",
+      "1:1",
+      "9:16"
+     ],
+     {
+      "default": "16:9"
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 4294967295
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "aspect_ratio",
+    "seed"
+   ]
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "LumaImageNode",
+  "display_name": "Luma Text to Image",
+  "description": "Generates images synchronously based on prompt and aspect ratio.",
+  "python_module": "nodes_api",
+  "category": "api node/image/Luma",
+  "output_node": false,
+  "api_node": true
  }
 }

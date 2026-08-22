@@ -26,6 +26,7 @@ def draftsman_server(tmp_path, monkeypatch):
     server._State.client = None
     server._State.registry = None
     server._State.session = None
+    server._State.devices = None
     return server
 
 

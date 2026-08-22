@@ -56,6 +56,12 @@ still ask:
 The quickest way to create these entries is to pick **"Yes, and don't ask again for
 this tool"** the next time Claude Code prompts for one — it writes the same rule.
 
+> **Changed in 0.15.0:** `get_model_guidance` is annotated `openWorldHint: true`
+> rather than closed-world. It still only *reads*, but it now checks the
+> instance's VRAM against the family's requirement and returns a `fit` verdict
+> when the model won't comfortably fit — so it does reach the network. Clients
+> that key auto-approval off `openWorldHint` may re-prompt for it once.
+
 ### Tiers — decide how much to pre-approve
 
 | Tools | What they do | Recommendation |
