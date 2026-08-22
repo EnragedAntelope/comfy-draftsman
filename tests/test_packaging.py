@@ -55,3 +55,27 @@ def test_release_workflow_guards_tag_against_version():
     assert pattern in text
     init = (ROOT / "src" / "comfy_draftsman" / "__init__.py").read_text(encoding="utf-8")
     assert re.search(pattern, init, re.MULTILINE), "regex no longer matches __version__"
+
+
+def test_release_workflow_creates_a_github_release():
+    """A tag is not a Release - GitHub creates one only when asked. Without this
+    job, "Watch -> Releases" notifies nobody, which is the only out-of-band
+    mechanism users have for learning that a new version exists."""
+    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "github-release:" in text
+    assert "gh release create" in text
+    assert "contents: write" in text, "creating a release needs write permission"
+    assert "--notes-file notes.md" in text, "release notes come from the CHANGELOG"
+
+
+def test_changelog_has_an_entry_for_the_current_version():
+    """The release job pulls its notes from the CHANGELOG section matching the
+    tag. A missing section still releases, but with a placeholder nobody wants."""
+    import comfy_draftsman
+
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(
+        rf"^## {re.escape(comfy_draftsman.__version__)}([^0-9.]|$)",
+        changelog,
+        re.MULTILINE,
+    ), f"CHANGELOG.md has no '## {comfy_draftsman.__version__}' section"

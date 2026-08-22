@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+import comfy_draftsman
 from comfy_draftsman import server
 from comfy_draftsman.comfy.client import ComfyConnectionError
 from comfy_draftsman.config import Config
@@ -162,6 +163,7 @@ def test_capabilities_resource_is_json_with_relocation(monkeypatch, tmp_path):
     assert caps["background_runs"] is True
     assert caps["partner_node_api_key"] is False
     assert caps["comfyui_url"] == BASE
+    assert caps["draftsman_version"] == comfy_draftsman.__version__
 
 
 # --- #4 check_setup doctor tool ----------------------------------------------
@@ -178,6 +180,22 @@ async def test_check_setup_all_green(monkeypatch, tmp_path):
     assert by_name["comfyui"]["ok"] is True
     assert by_name["relocation"]["ok"] is True
     assert "hint" not in result
+
+
+@pytest.mark.asyncio
+async def test_check_setup_reports_its_own_version_even_when_comfyui_is_down(
+    monkeypatch, tmp_path
+):
+    """This is the tool whose output lands in a bug report, and it never raises -
+    so it has to answer "which draftsman is this?" on the unhappy path too."""
+    monkeypatch.setattr(server._State, "config", _cfg(tmp_path, tmp_path / "mount"))
+    monkeypatch.setattr(server._State, "client", DownClient())
+    result = await server.check_setup()
+    version_check = result["checks"][0]  # first line, so it survives any clipping
+    assert version_check["name"] == "draftsman_version"
+    assert comfy_draftsman.__version__ in version_check["detail"]
+    # a version line is never a failure - it must not drag `ok` down
+    assert version_check["ok"] is True
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,20 @@ both optional.
   protocol-level test needed a live instance, so it never ran in CI. It asserts
   the *silences* as well as the outputs, and covers all three elicitation
   branches for both gated tools.
+- **A GitHub Release per tag**, with that version's `CHANGELOG.md` section as
+  its notes and the built artifacts attached. A tag alone is not a Release, so
+  without this "Watch → Releases" would have notified nobody — it is the only
+  out-of-band way a user learns a new version exists.
+- **`check_setup` reports the running `comfy-draftsman` version** as its first
+  line (and `draftsman://capabilities` carries it too). `__version__` previously
+  reached no tool response at all, so "which version is this?" was unanswerable
+  from inside a session — including in the bug report where it matters most.
+  It reports on the unhappy path as well; the version line never fails.
+- **README "Updating" section** covering the uvx staleness trap: uv keys a
+  `git+https://` dependency on the resolved commit hash and reuses the cached
+  environment, so a git-URL config silently runs its first-installed commit
+  forever. `uvx comfy-draftsman@latest` re-resolves per start;
+  `uv tool install` + `uv tool upgrade` is the offline-friendly shape.
 - **A tool-surface budget guard** in `tests/test_round18_tokens.py`: total
   description + input-schema payload ≤ 22,200 chars, handshake ≤ 900, tool count
   exactly 29, and proof the FastMCP-injected `ctx` parameter never reaches the

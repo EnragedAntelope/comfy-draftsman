@@ -86,6 +86,42 @@ guidance on a model family your GPU can't comfortably hold and the answer comes
 back with a `fit` verdict — what's needed, what you have, and what to do about
 it. When it fits, it says nothing.
 
+### Updating
+
+**`uvx` caches, and it will not tell you.** uv keys a `git+https://` dependency
+on the *resolved commit hash*, and `uvx` reuses a cached environment rather than
+re-resolving — so a config pointing at the git URL keeps running whatever commit
+it first installed, indefinitely, with no warning. A plain `uvx comfy-draftsman`
+behaves the same way once published.
+
+Pick whichever shape you prefer:
+
+| Config | Updates | Trade-off |
+|---|---|---|
+| `uvx comfy-draftsman@latest` | Every time the server starts | Needs PyPI reachable at start-up — uv errors rather than falling back to its cache on a network failure |
+| `uv tool install comfy-draftsman` | When you run `uv tool upgrade comfy-draftsman` | Starts offline, but you have to remember |
+| `uvx --from git+https://…` | Only after `uv cache clean comfy-draftsman` | Tracks unreleased commits; silently stale otherwise |
+
+`@latest` is the right default for most people. If you work offline often, take
+the `uv tool install` row and run `uv tool upgrade comfy-draftsman` (or
+`uv tool upgrade --all`) when you want a new version.
+
+**To find out what you're running,** ask your agent to call `check_setup` — the
+first line of its report is the running `comfy-draftsman` version. The
+`draftsman://capabilities` resource carries it too.
+
+**To hear about new versions,** watch the repo on GitHub: *Watch → Custom →
+Releases*. Every tagged release publishes to PyPI and creates a GitHub Release
+whose notes are that version's `CHANGELOG.md` section. The server itself never
+phones home — it talks only to your ComfyUI and (read-only) the Comfy Registry,
+and checking for updates is deliberately your call, not a background poll.
+
+**Migrating an existing install** costs nothing but a config edit. Session state
+and learned knowledge live in `~/.comfy-draftsman/` and saved workflows live in
+ComfyUI's own browser, so neither depends on how the server was installed —
+change the `args` line, restart your client, and optionally
+`uv cache clean comfy-draftsman` to reclaim the old checkout.
+
 ### Configuration
 
 | Env var | Default | Purpose |
@@ -222,6 +258,12 @@ Then: *Actions → Release → Run workflow → `testpypi`* for a dry run, and
 refuses to publish when the tag disagrees with `comfy_draftsman.__version__`,
 and re-runs CI's wheel-data assertion before uploading. A PyPI version number
 can never be reused — do the TestPyPI run first.
+
+A tag push also creates a **GitHub Release**, with that version's `CHANGELOG.md`
+section as its notes and the built artifacts attached — that Release is what
+notifies anyone watching the repo, so write the changelog entry before tagging.
+`tests/test_packaging.py` fails the build if the current `__version__` has no
+matching section.
 
 ## Acknowledgments
 

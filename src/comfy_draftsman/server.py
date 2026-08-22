@@ -24,7 +24,7 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import knowledge
+from . import __version__, knowledge
 from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
 from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
@@ -629,6 +629,13 @@ async def check_setup() -> dict[str, Any]:
     relocation is a soft check surfaced via `hint`."""
     cfg = _config()
     checks: list[dict[str, Any]] = []
+
+    # First line, deliberately: this is the tool whose output lands in a bug
+    # report, and "which version is that?" was previously unanswerable from
+    # inside a session - __version__ reached no tool response at all.
+    checks.append(
+        {"name": "draftsman_version", "ok": True, "detail": f"comfy-draftsman {__version__}"}
+    )
 
     # Hard requirement: can we talk to ComfyUI at all?
     try:
@@ -2772,6 +2779,7 @@ def capabilities_resource() -> str:
     cfg = _config()
     return json.dumps(
         {
+            "draftsman_version": __version__,
             "comfyui_url": cfg.comfyui_url,
             "relocation": _mount_status(),
             # run_workflow(wait=False) queues in the background; poll get_run_status
