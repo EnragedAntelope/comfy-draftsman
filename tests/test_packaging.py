@@ -68,6 +68,15 @@ def test_release_workflow_creates_a_github_release():
     assert "--notes-file notes.md" in text, "release notes come from the CHANGELOG"
 
 
+def test_github_release_only_fires_on_a_real_tag_push():
+    """`workflow_dispatch` can be launched from a tag ref, so a ref check alone
+    would let a TestPyPI dry run cut a real Release - notifying every watcher
+    about a version that never reached PyPI, and blocking the real tag later."""
+    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    guard = "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    assert guard in text
+
+
 def test_changelog_has_an_entry_for_the_current_version():
     """The release job pulls its notes from the CHANGELOG section matching the
     tag. A missing section still releases, but with a placeholder nobody wants."""

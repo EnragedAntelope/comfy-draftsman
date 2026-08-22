@@ -102,8 +102,10 @@ Pick whichever shape you prefer:
 | `uv tool install comfy-draftsman` | When you run `uv tool upgrade comfy-draftsman` | Starts offline, but you have to remember |
 | `uvx --from git+https://…` | Only after `uv cache clean comfy-draftsman` | Tracks unreleased commits; silently stale otherwise |
 
-`@latest` is the right default for most people. If you work offline often, take
-the `uv tool install` row and run `uv tool upgrade comfy-draftsman` (or
+`@latest` will be the right default for most people **once the package is
+published** — until then the first two rows resolve nothing and the server will
+not start, so stay on the git row. If you work offline often, take the
+`uv tool install` row and run `uv tool upgrade comfy-draftsman` (or
 `uv tool upgrade --all`) when you want a new version.
 
 **To find out what you're running,** ask your agent to call `check_setup` — the
