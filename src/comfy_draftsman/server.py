@@ -11,6 +11,7 @@ import asyncio
 import base64
 import contextlib
 import difflib
+import inspect
 import json
 import re
 from collections.abc import AsyncIterator
@@ -2793,15 +2794,29 @@ def capabilities_resource() -> str:
     )
 
 
-def _strip_schema_titles() -> int:
-    """Drop the auto-generated ``title`` from every published input schema.
+def _trim_published_surface() -> int:
+    """Shrink what every request pays for, without changing what any tool does.
+
+    Two independent wins, both applied to the published tool surface:
+
+    **1. Docstring indentation.** FastMCP publishes ``fn.__doc__`` raw, and
+    Python only strips a docstring's common leading whitespace at compile time
+    from 3.13 onward. On 3.11/3.12 - and 3.11 is this package's declared floor -
+    every description therefore ships its own source indentation, ~650 chars
+    across the surface, resent forever. ``inspect.cleandoc`` removes it and, as
+    a bonus, makes the surface size identical on every supported interpreter, so
+    the ceiling test means the same thing everywhere it runs. (CI caught this:
+    the ceiling passed on 3.13 and failed on 3.12.)
+
+    **2. Schema titles.** Drop the auto-generated ``title`` from every input
+    schema.
 
     Pydantic titles every property with a Title-Cased echo of its own name
     ("workflow_id" -> "Workflow Id") and every argument model with
     "<tool>Arguments". Both are pure annotation: JSON Schema readers key off the
     property name, which is already the dict key sitting right next to it.
 
-    That redundancy is ~13% of the tool surface, and the tool surface is re-sent
+    Those titles are ~13% of the tool surface, and the tool surface is re-sent
     on EVERY request for the life of a session whether or not a tool is ever
     called - so it is the one place a few thousand characters compound without
     limit. See test_round18_tokens.py for the ceiling this protects.
@@ -2825,16 +2840,18 @@ def _strip_schema_titles() -> int:
             for value in node:
                 walk(value)
 
-    stripped = 0
+    trimmed = 0
     with contextlib.suppress(AttributeError, TypeError):
         for tool in mcp._tool_manager._tools.values():
             walk(tool.parameters)
-            stripped += 1
-    return stripped
+            if tool.description:
+                tool.description = inspect.cleandoc(tool.description)
+            trimmed += 1
+    return trimmed
 
 
 # Import time, after every @mcp.tool above has registered.
-_strip_schema_titles()
+_trim_published_surface()
 
 
 def main() -> None:

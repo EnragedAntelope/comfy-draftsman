@@ -228,10 +228,16 @@ async def test_search_nodes_detail_folds_everything_when_it_fits(
 # of the session, whether or not a single tool is called. That makes them the
 # one budget where a "small addition" compounds without limit, and the reason
 # 0.15.0 added four features with one new parameter between them. Measured
-# 18,582 chars / 29 tools at the time of writing - schema titles stripped; the
-# ceiling leaves ~1% of headroom and no more. If this fails, the fix is to trim
-# an existing docstring, not to raise the number - move the explanation into the
-# response that needs it, where only the caller who hit that path pays for it.
+# 18,582 chars / 29 tools at the time of writing, after _trim_published_surface
+# removes schema titles and docstring indentation; the ceiling leaves ~1% of
+# headroom and no more. If this fails, the fix is to trim an existing docstring,
+# not to raise the number - move the explanation into the response that needs
+# it, where only the caller who hit that path pays for it.
+#
+# This number is interpreter-independent BECAUSE of that cleandoc pass. Without
+# it the surface is ~650 chars larger on 3.11/3.12 than on 3.13, which strips
+# docstring indentation at compile time - so the same assertion passed locally
+# and failed in CI. If that ever returns, fix the cause, not the ceiling.
 
 
 async def _surface():
@@ -309,8 +315,8 @@ def test_the_spend_payload_is_capped_no_matter_how_paid_the_graph_is():
 async def test_no_schema_carries_a_redundant_title():
     """Pydantic titles every property with a Title-Cased echo of its own name.
     That is ~13% of the always-loaded surface for zero information - the key is
-    right there. _strip_schema_titles() removes them; if the MCP SDK renames the
-    private attribute it reaches for, the tokens come back silently and only
+    right there. _trim_published_surface() removes them; if the MCP SDK renames
+    the private attribute it reaches for, the tokens come back silently and only
     this test notices."""
     tools, _ = await _surface()
 
@@ -323,7 +329,7 @@ async def test_no_schema_carries_a_redundant_title():
 
     offenders = [t.name for t in tools if titles(t.inputSchema)]
     assert not offenders, f"schema titles came back for: {offenders}"
-    assert server._strip_schema_titles() == len(tools)
+    assert server._trim_published_surface() == len(tools)
 
 
 @pytest.mark.asyncio
@@ -336,3 +342,21 @@ async def test_stripping_titles_did_not_break_argument_validation():
     tool = server.mcp._tool_manager.get_tool("view_output")
     with pytest.raises(ToolError, match="max_dim"):
         await tool.run({"max_dim": "not-an-int"})
+
+
+@pytest.mark.asyncio
+async def test_descriptions_carry_no_source_indentation():
+    """FastMCP publishes ``fn.__doc__`` raw, and only Python 3.13+ strips a
+    docstring's common leading whitespace at compile time. Without the cleandoc
+    pass, every description ships its own source indentation on 3.11/3.12 - the
+    versions most users are on, and 3.11 is this package's floor - and the
+    surface measures ~650 chars larger there than on 3.13. Asserting the
+    *absence of indentation* rather than a byte count keeps this meaningful on
+    every interpreter."""
+    tools, _ = await _surface()
+    offenders = [
+        t.name
+        for t in tools
+        if any(line.startswith(("    ", "	")) for line in (t.description or "").splitlines())
+    ]
+    assert not offenders, f"published docstrings still indented: {offenders}"

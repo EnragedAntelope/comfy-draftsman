@@ -6,8 +6,8 @@ Three gaps closed against what a local ComfyUI MCP server is expected to do:
 be installable from an index, refuse to let a user sink a render into a GPU
 that cannot hold the model, and refuse to spend credits without consent. All
 three added while what every request pays for went **down**: the tool surface
-is 18,582 chars across 29 tools, against 21,724 before this round (-14.5%,
-ceiling now 18,800), and the handshake block is unchanged at 885 chars. Two new
+is 18,579 chars across 29 tools on every supported Python, against 21,724
+before this round (-14.5%, ceiling now 18,800), and the handshake block is unchanged at 885 chars. Two new
 parameters between all four features (`run_workflow.confirm_spend`,
 `manage_queue.confirm`), both optional.
 
@@ -90,6 +90,13 @@ parameters between all four features (`run_workflow.confirm_spend`,
   (`missing_api_key`) instead of as an opaque queue-time `Unauthorized`.
 - `run_workflow`'s docstring was trimmed to pay for the `confirm_spend` clause,
   keeping the per-tool budget.
+- **Docstring indentation no longer ships in tool descriptions.** FastMCP
+  publishes `fn.__doc__` raw, and only Python 3.13+ strips a docstring's common
+  leading whitespace at compile time — so on 3.11/3.12 (3.11 is this package's
+  floor) every description carried its own source indentation, ~650 chars across
+  the surface, on every request forever. `inspect.cleandoc` removes it, and as a
+  side effect the surface is now byte-identical on every supported interpreter.
+  Caught by CI: the ceiling passed on 3.13 and failed on 3.12.
 - **Every published input schema is stripped of its auto-generated `title`.**
   Pydantic titles each property with a Title-Cased echo of its own name
   (`workflow_id` -> "Workflow Id") and each argument model with

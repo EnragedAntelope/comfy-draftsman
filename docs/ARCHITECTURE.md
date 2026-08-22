@@ -215,8 +215,14 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   whether or not any tool is called - a response payload is paid once, by the
   one caller who asked for it. So the cheapest place to explain a new behavior
   is the response of the gate that fires, not the docstring everyone loads.
-  `server._strip_schema_titles()` runs at import, after the last `@mcp.tool`,
-  and drops pydantic's auto-generated `title` from every published schema
+  `server._trim_published_surface()` runs at import, after the last `@mcp.tool`.
+  It does two things. It `inspect.cleandoc`s every description, because FastMCP
+  publishes `fn.__doc__` raw and only Python 3.13+ strips docstring indentation
+  at compile time - without this, 3.11/3.12 users pay ~650 chars of source
+  indentation forever, and the surface measures differently per interpreter
+  (**this is exactly how it was found: the ceiling test passed locally on 3.13
+  and failed in CI on 3.12**). And it drops pydantic's auto-generated `title`
+  from every published schema
   (`workflow_id` -> "Workflow Id", `<tool>Arguments`): ~13% of the surface for
   zero information, since the key it echoes sits right beside it. **Gotcha:** it
   reaches `mcp._tool_manager._tools`, a private SDK attribute, so it is wrapped
@@ -225,6 +231,9 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `Tool.parameters` is publish-only: argument validation runs off
   `fn_metadata.arg_model`, a separate schema nothing here touches (proven by
   `test_stripping_titles_did_not_break_argument_validation`, not assumed).
+  **Gotcha for any ceiling test:** assert the *absence of indentation*, not a
+  byte count, for anything that can vary by interpreter - a byte count that
+  means something different per Python version is a gate that fails in CI only.
 - **Every list a tool returns must be bounded, and per-item repetition is a
   bug.** This is the rule the 0.9.0 audit found broken in five places, so it is
   written down with its enforcement points:

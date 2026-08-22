@@ -22,7 +22,7 @@ _Last verified: 2026-08-22_
 - **Two-layer knowledge system.** Per-family tuning floor (YAML) + persistent learned overlay. `record_learning` saves researched settings so future sessions start smarter. The floor also carries optional, sourced VRAM requirements behind `knowledge.fit_verdict`.
 - **Gates that teach reactively.** The VRAM fit verdict and the partner-node spend gate both fire before anything irreversible, so each explains itself in its own response instead of in a docstring everyone pays for.
 - **V3 dynamic combos first-class.** `COMFY_DYNAMICCOMBO_V3`, `COMFY_AUTOGROW_V3`, match types, and socketless widgets are handled natively — values round-trip through the API's dotted-key form.
-- **Token discipline.** Every tool returns bounded lists; findings are severity-capped; summaries clip long strings. Full object_info is never returned to the model. The tool surface — the one budget paid on *every* request — is stripped of pydantic's auto-generated schema titles at import and held under a ceiling by `tests/test_round18_tokens.py`.
+- **Token discipline.** Every tool returns bounded lists; findings are severity-capped; summaries clip long strings. Full object_info is never returned to the model. The tool surface — the one budget paid on *every* request — is stripped of pydantic's auto-generated schema titles *and* of docstring indentation at import (`_trim_published_surface`), and held under a ceiling by `tests/test_round18_tokens.py`. Keep that ceiling interpreter-independent: only Python 3.13+ strips docstring indentation at compile time.
 
 ## Layout
 
