@@ -31,10 +31,6 @@ Every agent tool for ComfyUI can emit raw API-format JSON — a working but unre
 
 ## Install
 
-> **Not on PyPI yet.** The release pipeline is wired and the first tag is
-> pending, so **use the git install below today**; the `comfy-draftsman`
-> shorthand starts working the moment `v0.15.0` is published.
-
 **Claude Code:**
 
 ```bash
@@ -61,10 +57,10 @@ claude mcp add comfy-draftsman \
 }
 ```
 
-**Once published**, drop the `git+https` indirection — `uv tool install
-comfy-draftsman` (or `pip install comfy-draftsman`) puts the server on PATH,
-and both configs above shorten to plain `uvx comfy-draftsman` /
-`"args": ["comfy-draftsman"]`.
+Prefer the published package? `uv tool install comfy-draftsman` (or
+`pip install comfy-draftsman`) puts the server on PATH, and both configs above
+shorten to plain `uvx comfy-draftsman` / `"args": ["comfy-draftsman"]`. The
+`git+https` form above tracks unreleased commits.
 
 `COMFYUI_MOUNT_DIR` is optional but recommended: it's a folder your agent (or a
 sandboxed client like Claude Desktop / Cowork) can actually read, and `save_output`
@@ -102,10 +98,8 @@ Pick whichever shape you prefer:
 | `uv tool install comfy-draftsman` | When you run `uv tool upgrade comfy-draftsman` | Starts offline, but you have to remember |
 | `uvx --from git+https://…` | Only after `uv cache clean comfy-draftsman` | Tracks unreleased commits; silently stale otherwise |
 
-`@latest` will be the right default for most people **once the package is
-published** — until then the first two rows resolve nothing and the server will
-not start, so stay on the git row. If you work offline often, take the
-`uv tool install` row and run `uv tool upgrade comfy-draftsman` (or
+`@latest` is the right default for most people. If you work offline often,
+take the `uv tool install` row and run `uv tool upgrade comfy-draftsman` (or
 `uv tool upgrade --all`) when you want a new version.
 
 **To find out what you're running,** ask your agent to call `check_setup` — the

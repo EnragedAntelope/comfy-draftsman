@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.15.1 — fix an unstartable fresh install
+
+0.15.0 could not start when installed from an index. `mcp` 2.0.0 removed
+`mcp.server.fastmcp`, which `server.py` imports at module scope, and the
+declared pin was `mcp>=1.10` with no ceiling — so a fresh `pip install` /
+`uvx` resolved 2.x and raised `ModuleNotFoundError` before the server came up.
+
+Nothing local could see it. Dev and every CI test job install from `uv.lock`,
+which pins mcp 1.28.1, so all 729 tests passed on six interpreter/OS legs
+against a version the constraint no longer guaranteed.
+
+### Fixed
+
+- **`mcp>=1.10,<2`.** Verified against the index: 1.29.0 imports, 2.0.0 raises.
+- **Both wheel checks now import `comfy_draftsman.server`,** not just
+  `comfy_draftsman.knowledge`. These two jobs resolve dependencies against the
+  *index* rather than the lockfile, making them the only place a bad pin is
+  visible — and importing a dependency-free subpackage walked straight past it.
+  This is the check that would have caught 0.15.0.
+- `test_runtime_dependencies_are_upper_bounded` requires a ceiling on the pins
+  whose major version would break a fresh install at module scope, and
+  `test_the_wheel_check_imports_the_server_module` keeps the server import wired
+  into both workflows.
+
+**Gotcha worth keeping:** a green lockfile-based test suite says nothing about
+what a new user resolves. Only an install from the index does.
+
 ## 0.15.0 — PyPI pipeline, VRAM fit verdict, partner-node spend gate
 
 Three gaps closed against what a local ComfyUI MCP server is expected to do:

@@ -34,9 +34,11 @@ jobs:
       - name: Test
         run: uv run pytest
 
-  # The package ships non-Python data (knowledge/families/*.yaml). Nothing in the
-  # test suite proves those land in the wheel - a build that quietly dropped them
-  # would still pass every test, then fail on a user's first get_model_guidance.
+  # The only job that installs from the INDEX instead of uv.lock, so it is the
+  # only one that sees a fresh user's dependency resolution. It proves two things
+  # no test can: that the non-Python data (knowledge/families/*.yaml) lands in the
+  # wheel, and that the declared pins actually import - an unbounded pin that a
+  # new major version breaks is invisible to every locked job.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -46,11 +48,17 @@ jobs:
           python-version: "3.11"
       - name: Build wheel
         run: uv build
-      - name: Knowledge data is importable from the built wheel
+      - name: The wheel imports and ships its data, resolved against the index
         shell: bash
         run: |
           wheel=$(ls dist/*.whl)
           uv run --isolated --no-project --with "$wheel" python -c "
+          # server first: unlike every other job, this resolves the dependency
+          # pins AGAINST THE INDEX rather than uv.lock, so it is the only check
+          # that sees what a new user actually gets. Importing just the knowledge
+          # package missed mcp 2.0.0 dropping mcp.server.fastmcp, and 0.15.0
+          # shipped unstartable.
+          import comfy_draftsman.server  # noqa: F401
           import comfy_draftsman, comfy_draftsman.knowledge as k
           families = k.list_families()
           print(comfy_draftsman.__version__, families)

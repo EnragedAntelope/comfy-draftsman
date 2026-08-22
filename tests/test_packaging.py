@@ -101,3 +101,37 @@ def test_release_workflow_is_least_privilege_by_default():
     assert data["jobs"]["publish"]["permissions"] == {"id-token": "write"}
     assert data["jobs"]["github-release"]["permissions"] == {"contents": "write"}
     assert "permissions" not in data["jobs"]["build"], "build needs no token at all"
+
+
+def test_runtime_dependencies_are_upper_bounded():
+    """An unbounded pin is invisible to every locked job - uv.lock keeps dev and
+    CI on a working version while a fresh `pip install` resolves the new major
+    and fails on import. That is exactly how 0.15.0 shipped unstartable: mcp
+    2.0.0 removed `mcp.server.fastmcp`, which server.py imports at module scope,
+    and `mcp>=1.10` happily resolved it.
+
+    Only `mcp` is required to carry a ceiling, and deliberately so. It is the
+    one dependency with a *demonstrated* major-version break in an import
+    server.py performs at module scope. The rest stay open on purpose - this
+    repo does not synthesize a requirement it cannot point at, and an invented
+    ceiling causes resolution conflicts for users to prevent a break nobody has
+    observed. pydantic in particular needs no direct cap: mcp already requires
+    `pydantic<3.0.0`, so a second copy here would be redundant and could drift
+    out of step with it."""
+    deps = _pyproject()["project"]["dependencies"]
+    pins = {d.split(">=")[0].split("[")[0].strip(): d for d in deps}
+    assert "mcp" in pins, "mcp is no longer a declared dependency"
+    assert "<" in pins["mcp"], (
+        "mcp has no upper bound - a new major can break a fresh install while "
+        f"uv.lock hides it from dev and CI. Got: {pins['mcp']!r}"
+    )
+
+
+def test_the_wheel_check_imports_the_server_module():
+    """Both wheel checks resolve deps against the index rather than uv.lock, so
+    they are the only place a bad pin can surface. Importing only the knowledge
+    package is what let mcp 2.0.0 through - the server import is the assertion
+    that matters, so it must stay wired up in both workflows."""
+    for name in ("ci.yml", "release.yml"):
+        text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        assert "import comfy_draftsman.server" in text, f"{name} lost the server import"

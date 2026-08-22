@@ -58,6 +58,11 @@ jobs:
         run: |
           wheel=$(ls dist/*.whl)
           uv run --isolated --no-project --with "$wheel" python -c "
+          # server first: this import resolves the dependency pins AGAINST THE
+          # INDEX, not the lockfile, so it is the only check that sees what a
+          # new user actually gets. Importing only the knowledge package missed
+          # mcp 2.0.0 removing mcp.server.fastmcp, and 0.15.0 shipped unstartable.
+          import comfy_draftsman.server  # noqa: F401
           import comfy_draftsman, comfy_draftsman.knowledge as k
           families = k.list_families()
           print(comfy_draftsman.__version__, families)
