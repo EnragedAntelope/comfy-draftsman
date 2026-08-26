@@ -14,6 +14,7 @@ in the UI graph but are resolved away during API serialization.
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import uuid
@@ -195,6 +196,28 @@ def _as_pair(value: Any) -> list[float]:
         return [float(value.get("0", 0)), float(value.get("1", 0))]
     return [float(value[0]), float(value[1])]
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Coerce a UI field that should be a dict.
+
+    Some exporters serialize these as JSON strings (e.g. properties: "{}").
+    A bare `or {}` keeps a non-empty string (truthy) and the stray str then
+    breaks later `.get()` calls (organize_workflow: 'str' object has no
+    attribute 'get'). Parse a JSON string back to a dict; fall back to {}.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    return {}
+
 
 class Workflow:
     def __init__(self) -> None:
@@ -225,9 +248,9 @@ class Workflow:
     @classmethod
     def from_ui(cls, data: dict[str, Any]) -> Workflow:
         wf = cls()
-        wf.extra = data.get("extra", {}) or {}
-        wf.config = data.get("config", {}) or {}
-        wf.definitions = data.get("definitions", {}) or {}
+        wf.extra = _as_dict(data.get("extra"))
+        wf.config = _as_dict(data.get("config"))
+        wf.definitions = _as_dict(data.get("definitions"))
         # preserve an existing valid workflow uuid if the source has one;
         # otherwise keep the freshly minted one from __init__
         existing_id = data.get("id") or wf.extra.get("workflow_id")
@@ -256,8 +279,8 @@ class Workflow:
                 bgcolor=raw.get("bgcolor"),
                 mode=raw.get("mode", MODE_NORMAL),
                 order=raw.get("order", 0),
-                flags=raw.get("flags", {}) or {},
-                properties=raw.get("properties", {}) or {},
+                flags=_as_dict(raw.get("flags")),
+                properties=_as_dict(raw.get("properties")),
                 widgets_values=raw.get("widgets_values", []),
             )
             for i in raw.get("inputs", []) or []:

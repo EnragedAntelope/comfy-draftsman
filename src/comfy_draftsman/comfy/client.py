@@ -345,27 +345,39 @@ class ComfyClient:
             # clean success with mysteriously-empty outputs.
             partial_node_errors = queued.get("node_errors") or {}
             error: dict[str, Any] | None = None
-            async with asyncio.timeout(timeout):
-                while True:
-                    frame = await ws.recv()
-                    if isinstance(frame, bytes):  # preview image frames
-                        continue
-                    event = json.loads(frame)
-                    data = event.get("data", {})
-                    if data.get("prompt_id") not in (None, prompt_id):
-                        continue
-                    kind = event.get("type")
-                    if kind == "execution_error":
-                        error = data
-                        break
-                    if kind == "execution_interrupted":
-                        error = {"exception_message": "interrupted"}
-                        break
-                    finished = kind == "execution_success" or (
-                        kind == "executing" and data.get("node") is None
-                    )
-                    if finished and data.get("prompt_id") == prompt_id:
-                        break
+            timed_out = False
+            try:
+                async with asyncio.timeout(timeout):
+                    while True:
+                        frame = await ws.recv()
+                        if isinstance(frame, bytes):
+                            continue
+                        event = json.loads(frame)
+                        data = event.get("data", {})
+                        if data.get("prompt_id") not in (None, prompt_id):
+                            continue
+                        kind = event.get("type")
+                        if kind == "execution_error":
+                            error = data
+                            break
+                        if kind == "execution_interrupted":
+                            error = {"exception_message": "interrupted"}
+                            break
+                        finished = kind == "execution_success" or (
+                            kind == "executing" and data.get("node") is None
+                        )
+                        if finished and data.get("prompt_id") == prompt_id:
+                            break
+            except TimeoutError:
+                timed_out = True
+            if timed_out:
+                return {
+                    "status": "timeout",
+                    "prompt_id": prompt_id,
+                    "hint": "wait=True timed out before the ComfyUI job finished, but the "
+                            "job is still running. Poll get_run_status(prompt_id=...) and "
+                            "call save_output once it reports success.",
+                }
         # /history can lag the execution_success event by a beat; on a clean run
         # with no outputs yet, re-poll briefly before trusting an empty list.
         outputs: list[dict[str, Any]] = []

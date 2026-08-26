@@ -1155,15 +1155,27 @@ async def find_workflow(intent: str, limit: int = 5) -> dict[str, Any]:
 
 @mcp.tool(annotations=_EDIT_LOCAL)
 async def import_workflow(
-    workflow_json: str = "", name: str = "", title: str = ""
+    workflow_json: str = "", name: str = "", title: str = "", file_path: str = ""
 ) -> dict[str, Any]:
-    """Import an existing workflow into the session. EITHER paste JSON as
-    `workflow_json` (UI format with nodes/links, or API format
-    {id: {class_type, inputs}}), OR pass `name` to load one straight from
-    ComfyUI's workflow browser (see list_workflows) - preferred for large files,
-    no pasting needed. Use for beautifying/diagnosing/porting outside work."""
-    if bool(workflow_json) == bool(name):
-        return {"error": "pass exactly one of workflow_json (pasted JSON) or name (see list_workflows)"}
+    """Import an existing workflow into the session. Provide exactly ONE source:
+
+    - `workflow_json`: paste the JSON inline (UI format with nodes/links, or API
+      format {id: {class_type, inputs}})
+    - `name`: load straight from ComfyUI's workflow browser (see list_workflows) -
+      preferred for large files, no pasting needed
+    - `file_path`: read a local .json file
+    Use for beautifying/diagnosing/porting outside work."""
+    sources = [workflow_json, name, file_path]
+    if sum(bool(s) for s in sources) != 1:
+        return {
+            "error": "pass exactly one of workflow_json (pasted JSON), name (see "
+            "list_workflows), or file_path (local .json path)",
+        }
+    if file_path:
+        try:
+            workflow_json = Path(file_path).read_text(encoding="utf-8")
+        except OSError as e:
+            return {"error": f"could not read file_path {file_path!r}: {e}"}
     if name:
         try:
             data = await _client().get_userdata_workflow(name)
@@ -1301,16 +1313,15 @@ async def edit_workflow(
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
 
-    All six have a definition-scoped twin taking an extra "definition_id", for
-    editing inside a subgraph definition: add_node_to_definition,
+    All six have a definition-scoped twin taking an extra "definition_id" for subgraph edits: add_node_to_definition,
     remove_node_from_definition, and connect/set_widget/set_title/
     set_mode_in_definition. A malformed op reports its own required keys.
 
     Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
     add_group {title, node_ids:[int,...], color?}; set_group {group_id, title?,
     node_ids?, color?}; remove_group {group_id}. Groups are addressed by member
-    node_ids - bounding comes from their own extents. organize_workflow re-lays
-    out and re-groups everything, so run these AFTER it, not before.
+    node_ids - bounding comes from their own extents. group_id is the integer id shown as '#N' by inspect_workflow; color is a hex string. organize_workflow re-lays
+    out and re-groups everything, so run these after it.
 
     Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
     take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
@@ -1832,7 +1843,7 @@ async def run_workflow(
     wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
     workflow works before saving/delivering.
 
-    Text-only caller (no image input)? Pass return_preview=False - the result then
+    Text-only caller? Pass return_preview=False - result
     carries a file path instead of a thumbnail if save_dir/COMFYUI_MOUNT_DIR is set.
 
     roll_seeds=True (default) mirrors the browser: every seed/PrimitiveNode set to
@@ -1841,18 +1852,18 @@ async def run_workflow(
     the stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
-    final judge; use it if a valid graph is wrongly blocked). save_dir (or the
-    configured COMFYUI_MOUNT_DIR) relocates every finished output file - images,
-    video, audio alike - into a folder the caller can reach, returning
+    final judge; use it if a valid graph is wrongly blocked). save_dir (or
+    COMFYUI_MOUNT_DIR) relocates finished output files - images,
+    video, audio - into a folder the caller can reach, returning
     saved_paths. Needs finished files (wait=True); a background run relocates
     later via save_output(prompt_id=...).
 
-    front: None (default) refuses to queue when >=2 prompts are already pending
+    front: None (default) refuses to queue when >=2 prompts are pending
     and returns {status: queue_busy} so the USER can choose; True runs next
-    (pending jobs untouched); False waits at the back of the line.
+    False waits at the back of the line.
 
-    confirm_spend: partner/API nodes charge the user's account per submit, so a
-    graph containing one is gated - pass True only after they have agreed.
+    confirm_spend: partner/API nodes charge per submit, so a
+    graph containing one is gated - pass True only after they agree.
 
     LONG RENDERS: a timeout cancels the caller's wait, not the ComfyUI job.
     Submit wait=False, front=False, then poll get_run_status(prompt_id) until
@@ -1954,6 +1965,14 @@ async def run_workflow(
     if _config().comfy_api_key:
         extra_data = {"api_key_comfy_org": _config().comfy_api_key}
     if not wait:
+        if save_dir:
+            return {
+                "status": "invalid",
+                "error": "save_dir only applies to a synchronous (wait=True) run, because "
+                         "relocation happens after the render finishes. For a background run, "
+                         "omit save_dir and call save_output(prompt_id=..., dest_dir=...) once "
+                         "get_run_status reports success.",
+            }
         tracker = _tracker()
         tracker.ensure_running()
         try:
@@ -1966,14 +1985,6 @@ async def run_workflow(
         response: dict[str, Any] = {
             "status": "queued", "prompt_id": queued["prompt_id"], **warn
         }
-        if save_dir:
-            # relocation happens after a run finishes, and this call returns
-            # before that - say so rather than silently ignoring save_dir
-            response["save_dir_ignored"] = (
-                f"save_dir {save_dir!r} does not apply to a background run: nothing has "
-                "rendered yet. When get_run_status reports success, relocate with "
-                f"save_output(prompt_id={queued['prompt_id']!r}, dest_dir={save_dir!r})"
-            )
         if queued.get("node_errors"):
             response["node_errors"] = queued["node_errors"]
             response["warning"] = _PARTIAL_RUN_WARNING
@@ -2603,14 +2614,30 @@ async def save_workflow(
 
 @mcp.tool(annotations=_READ_LOCAL)
 async def export_workflow_json(
-    workflow_id: str, format: Literal["ui", "api"] = "ui"
+    workflow_id: str, format: Literal["ui", "api"] = "ui", path: str = ""
 ) -> dict[str, Any]:
     """The workflow as JSON: 'ui' (shareable, opens in the editor, keeps layout &
-    notes) or 'api' (for POST /prompt automation)."""
+    notes) or 'api' (for POST /prompt automation).
+
+    Pass path to also write the JSON to a file; the dict then reports saved_to
+    instead of embedding the graph.
+    """
     wf = _wf(workflow_id)
-    if format == "api":
-        return wf.to_api(await _object_info())
-    return wf.to_ui()
+    data = wf.to_api(await _object_info()) if format == "api" else wf.to_ui()
+    if path:
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except OSError as e:
+            return {"error": f"could not write export to {path!r}: {e}"}
+        return {
+            "saved_to": str(p),
+            "format": format,
+            "bytes": p.stat().st_size,
+            "note": "graph written to file; omit path to get the JSON inline",
+        }
+    return data
 
 
 # --------------------------------------------------------------------------
