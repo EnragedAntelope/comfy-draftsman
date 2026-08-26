@@ -1313,15 +1313,17 @@ async def edit_workflow(
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
 
-    All six have a definition-scoped twin taking an extra "definition_id" for subgraph edits: add_node_to_definition,
-    remove_node_from_definition, and connect/set_widget/set_title/
-    set_mode_in_definition. A malformed op reports its own required keys.
+    All six have a definition-scoped twin taking an extra "definition_id" for
+    subgraph edits: add_node_to_definition, remove_node_from_definition, and
+    connect/set_widget/set_title/set_mode_in_definition. A malformed op reports
+    its own required keys.
 
     Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
     add_group {title, node_ids:[int,...], color?}; set_group {group_id, title?,
     node_ids?, color?}; remove_group {group_id}. Groups are addressed by member
-    node_ids - bounding comes from their own extents. group_id is the integer id shown as '#N' by inspect_workflow; color is a hex string. organize_workflow re-lays
-    out and re-groups everything, so run these after it.
+    node_ids - bounding comes from their own extents. group_id is the integer id
+    shown as '#N' by inspect_workflow; color is a hex string. organize_workflow
+    re-lays out and re-groups everything, so run these after it.
 
     Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
     take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
@@ -1859,7 +1861,7 @@ async def run_workflow(
     later via save_output(prompt_id=...).
 
     front: None (default) refuses to queue when >=2 prompts are pending
-    and returns {status: queue_busy} so the USER can choose; True runs next
+    and returns {status: queue_busy} so the USER can choose; True runs next;
     False waits at the back of the line.
 
     confirm_spend: partner/API nodes charge per submit, so a
