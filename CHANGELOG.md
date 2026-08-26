@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.16.0 — Round 26: validation fixes, local file import/export
+
+Triaged 11 reported items against the real code; 8 were confirmed and fixed,
+3 deferred as open TODOs in `docs/ARCHITECTURE.md` (`refresh_node` schema
+invalidation, `diff_workflow`, the MCP 2.x port).
+
+### Fixed
+
+- **A string-serialized UI dict (`properties`/`flags`/`extra`/`config` saved
+  as `"{}"` instead of `{}`) crashed `organize_workflow`** with `'str' object
+  has no attribute 'get'`. `Workflow.from_ui` now coerces these fields through
+  a new `_as_dict` helper: parses a JSON string back to a dict, falls back to
+  `{}` on anything else. A bare `value or {}` wasn't enough — a non-empty
+  string is truthy, so the stray `str` sailed through untouched.
+- `run_and_wait` raised `TimeoutError` on a `wait=True` timeout, losing the
+  `prompt_id` of a job that was still running on the ComfyUI side. Now caught
+  and returned as `{status: "timeout", prompt_id, hint}` pointing at
+  `get_run_status`.
+- `combo-value-unlisted` demoted `warning` → `info`: a value a custom node's
+  own client populates outside the schema's static choice list is normal, not
+  a caller mistake.
+
+### Added
+
+- `export_workflow_json(path=...)` writes the graph to a local file and
+  returns `saved_to` instead of embedding it inline — for large graphs where
+  round-tripping the JSON through the response is wasteful.
+- `import_workflow(file_path=...)` reads a local `.json` file, alongside the
+  existing `workflow_json` (pasted) and `name` (ComfyUI workflow browser)
+  sources.
+- `node_summary` exposes `input_count`/`widget_count` so a caller can tell a
+  dynamic node's declared-vs-visible widget count apart without counting
+  `inputs` by hand.
+
+### Behavior change
+
+- **`run_workflow(wait=False, save_dir=...)` now refuses to queue** with
+  `{status: "invalid"}` instead of queuing the job and silently ignoring
+  `save_dir` (relocation only ever happened after a *finished* render, which a
+  background call returns before). Callers relying on the old silent no-op
+  must drop `save_dir` from a background call and relocate afterward with
+  `save_output(prompt_id=..., dest_dir=...)` once `get_run_status` reports
+  success.
+
 ## 0.15.1 — fix an unstartable fresh install
 
 0.15.0 could not start when installed from an index. `mcp` 2.0.0 removed

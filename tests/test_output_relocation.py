@@ -250,10 +250,11 @@ async def test_background_run_says_save_dir_does_not_apply(monkeypatch, tmp_path
     dest = tmp_path / "elsewhere"
 
     result = await server.run_workflow(wf_id, wait=False, save_dir=str(dest))
-    assert result["status"] == "queued"
-    # previously: the dir was created, then silently ignored
-    assert "save_dir_ignored" in result
-    assert "save_output(prompt_id='queued-1'" in result["save_dir_ignored"]
+    # a background run returns before anything renders, so save_dir can never
+    # apply - reject upfront rather than silently ignoring it
+    assert result["status"] == "invalid"
+    assert "save_dir" in result["error"].lower()
+    assert "save_output" in result["error"]
 
 
 async def test_run_workflow_no_relocation_without_mount(monkeypatch, tmp_path):

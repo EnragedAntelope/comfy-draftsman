@@ -276,10 +276,10 @@ def test_core_combo_bad_value_is_error():
     assert ("invalid-combo-value", "error") in codes
 
 
-def test_custom_client_populated_combo_is_warning_not_error():
+def test_custom_client_populated_combo_is_info_not_error():
     wf = _single_node_wf("WildcardPicker", ["__typed_by_user__"])
     findings = [f for f in validate(wf, OI) if f.get("input") == "wildcard"]
-    assert findings and findings[0]["level"] == "warning"
+    assert findings and findings[0]["level"] == "info"
     assert findings[0]["code"] == "combo-value-unlisted"
     assert all(f["level"] != "error" for f in validate(wf, OI))
 

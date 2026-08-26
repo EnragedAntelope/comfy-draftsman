@@ -243,12 +243,15 @@ def node_summary(
         {"name": str(out_names[i]) if i < len(out_names) else str(t), "type": str(t)}
         for i, t in enumerate(schema.get("output") or [])
     ]
+    widget_count = sum(1 for e in inputs if e.get("widget"))
     return {
         "class_type": class_type,
         "display_name": schema.get("display_name", class_type),
         "description": (schema.get("description") or "")[:300],
         "category": schema.get("category", ""),
         "output_node": bool(schema.get("output_node")),
+        "input_count": len(inputs),
+        "widget_count": widget_count,
         "inputs": inputs,
         "outputs": outputs,
     }

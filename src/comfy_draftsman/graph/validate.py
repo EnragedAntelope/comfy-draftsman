@@ -623,7 +623,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     # ComfyUI is the final judge.
                     findings.append(
                         _finding(
-                            "warning",
+                            "info",
                             "combo-value-unlisted",
                             f"{node.type} #{node.id}: '{name}' = {value!r} is not in this "
                             "instance's schema options - fine if this custom node fills the "
