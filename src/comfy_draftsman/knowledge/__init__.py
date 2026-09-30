@@ -426,3 +426,14 @@ def fit_verdict(
         )
     return None
 
+
+
+def detect_family_from_filename(
+    filename: str, learned_dir: Path | str | None = None
+) -> tuple[str | None, str | None]:
+    """(family, matched_pattern) for a bare model filename, using the same
+    pattern index and specificity tie-break as graph detection."""
+    family, pattern, _ = _detect_over_refs(
+        [("unet_name", filename, "primary")], _detect_index(learned_dir)
+    )
+    return family, pattern

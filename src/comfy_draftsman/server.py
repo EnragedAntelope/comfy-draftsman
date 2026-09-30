@@ -22,7 +22,7 @@ from typing import Any, ClassVar, Literal
 import yaml
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
-from mcp.types import ToolAnnotations
+from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import __version__, knowledge
@@ -198,12 +198,15 @@ async def _confirm(
 ) -> dict[str, Any] | None:
     """Ask the user before doing something irreversible. None = go ahead.
 
-    Three-way degrade, because elicitation support varies by client and the
+    Degrades four ways, because elicitation support varies by client and the
     no-capability path is the common case on some of them:
 
     1. client elicits and the user accepts -> None, the caller proceeds
-    2. client elicits and the user declines -> ``{prefix}_declined``
-    3. client cannot elicit at all -> ``{prefix}_confirmation_required`` carrying
+    2. the user explicitly declines -> ``{prefix}_declined``
+    3. the dialog was cancelled/dismissed (a client that never rendered it looks
+       the same) -> ``{prefix}_not_confirmed``: NOT a refusal - ask in chat
+    4. client cannot elicit at all (capability not advertised, or
+       DRAFTSMAN_ELICITATION=off) -> ``{prefix}_confirmation_required`` carrying
        ``fallback_hint``, the instructions for re-running once the user really
        has agreed - or, when ``fallback_hint`` is None, simply proceed.
 
@@ -217,16 +220,32 @@ async def _confirm(
     queue_busy result, because "nothing happened, here is why" is an outcome
     the calling agent has to read and act on, not an error to retry.
     """
-    if ctx is not None:
+    if ctx is not None and _config().elicitation:
         try:
-            answer = await ctx.elicit(message=message, schema=_Confirmation)
+            can_ask = ctx.session.check_client_capability(
+                ClientCapabilities(elicitation=ElicitationCapability())
+            )
         except Exception:
-            answer = None  # client has no elicitation capability
+            can_ask = True  # capability state unreadable - try, the except below degrades
+        answer = None
+        if can_ask:
+            try:
+                answer = await ctx.elicit(message=message, schema=_Confirmation)
+            except Exception:
+                answer = None  # client has no elicitation capability
         if answer is not None:
             if answer.action == "accept" and getattr(answer.data, "confirm", False):
                 return None
+            if answer.action == "cancel":
+                return {
+                    "status": f"{prefix}_not_confirmed",
+                    "client_action": "cancel",
+                    "hint": "the confirmation dialog was dismissed or never shown - nothing "
+                    "was done and the user has NOT refused. Ask them in chat.",
+                }
             return {
                 "status": f"{prefix}_declined",
+                "client_action": answer.action,
                 "hint": "the user did not confirm - nothing was done. Ask what they "
                 "want instead; do not re-issue the same call.",
             }
@@ -730,7 +749,7 @@ async def get_node_info(
 
     Long combo lists (fonts, model files...) are capped at 24 choices by
     default; to browse the rest, pass choices_filter='substring'
-    (case-insensitive, applies to every combo of the node) and/or
+    (case-insensitive; every combo, or 'input:substring' for one) and/or
     max_choices=N to raise the cap.
     """
     names = list(class_types or [])
@@ -1082,15 +1101,12 @@ def _present_match(p: dict[str, Any], score: int, matched: list[str]) -> dict[st
 
 @mcp.tool(annotations=_READ_INSTANCE)
 async def find_workflow(intent: str, limit: int = 5) -> dict[str, Any]:
-    """Find saved workflows that already DO what you're about to build, so reuse
-    beats rebuilding from scratch. Describe the goal in words - model, subject,
-    resolution, extras - e.g. "flux portrait at 1024 with a face detailer", and get
-    back a few RANKED, compact matches: family, base model, resolution, feature tags
-    (detailer / upscale / lora / controlnet / inpaint / img2img), and why each
-    matched. Profiles are extracted from the saved JSON, so hand-built workflows are
-    covered too. Returns summaries only, never full graphs - load the one you want
-    with import_workflow(name=...). Prefer this over importing+inspecting each result
-    of list_workflows."""
+    """Find saved workflows that already DO what you're about to build (reuse beats
+    rebuilding). Describe the goal in words, e.g. "flux portrait at 1024 with a face
+    detailer"; get a few RANKED summaries (family, base model, resolution, feature
+    tags, why it matched) from the saved JSON, hand-built ones included. Never full
+    graphs - load one with import_workflow(name=...). Prefer this over importing each
+    result of list_workflows."""
     intent = (intent or "").strip()
     if not intent:
         return {"error": "describe what you want, e.g. 'flux portrait with a face detailer at 1024'"}
@@ -1250,6 +1266,7 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "remove_node": ({"node_id"}, set()),
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
     "set_widget": ({"node_id", "input", "value"}, {"force"}),
+    "replace_in_widget": ({"node_id", "input", "old", "new"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
     "set_pos": ({"node_id", "pos"}, {"size"}),
@@ -1272,6 +1289,39 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
         {"force"},
     ),
 }
+
+
+def _replace_as_set_widget(
+    wf: Workflow, op: dict[str, Any], object_info: dict[str, Any]
+) -> dict[str, Any]:
+    """Rewrite replace_in_widget into the equivalent set_widget so it inherits
+    every set_widget check. ``old`` must match exactly once: a silent
+    replace-first on an ambiguous match edits the wrong sentence."""
+    node = wf.nodes[int(op["node_id"])]
+    where = f"#{node.id}.{op['input']}"
+    if node.type in NOTE_TYPES:
+        named: dict[str, Any] = {"text": (node.widgets_values or [""])[0]}
+    else:
+        try:
+            named = widgets_to_named(node.type, node.widgets_values, object_info)
+        except (ValueError, KeyError):
+            named = {}
+    current = named.get(op["input"])
+    if not isinstance(current, str):
+        raise ValueError(f"{where} is not a text widget (holds {type(current).__name__})")
+    count = current.count(op["old"]) if op["old"] else 0
+    if count != 1:
+        raise ValueError(
+            f"'old' matches {count} times in {where}; it must match exactly once - "
+            "lengthen it until it is unique"
+        )
+    return {
+        "op": "set_widget",
+        "node_id": node.id,
+        "input": op["input"],
+        "value": current.replace(op["old"], op["new"], 1),
+        **({"force": True} if op.get("force") else {}),
+    }
 
 
 def _check_op(index: int, op: dict[str, Any]) -> str:
@@ -1310,20 +1360,20 @@ async def edit_workflow(
     - {"op": "remove_node", "node_id": int}
     - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}
     - {"op": "set_widget", "node_id": int, "input": str, "value": any}
+    - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' must match once
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
 
-    All six have a definition-scoped twin taking an extra "definition_id" for
+    All but replace_in_widget have a definition-scoped twin taking an extra "definition_id" for
     subgraph edits: add_node_to_definition, remove_node_from_definition, and
     connect/set_widget/set_title/set_mode_in_definition. A malformed op reports
     its own required keys.
 
     Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
-    add_group {title, node_ids:[int,...], color?}; set_group {group_id, title?,
-    node_ids?, color?}; remove_group {group_id}. Groups are addressed by member
-    node_ids - bounding comes from their own extents. group_id is the integer id
-    shown as '#N' by inspect_workflow; color is a hex string. organize_workflow
-    re-lays out and re-groups everything, so run these after it.
+    add_group {title, node_ids, color?}; set_group {group_id, title?, node_ids?,
+    color?}; remove_group {group_id}. Bounds come from member extents; group_id is
+    the '#N' inspect_workflow shows. organize_workflow re-lays out and re-groups
+    everything, so run these after it.
 
     Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
     take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
@@ -1336,8 +1386,7 @@ async def edit_workflow(
     frontend-only input (no /object_info entry - rgthree switches, dynamic
     collectors) be wired by creating the socket.
 
-    Result is a compact delta (applied ops + changed nodes); pass summary=true
-    or call inspect_workflow for the full graph.
+    Result is a compact delta; summary=true or inspect_workflow gives the full graph.
     """
     wf = _wf(workflow_id)
     object_info = await _object_info()
@@ -1346,6 +1395,8 @@ async def edit_workflow(
     try:
         for index, op in enumerate(operations):
             kind = _check_op(index, op)
+            if kind == "replace_in_widget":
+                op, kind = _replace_as_set_widget(wf, op, object_info), "set_widget"
             if kind == "add_node":
                 class_type = op["class_type"]
                 widgets = op.get("widgets") or {}
@@ -1466,7 +1517,7 @@ async def edit_workflow(
                         raise ValueError(f"{node.type} #{node_id}: {problem}")
                 wf.set_widget(node_id, op["input"], op["value"], object_info)
                 touched.add(node_id)
-                applied.append(f"set #{op['node_id']}.{op['input']} = {op['value']!r}")
+                applied.append(f"set #{op['node_id']}.{op['input']} = {_clip(op['value'])!r}")
             elif kind == "set_title":
                 wf.nodes[int(op["node_id"])].title = op["title"]
                 touched.add(int(op["node_id"]))
@@ -1659,7 +1710,7 @@ async def edit_workflow(
                 wf.update_subgraph(def_id, inner_wf)
                 touched.add(inner_nid)
                 applied.append(
-                    f"set_widget_in_definition: set #{inner_nid}.{input_name} = {value!r} in definition {def_id}"
+                    f"set_widget_in_definition: set #{inner_nid}.{input_name} = {_clip(value)!r} in definition {def_id}"
                 )
     except KeyError as e:
         return {
@@ -1854,11 +1905,9 @@ async def run_workflow(
     the stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
-    final judge; use it if a valid graph is wrongly blocked). save_dir (or
-    COMFYUI_MOUNT_DIR) relocates finished output files - images,
-    video, audio - into a folder the caller can reach, returning
-    saved_paths. Needs finished files (wait=True); a background run relocates
-    later via save_output(prompt_id=...).
+    final judge). save_dir (or COMFYUI_MOUNT_DIR) relocates finished outputs into a
+    folder the caller can reach (saved_paths); needs wait=True - a background run
+    relocates later via save_output(prompt_id=...).
 
     front: None (default) refuses to queue when >=2 prompts are pending
     and returns {status: queue_busy} so the USER can choose; True runs next;
@@ -2234,9 +2283,7 @@ async def save_output(
     overwrite: bool = False,
 ) -> dict[str, Any]:
     """Copy a finished render out of ComfyUI's output tree into a folder the caller
-    (e.g. a Claude Desktop / Cowork sandbox) can reach. ComfyUI's save nodes only
-    write inside its own output/ dir and reject absolute paths, so a render must be
-    relocated before it can be presented or edited.
+    (e.g. a Cowork sandbox) can reach - save nodes only write inside output/.
 
     Pass prompt_id (relocates every output FILE of that finished job - images,
     video, audio) OR an explicit filename (+subfolder/type, as reported in a run's
@@ -2289,10 +2336,11 @@ def _history_error(history: dict[str, Any]) -> dict[str, Any] | None:
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
-async def get_run_status(prompt_id: str) -> dict[str, Any]:
+async def get_run_status(prompt_id: str, full_output: str = "") -> dict[str, Any]:
     """Polling tool for runs queued with `run_workflow(wait=False)`. For long/paid renders, see `run_workflow`'s long-render pattern.
     Status of a run queued with run_workflow(wait=False): queue position, live
-    step progress while sampling, and outputs (+ error details) once finished."""
+    step progress while sampling, and outputs (+ error details, elapsed_s) once
+    finished. full_output=<node_id> returns that node's text unclipped."""
     client = _client()
     history = await client.get_history(prompt_id)
     if history:
@@ -2307,7 +2355,11 @@ async def get_run_status(prompt_id: str) -> dict[str, Any]:
         # tests (and any sandboxed caller) substitute lightweight fake clients that
         # only implement what they need, and reaching for an instance attribute
         # here would break them for no benefit
-        if data := ComfyClient._collect_data_outputs(history):
+        if (elapsed := ComfyClient._elapsed_s(history)) is not None:
+            result["elapsed_s"] = elapsed
+        if data := ComfyClient._collect_data_outputs(
+            history, node_id=full_output or None, budget=50_000 if full_output else None
+        ):
             result["data_outputs"] = data
         if error:
             result["error"] = error
@@ -2610,7 +2662,12 @@ async def save_workflow(
             if renamed_from
             else ""
         )
-        + ("" if not warnings else "lint is not clean - consider organize_workflow before delivering"),
+        + (
+            "lint reports missing groups/notes or overlaps - organize_workflow fixes those "
+            "(it re-lays out the whole canvas, so skip it on a hand-arranged graph)"
+            if {f["code"] for f in warnings} & {"no-groups", "no-notes", "overlap"}
+            else ""
+        ),
     }
 
 
@@ -2674,13 +2731,22 @@ async def search_node_packs(query: str) -> list[dict[str, Any]]:
 async def get_model_guidance(family: str = "", model_filename: str = "") -> dict[str, Any]:
     """Tuned settings for a model family: sampling (CFG/steps/samplers), native
     resolutions, technique blocks (face_detailer, hires_fix...), prompt style notes.
-    Variant-aware: pass model_filename so turbo/lightning/distill overrides apply.
+    Variant-aware: pass model_filename (alone, it detects the family) so turbo/lightning/distill overrides apply.
     Includes any learned overlay from past research plus a research directive -
     for brand-new models, verify online and record_learning what you find. A `fit`
     block appears only when this GPU can't comfortably hold the model."""
     learned = _config().learned_dir
+    detected: dict[str, str] = {}
+    if not family and model_filename:
+        found, pattern = knowledge.detect_family_from_filename(model_filename, learned)
+        if found:
+            family = found
+            detected = {"detected_family": found, "matched_on": pattern or ""}
     if not family:
-        return {"families": knowledge.list_families(learned)}
+        return {
+            "families": knowledge.list_families(learned),
+            **({"hint": f"no family matches {model_filename!r}"} if model_filename else {}),
+        }
     try:
         guidance = knowledge.get_guidance(family, model_filename or None, learned_dir=learned)
     except KeyError:
@@ -2698,7 +2764,14 @@ async def get_model_guidance(family: str = "", model_filename: str = "") -> dict
     # ride along on EVERY guidance call while being useful only when the verdict
     # is bad. fit_verdict folds what matters into `fit`; the rest is dropped.
     guidance.pop("hardware", None)
-    return _cap_sources({**guidance, **({"fit": fit} if fit else {})})
+    return _cap_sources({**detected, **guidance, **({"fit": fit} if fit else {})})
+
+
+def _leaf_keys(data: Any, prefix: str = "") -> list[str]:
+    """Dotted paths of every leaf in a nested dict - what a learning changed."""
+    if not isinstance(data, dict):
+        return [prefix] if prefix else []
+    return [k for key, v in data.items() for k in _leaf_keys(v, f"{prefix}.{key}" if prefix else str(key))]
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
@@ -2715,7 +2788,7 @@ async def record_learning(family: str, updates: dict[str, Any], source: str) -> 
     {"sources": [{"match": ["mymodel_v1.safetensors"], "what": "checkpoint",
     "url": "https://..."}]}. Verify the URL resolves before recording it."""
     path = knowledge.save_learning(_config().learned_dir, family, updates, source)
-    return {"saved": str(path), "guidance_now": knowledge.get_guidance(family, learned_dir=_config().learned_dir)}
+    return {"saved": str(path), "updated": _leaf_keys(updates)[:20]}
 
 
 # --------------------------------------------------------------------------

@@ -23,7 +23,7 @@ def object_info():
 
 def test_families_include_core_set():
     families = list_families()
-    for expected in ("sd15", "sdxl", "flux", "wan", "qwen_image"):
+    for expected in ("sd15", "sdxl", "flux", "wan", "qwen_image", "qwen_image21"):
         assert expected in families
 
 

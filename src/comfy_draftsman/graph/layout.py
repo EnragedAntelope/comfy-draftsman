@@ -34,6 +34,7 @@ MAX_WIDGET_ROWS = 16
 # with many parallel nodes stays roughly rectangular instead of one very tall
 # column next to a short pipeline row (= a group full of empty space).
 WRAP_TARGET_H = 900.0
+BAND_WRAP_W = 900.0  # a stage's columns wrap into rows past this width
 
 # Nodes that render nearly empty when drafted but grow content after the
 # first run (image thumbnails, generated text) - reserve room up front so the
@@ -348,16 +349,35 @@ def apply_staged_layout(
             max(wf.nodes[nid].size[0] for nid in col) for col in columns
         ]
         band_x = x_cursor
-        band_h = 0.0
-        for i, col in enumerate(columns):
-            col_x = band_x + sum(col_widths[:i]) + i * (X_GUTTER / 2)
-            y_cursor = origin[1]
-            for nid in col:
-                node = wf.nodes[nid]
-                node.pos = [col_x, y_cursor]
-                y_cursor += node.size[1] + Y_GAP
-            band_h = max(band_h, y_cursor - Y_GAP - origin[1])
-        band_w = sum(col_widths) + (len(col_widths) - 1) * (X_GUTTER / 2)
+        # flow columns into rows no wider than BAND_WRAP_W: a 20-node stage is
+        # one screenful, not a 7,000px strip
+        col_gap = X_GUTTER / 2
+        rows: list[list[int]] = [[]]
+        row_w = 0.0
+        for i, width in enumerate(col_widths):
+            if rows[-1] and row_w + col_gap + width > BAND_WRAP_W:
+                rows.append([])
+                row_w = 0.0
+            row_w += width + (col_gap if rows[-1] else 0.0)
+            rows[-1].append(i)
+        row_y = origin[1]
+        band_w = 0.0
+        band_bottom = row_y
+        for row in rows:
+            col_x = band_x
+            row_bottom = row_y
+            for i in row:
+                y_cursor = row_y
+                for nid in columns[i]:
+                    node = wf.nodes[nid]
+                    node.pos = [col_x, y_cursor]
+                    y_cursor += node.size[1] + Y_GAP
+                row_bottom = max(row_bottom, y_cursor - Y_GAP)
+                col_x += col_widths[i] + col_gap
+            band_w = max(band_w, col_x - col_gap - band_x)
+            band_bottom = row_bottom
+            row_y = row_bottom + Y_GAP * 2
+        band_h = band_bottom - origin[1]
         boxes[stage] = (band_x, origin[1], band_w, band_h)
         x_cursor = band_x + band_w + X_GUTTER
     # execution order roughly left-to-right, top-to-bottom

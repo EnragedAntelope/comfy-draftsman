@@ -6,12 +6,12 @@ A local-first MCP server that drafts, organizes, validates, and runs ComfyUI wor
 
 ## Current state
 
-_Last verified: 2026-08-22_
+_Last verified: 2026-09-29_
 
-- **Status:** in development, at v0.15.1 (`src/comfy_draftsman/__init__.py` is the single source of truth for the version). CI green. **Published to PyPI** as `comfy-draftsman` via Trusted Publishing (`.github/workflows/release.yml`); a `v*` tag push publishes and cuts the GitHub Release — see README → "Publishing a release".
-- **Works:** the full draft → organize → validate → run → save loop against a live ComfyUI instance; schema 0.4 and 1.0 graphs including subgraph flatten/rebuild; V3 dynamic combos, autogrow inputs and match types round-tripping through the API's dotted-key form; `organize_workflow`'s labeled stage groups, knob cards and guidance notes; workflow import straight from ComfyUI's browser (`list_workflows` + `import_workflow(name=…)`); the per-family knowledge floor plus a persistent learned overlay written by `record_learning`.
-- **In progress:** nothing half-built — each round lands complete. The most recent round (0.15.0) added a VRAM fit verdict, a partner-node spend gate, and the PyPI pipeline; `CHANGELOG.md` records what each round changed and, importantly, what was deliberately *not* changed.
-- **Known gaps / next steps:** `api_node` detection and a real elicitation round-trip are unverified against a live instance; six families carry no VRAM data and correctly stay silent; `COMFY_DYNAMICSLOT_V3` is classified but never exercised (no live instance declares one — do not implement it speculatively); widget-backed custom-JS inputs stay a deliberate loud stop rather than a silently-wrong emit. All written up in full under `docs/ARCHITECTURE.md` → "Remaining TODOs".
+- **Status:** in development, at v0.17.0 (`src/comfy_draftsman/__init__.py` is the single source of truth for the version). CI green. **Published to PyPI** as `comfy-draftsman` via Trusted Publishing (`.github/workflows/release.yml`); a `v*` tag push publishes and cuts the GitHub Release — see README → "Publishing a release".
+- **Works:** the full draft → organize → validate → run → save loop against a live ComfyUI instance; schema 0.4 and 1.0 graphs including subgraph flatten/rebuild; V3 dynamic combos, autogrow inputs and match types round-tripping through the API's dotted-key form; `organize_workflow`'s labeled stage groups, knob cards and guidance notes; workflow import straight from ComfyUI's browser (`list_workflows` + `import_workflow(name=…)`); the per-family knowledge floor plus a persistent learned overlay written by `record_learning`; `to_api` bypass routing that mirrors the frontend's; `organize_workflow` staging that uses graph position (switches, primitives, MODEL patches, i2i preprocessing) with row-wrapped bands.
+- **In progress:** nothing half-built — each round lands complete. The most recent round (0.17.0) came from a live Qwen Image 2.1 build: a `qwen_image21` family, frontend-exact bypass, organize restaging, honest sampling notes, and small token/friction fixes; `CHANGELOG.md` records what each round changed and, importantly, what was deliberately *not* changed.
+- **Known gaps / next steps:** `api_node` detection and a real elicitation round-trip are unverified against a live instance (`_confirm` now degrades honestly, and `DRAFTSMAN_ELICITATION=off` skips the dialog); some families carry no VRAM data and correctly stay silent; acceleration variants match the UNet filename only, not `lora_name`; `COMFY_DYNAMICSLOT_V3` is classified but never exercised (no live instance declares one — do not implement it speculatively); widget-backed custom-JS inputs stay a deliberate loud stop rather than a silently-wrong emit. All written up in full under `docs/ARCHITECTURE.md` → "Remaining TODOs".
 - **Deep docs:** `docs/ARCHITECTURE.md` (module map, data flow, subgraph mechanics, hard-won gotchas, open TODOs), `docs/PERMISSIONS.md` (which tools are read-only), `CHANGELOG.md`.
 
 ## Architecture in 60 seconds
@@ -62,7 +62,7 @@ uv run mypy
 # Wheel data check (CI's `package` job) - --refresh, or uv serves a cached
 # extract of the previous build with the same version number
 uv build && uv run --isolated --no-project --refresh --with "$(ls dist/*.whl)" python -c "
-import comfy_draftsman.knowledge as k; assert k.get_guidance('flux')['sampling']"
+import comfy_draftsman.knowledge as k; assert k.get_guidance('flux')['sampling'] and k.get_guidance('qwen_image21')['sampling']"
 ```
 
 ## Conventions & gotchas

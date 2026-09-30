@@ -267,6 +267,27 @@ class ComfyClient:
     _DATA_TOTAL_CHARS = 5000
 
     @staticmethod
+    def _elapsed_s(history: dict[str, Any]) -> float | None:
+        """Seconds from execution_start to the terminal message in a /history
+        entry's status.messages (timestamps are ms). None if either is missing -
+        e.g. a fully cached run has no execution_start."""
+        start = end = None
+        for message in (history.get("status") or {}).get("messages") or []:
+            if not (isinstance(message, list | tuple) and len(message) == 2 and isinstance(message[1], dict)):
+                continue
+            kind, data = message
+            stamp = data.get("timestamp")
+            if not isinstance(stamp, int | float):
+                continue
+            if kind == "execution_start":
+                start = stamp
+            elif kind in ("execution_success", "execution_error", "execution_interrupted"):
+                end = stamp
+        if start is None or end is None or end < start:
+            return None
+        return round((end - start) / 1000, 1)
+
+    @staticmethod
     def _collect_outputs(history: dict[str, Any]) -> list[dict[str, Any]]:
         """FILE outputs only, flattened to relocatable {filename, subfolder, type}
         refs. Non-file return values go through _collect_data_outputs."""
@@ -278,7 +299,9 @@ class ComfyClient:
         return outputs
 
     @classmethod
-    def _collect_data_outputs(cls, history: dict[str, Any]) -> dict[str, Any]:
+    def _collect_data_outputs(
+        cls, history: dict[str, Any], node_id: str | None = None, budget: int | None = None
+    ) -> dict[str, Any]:
         """Every NON-file value an output node returned, keyed by node id.
 
         Output nodes are free to return anything in their `ui` dict, and plenty
@@ -290,12 +313,17 @@ class ComfyClient:
 
         Values are truncated per item and the whole payload is budgeted; a `note`
         records anything cut so a short value is never mistaken for the full one.
+
+        ``node_id`` + ``budget`` is the escape hatch for one node's full text:
+        only that node, each value and the total capped at ``budget`` chars.
         """
         collected: dict[str, Any] = {}
         used = 0
         truncated: list[str] = []
-        for node_id, node_output in (history.get("outputs") or {}).items():
-            if not isinstance(node_output, dict):
+        value_chars = budget or cls._DATA_VALUE_CHARS
+        total_chars = budget + 1 if budget else cls._DATA_TOTAL_CHARS  # +1: the "…" marker
+        for out_id, node_output in (history.get("outputs") or {}).items():
+            if not isinstance(node_output, dict) or (node_id is not None and str(out_id) != str(node_id)):
                 continue
             for key, value in node_output.items():
                 if key in cls.FILE_OUTPUT_KEYS or key in cls._DATA_KEYS_IGNORED:
@@ -304,15 +332,15 @@ class ComfyClient:
                 # over-long values degrade to a clipped STRING; anything within
                 # budget keeps its original shape (list/dict/number)
                 kept: Any = value
-                if len(rendered) > cls._DATA_VALUE_CHARS:
-                    kept = rendered[: cls._DATA_VALUE_CHARS] + "…"
-                    truncated.append(f"{node_id}.{key}")
+                if len(rendered) > value_chars:
+                    kept = rendered[: value_chars] + "…"
+                    truncated.append(f"{out_id}.{key}")
                 cost = len(kept) if isinstance(kept, str) else len(rendered)
-                if used + cost > cls._DATA_TOTAL_CHARS:
-                    truncated.append(f"{node_id}.{key} (omitted)")
+                if used + cost > total_chars:
+                    truncated.append(f"{out_id}.{key} (omitted)")
                     continue
                 used += cost
-                collected.setdefault(str(node_id), {})[key] = kept
+                collected.setdefault(str(out_id), {})[key] = kept
         if truncated:
             collected["note"] = (
                 "clipped to keep the response bounded: " + ", ".join(truncated[:10])
@@ -400,6 +428,8 @@ class ComfyClient:
             "prompt_id": prompt_id,
             "outputs": outputs,
         }
+        if (elapsed := self._elapsed_s(history)) is not None:
+            result["elapsed_s"] = elapsed
         if data_outputs:
             # non-file return values (generated text, written paths, counts) -
             # omitted entirely when empty so the common case costs nothing

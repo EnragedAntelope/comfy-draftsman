@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.17.0 — Round 27: Qwen Image 2.1, frontend-exact bypass, honest organize
+
+From a live Qwen Image 2.1 build (~150 A/B renders through draftsman).
+
+### Fixed
+
+- **Qwen Image 2.1 is its own family** (`qwen_image21` in the floor). It was detected
+  as Qwen-Image 1.x and got confidently wrong notes (native res, encoder, "tuned for
+  … leave these alone"). Carries the verified download sources, the CFG-free official
+  path, the resolution-dependent shift, and the reference-edit topology. The turbo
+  LoRA entry is recorded as tested and *not recommended*.
+- **`to_api` bypass routing now mirrors the frontend exactly**
+  (`ExecutableNodeDTO._getBypassSlotIndex`): the same-index input first, then the
+  first input whose type equals what the consumer wants, then the first compatible
+  one; and if the chosen input is unlinked the consumer's input is dropped — it never
+  falls through to another linked input. Draftsman's own run and the browser's queue
+  used to differ for the same saved graph.
+- **`organize_workflow` on a non-trivial graph.** Core primitives go to Inputs;
+  MODEL→MODEL patches (ModelSamplingFlux, FreSca, APG) go to Models with the loaders
+  they continue; `ComfySwitchNode` follows its leftmost consumer; an IMAGE→IMAGE node
+  upstream of the sampler (an i2i reference scaler) joins its source's stage instead
+  of Post-Processing; stages wrap into rows at 900 px, so a 35-node graph is no
+  longer a 7,000 px strip.
+- **Sampling notes no longer contradict the graph.** The "Tuned for X: <current
+  values> — leave these alone" line is gone; the family numbers are labelled
+  "Family reference", and are omitted (with a note) when the graph's steps/CFG sit
+  outside the family range, e.g. behind an acceleration LoRA.
+- **`no-prompt-preview` false positive.** Only nodes that output CONDITIONING are
+  checked, so an LLM node with a `prompt` input is no longer mistaken for an encoder.
+  `save_workflow` recommends `organize_workflow` only for `no-groups` / `no-notes` /
+  `overlap` lint, and says it re-lays out the whole canvas.
+- **LoadImage annotated paths** (`sub/file.png [output]`, also `[input]`/`[temp]`)
+  are accepted on upload combos instead of failing as `invalid-combo-value`.
+- `_confirm` (overwrite / spend / queue-clear gates) no longer calls `elicit` when the
+  client did not advertise the capability, and a dismissed dialog is reported as
+  `*_not_confirmed` (ask in chat), not as a user decline. `DRAFTSMAN_ELICITATION=off`
+  forces the ask-in-chat path.
+
+### Added
+
+- Lint `output-behind-lazy-input`: an output node wired straight into a lazy input
+  (a switch branch) runs on every queue regardless of the switch.
+- `get_model_guidance(model_filename=…)` alone detects the family.
+- `elapsed_s` on `run_workflow` / `get_run_status` results.
+- `get_run_status(prompt_id, full_output=<node_id>)`: one node's text unclipped
+  (≤ 50,000 chars).
+- `edit_workflow` op `replace_in_widget {node_id, input, old, new}` — `old` must match
+  exactly once.
+- `get_node_info(choices_filter="input:substr")` filters one combo.
+
+### Behavior change
+
+- `record_learning` returns `{saved, updated}` (dotted keys, ≤ 20) instead of the whole
+  merged guidance.
+- `edit_workflow`'s `applied` echo clips long `set_widget` values at 120 chars.
+- Sampling-note wording (above) and `no-prompt-preview` scope (above).
+
+### Not changed
+
+- **Acceleration variants are still matched on the UNet filename only**, not on
+  `lora_name`. The out-of-range guard covers the misleading-numbers failure without
+  reopening the LoRA-hijacks-family bug.
+- **No per-family APG/FreSca scaling field** in the knowledge schema; it lives in the
+  Qwen 2.1 note text until a second family needs it.
+- Bypass routing uses the *stored* socket order; draftsman-materialized sockets were
+  not reordered to schema position.
+- Out of scope (not draftsman): an LLM node returning repeated special tokens while
+  reporting success; ComfyUI core's `ComfySoftSwitchNode` is commented out of 0.37.0.
+
 ## 0.16.0 — Round 26: validation fixes, local file import/export
 
 Triaged 11 reported items against the real code; 8 were confirmed and fixed,

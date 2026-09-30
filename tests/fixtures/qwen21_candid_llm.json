@@ -1,0 +1,1949 @@
+{
+ "id": "de0bd34f-7cd9-4184-b27a-c554744f5f09",
+ "revision": 0,
+ "last_node_id": 49,
+ "last_link_id": 62,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "UNETLoader",
+   "pos": [
+    1740.0,
+    0.0
+   ],
+   "size": [
+    300.0,
+    109.0
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      61
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader"
+   },
+   "widgets_values": [
+    "qwenimage21\\qwenImage21_21_int8.safetensors",
+    "default"
+   ],
+   "title": "Qwen Image 2.1 (int8)"
+  },
+  {
+   "id": 3,
+   "type": "ModelSamplingFlux",
+   "pos": [
+    1740.0,
+    298.0
+   ],
+   "size": [
+    300.0,
+    157.0
+   ],
+   "flags": {},
+   "order": 24,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 46
+    },
+    {
+     "name": "width",
+     "type": "INT",
+     "link": 11,
+     "widget": {
+      "name": "width"
+     }
+    },
+    {
+     "name": "height",
+     "type": "INT",
+     "link": 13,
+     "widget": {
+      "name": "height"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      3
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ModelSamplingFlux"
+   },
+   "widgets_values": [
+    0.69,
+    0.5,
+    1344,
+    1760
+   ],
+   "title": "Resolution-aware shift (official Qwen 2.1 curve)"
+  },
+  {
+   "id": 4,
+   "type": "FreSca",
+   "pos": [
+    1740.0,
+    495.0
+   ],
+   "size": [
+    300.0,
+    133.0
+   ],
+   "flags": {},
+   "order": 27,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 3
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      4
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "FreSca"
+   },
+   "widgets_values": [
+    0.9,
+    1.15,
+    20
+   ],
+   "title": "FreSca (active only when CFG > 1)"
+  },
+  {
+   "id": 5,
+   "type": "APG",
+   "pos": [
+    1740.0,
+    668.0
+   ],
+   "size": [
+    300.0,
+    133.0
+   ],
+   "flags": {},
+   "order": 29,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 4
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      5,
+      6
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "APG"
+   },
+   "widgets_values": [
+    0.5,
+    30,
+    -0.5
+   ],
+   "title": "APG (active only when CFG > 1)"
+  },
+  {
+   "id": 6,
+   "type": "CLIPLoader",
+   "pos": [
+    2080.0,
+    0.0
+   ],
+   "size": [
+    300.0,
+    133.0
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader"
+   },
+   "widgets_values": [
+    "qwenImage21_21_txt_int8.safetensors",
+    "qwen_image",
+    "default"
+   ],
+   "title": "Qwen3-VL 8B text encoder (int8)"
+  },
+  {
+   "id": 7,
+   "type": "VAELoader",
+   "pos": [
+    2080.0,
+    173.0
+   ],
+   "size": [
+    300.0,
+    85.0
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      8,
+      9
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "qwen_image_2.1_vae_bf16.safetensors"
+   ],
+   "title": "Qwen Image 2.1 VAE"
+  },
+  {
+   "id": 8,
+   "type": "PrimitiveInt",
+   "pos": [
+    1420.0,
+    0.0
+   ],
+   "size": [
+    250.0,
+    109.0
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "INT",
+     "type": "INT",
+     "links": [
+      10,
+      11
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveInt"
+   },
+   "widgets_values": [
+    1344,
+    "fixed"
+   ],
+   "title": "Width"
+  },
+  {
+   "id": 9,
+   "type": "PrimitiveInt",
+   "pos": [
+    1420.0,
+    149.0
+   ],
+   "size": [
+    250.0,
+    109.0
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "INT",
+     "type": "INT",
+     "links": [
+      12,
+      13
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveInt"
+   },
+   "widgets_values": [
+    1760,
+    "fixed"
+   ],
+   "title": "Height"
+  },
+  {
+   "id": 10,
+   "type": "EmptyLatentImage",
+   "pos": [
+    1420.0,
+    298.0
+   ],
+   "size": [
+    250.0,
+    133.0
+   ],
+   "flags": {},
+   "order": 15,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "width",
+     "type": "INT",
+     "link": 10,
+     "widget": {
+      "name": "width"
+     }
+    },
+    {
+     "name": "height",
+     "type": "INT",
+     "link": 12,
+     "widget": {
+      "name": "height"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      27
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "EmptyLatentImage"
+   },
+   "widgets_values": [
+    1344,
+    1760,
+    1
+   ],
+   "color": "#232",
+   "bgcolor": "#353"
+  },
+  {
+   "id": 11,
+   "type": "PrimitiveStringMultiline",
+   "pos": [
+    0.0,
+    0.0
+   ],
+   "size": [
+    400.0,
+    150.0
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      14
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveStringMultiline"
+   },
+   "widgets_values": [
+    "an old man selling roasted chestnuts on ..."
+   ],
+   "title": "\u270f\ufe0f Your idea"
+  },
+  {
+   "id": 12,
+   "type": "EA_LMStudio",
+   "pos": [
+    450.0,
+    0.0
+   ],
+   "size": [
+    400.0,
+    1124.0
+   ],
+   "flags": {},
+   "order": 23,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "image1",
+     "type": "IMAGE",
+     "link": 55
+    },
+    {
+     "name": "image2",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "image3",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "image4",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "prompt",
+     "type": "STRING",
+     "link": 14,
+     "widget": {
+      "name": "prompt"
+     }
+    },
+    {
+     "name": "system_message",
+     "type": "STRING",
+     "link": 47,
+     "widget": {
+      "name": "system_message"
+     }
+    },
+    {
+     "name": "custom_model_name",
+     "type": "STRING",
+     "link": 59,
+     "widget": {
+      "name": "custom_model_name"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "response",
+     "type": "STRING",
+     "links": [
+      60
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "reasoning",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "troubleshooting",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "EA_LMStudio"
+   },
+   "widgets_values": [
+    "You rewrite a short image request into o...",
+    "",
+    "-- Custom (enter below) --",
+    "",
+    1024,
+    0.85,
+    0,
+    "fixed",
+    0.9,
+    40,
+    1,
+    0,
+    "",
+    "Truncate middle",
+    "Text",
+    "",
+    "Auto-detect (recommended)",
+    "<think>",
+    "</think>",
+    "Medium (768px)",
+    "-- Custom (enter below) --",
+    "",
+    true,
+    false,
+    false
+   ],
+   "title": "\ud83e\udde0 Prompt enhancer (EA LM Studio)"
+  },
+  {
+   "id": 13,
+   "type": "ShowText|pysssss",
+   "pos": [
+    900.0,
+    0.0
+   ],
+   "size": [
+    440.0,
+    640.0
+   ],
+   "flags": {},
+   "order": 26,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "text",
+     "type": "STRING",
+     "link": 60
+    }
+   ],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      16
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ShowText|pysssss"
+   },
+   "widgets_values": [],
+   "title": "Enhanced prompt (what the model sees)"
+  },
+  {
+   "id": 14,
+   "type": "TextEncodeQwenImage21",
+   "pos": [
+    2460.0,
+    0.0
+   ],
+   "size": [
+    420.0,
+    300.0
+   ],
+   "flags": {},
+   "order": 28,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 7
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": null
+    },
+    {
+     "name": "prompt",
+     "type": "STRING",
+     "link": 16,
+     "widget": {
+      "name": "prompt"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      17
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "links": [
+      18
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "TextEncodeQwenImage21"
+   },
+   "widgets_values": [
+    "",
+    "plastic skin, airbrushed, waxy, doll-lik...",
+    1024
+   ],
+   "title": "Text Encode Qwen Image 2.1"
+  },
+  {
+   "id": 15,
+   "type": "RandomNoise",
+   "pos": [
+    1420.0,
+    471.0
+   ],
+   "size": [
+    250.0,
+    109.0
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "NOISE",
+     "type": "NOISE",
+     "links": [
+      19
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "RandomNoise"
+   },
+   "widgets_values": [
+    1001,
+    "fixed"
+   ],
+   "title": "Seed"
+  },
+  {
+   "id": 16,
+   "type": "CFGGuider",
+   "pos": [
+    2460.0,
+    340.0
+   ],
+   "size": [
+    300.0,
+    90.0
+   ],
+   "flags": {},
+   "order": 30,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 5
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 17
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 18
+    }
+   ],
+   "outputs": [
+    {
+     "name": "GUIDER",
+     "type": "GUIDER",
+     "links": [
+      20
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CFGGuider"
+   },
+   "widgets_values": [
+    2
+   ],
+   "title": "CFG: 2.0 = APG/FreSca boost (~25 s) | 1.0 = fastest (~16 s)"
+  },
+  {
+   "id": 17,
+   "type": "KSamplerSelect",
+   "pos": [
+    2460.0,
+    470.0
+   ],
+   "size": [
+    300.0,
+    60.0
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "SAMPLER",
+     "type": "SAMPLER",
+     "links": [
+      21
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "KSamplerSelect"
+   },
+   "widgets_values": [
+    "euler"
+   ]
+  },
+  {
+   "id": 18,
+   "type": "BasicScheduler",
+   "pos": [
+    2920.0,
+    0.0
+   ],
+   "size": [
+    300.0,
+    133.0
+   ],
+   "flags": {},
+   "order": 31,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 6
+    },
+    {
+     "name": "denoise",
+     "type": "FLOAT",
+     "link": 33,
+     "widget": {
+      "name": "denoise"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "SIGMAS",
+     "type": "SIGMAS",
+     "links": [
+      62
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "BasicScheduler"
+   },
+   "widgets_values": [
+    "simple",
+    20,
+    1
+   ],
+   "title": "Steps: 20 (16-30; official 40)"
+  },
+  {
+   "id": 20,
+   "type": "SamplerCustomAdvanced",
+   "pos": [
+    2920.0,
+    173.0
+   ],
+   "size": [
+    300.0,
+    145.0
+   ],
+   "flags": {},
+   "order": 33,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "noise",
+     "type": "NOISE",
+     "link": 19
+    },
+    {
+     "name": "guider",
+     "type": "GUIDER",
+     "link": 20
+    },
+    {
+     "name": "sampler",
+     "type": "SAMPLER",
+     "link": 21
+    },
+    {
+     "name": "sigmas",
+     "type": "SIGMAS",
+     "link": 62
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 29
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "LATENT",
+     "links": [
+      37
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "denoised_output",
+     "type": "LATENT",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SamplerCustomAdvanced"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 21,
+   "type": "VAEDecode",
+   "pos": [
+    3300.0,
+    0.0
+   ],
+   "size": [
+    250.0,
+    50.0
+   ],
+   "flags": {},
+   "order": 34,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 37
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      38
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 22,
+   "type": "SaveImage",
+   "pos": [
+    3300.0,
+    90.0
+   ],
+   "size": [
+    560.0,
+    760.0
+   ],
+   "flags": {},
+   "order": 35,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 38
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "Qwen21_Candid/candid"
+   ]
+  },
+  {
+   "id": 23,
+   "type": "PrimitiveBoolean",
+   "pos": [
+    1420.0,
+    1150.0
+   ],
+   "size": [
+    300.0,
+    60.0
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "BOOLEAN",
+     "type": "BOOLEAN",
+     "links": [
+      26,
+      30,
+      53,
+      56
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveBoolean"
+   },
+   "widgets_values": [
+    false
+   ],
+   "title": "\ud83d\uddbc\ufe0f Use reference image (i2i)"
+  },
+  {
+   "id": 24,
+   "type": "LoadImage",
+   "pos": [
+    1420.0,
+    1250.0
+   ],
+   "size": [
+    300.0,
+    360.0
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      24
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "example.png",
+    "image"
+   ],
+   "title": "Reference image (i2i only)",
+   "color": "#232",
+   "bgcolor": "#353"
+  },
+  {
+   "id": 25,
+   "type": "ImageScaleToTotalPixels",
+   "pos": [
+    1760.0,
+    1150.0
+   ],
+   "size": [
+    300.0,
+    110.0
+   ],
+   "flags": {},
+   "order": 19,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "link": 24
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      25,
+      54
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ImageScaleToTotalPixels"
+   },
+   "widgets_values": [
+    "lanczos",
+    2.37,
+    32
+   ],
+   "title": "Scale reference to canvas size"
+  },
+  {
+   "id": 26,
+   "type": "VAEEncode",
+   "pos": [
+    1760.0,
+    1300.0
+   ],
+   "size": [
+    300.0,
+    50.0
+   ],
+   "flags": {},
+   "order": 21,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "pixels",
+     "type": "IMAGE",
+     "link": 25
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 9
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      28
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEEncode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 27,
+   "type": "ComfySwitchNode",
+   "pos": [
+    2440.0,
+    1150.0
+   ],
+   "size": [
+    300.0,
+    80.0
+   ],
+   "flags": {},
+   "order": 25,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "on_false",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 27
+    },
+    {
+     "name": "on_true",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 28
+    },
+    {
+     "name": "switch",
+     "type": "BOOLEAN",
+     "link": 26,
+     "widget": {
+      "name": "switch"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "COMFY_MATCHTYPE_V3",
+     "links": [
+      29
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ComfySwitchNode"
+   },
+   "widgets_values": [
+    false
+   ],
+   "title": "Latent: empty (t2i) / reference (i2i)"
+  },
+  {
+   "id": 28,
+   "type": "PrimitiveFloat",
+   "pos": [
+    2100.0,
+    1150.0
+   ],
+   "size": [
+    300.0,
+    60.0
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "FLOAT",
+     "type": "FLOAT",
+     "links": [
+      32
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveFloat"
+   },
+   "widgets_values": [
+    0.7
+   ],
+   "title": "i2i denoise (lower = closer to reference)"
+  },
+  {
+   "id": 29,
+   "type": "PrimitiveFloat",
+   "pos": [
+    2100.0,
+    1250.0
+   ],
+   "size": [
+    300.0,
+    60.0
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "FLOAT",
+     "type": "FLOAT",
+     "links": [
+      31
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveFloat"
+   },
+   "widgets_values": [
+    1
+   ],
+   "title": "t2i denoise (leave 1.0)"
+  },
+  {
+   "id": 30,
+   "type": "ComfySwitchNode",
+   "pos": [
+    2100.0,
+    1350.0
+   ],
+   "size": [
+    300.0,
+    80.0
+   ],
+   "flags": {},
+   "order": 17,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "on_false",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 31
+    },
+    {
+     "name": "on_true",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 32
+    },
+    {
+     "name": "switch",
+     "type": "BOOLEAN",
+     "link": 30,
+     "widget": {
+      "name": "switch"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "COMFY_MATCHTYPE_V3",
+     "links": [
+      33
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ComfySwitchNode"
+   },
+   "widgets_values": [
+    false
+   ],
+   "title": "Denoise: t2i / i2i"
+  },
+  {
+   "id": 34,
+   "type": "LoraLoaderModelOnly",
+   "pos": [
+    1740.0,
+    149.0
+   ],
+   "size": [
+    300.0,
+    109.0
+   ],
+   "flags": {},
+   "order": 20,
+   "mode": 4,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 61
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      46
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoraLoaderModelOnly"
+   },
+   "widgets_values": [
+    "qwenimage21\\photo\\casual_snapshot_realism_qwen21.safetensors",
+    0.45
+   ],
+   "title": "\ud83d\udcf7 Candid snapshot LoRA (optional: un-bypass, 0.3-0.5)"
+  },
+  {
+   "id": 35,
+   "type": "PrimitiveStringMultiline",
+   "pos": [
+    0.0,
+    190.0
+   ],
+   "size": [
+    400.0,
+    330.0
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      47
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveStringMultiline"
+   },
+   "widgets_values": [
+    "You rewrite a short image request into o..."
+   ],
+   "title": "\ud83d\udcdd Enhancer system prompt"
+  },
+  {
+   "id": 38,
+   "type": "ComfySwitchNode",
+   "pos": [
+    1760.0,
+    1390.0
+   ],
+   "size": [
+    300.0,
+    80.0
+   ],
+   "flags": {},
+   "order": 22,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "on_false",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": null
+    },
+    {
+     "name": "on_true",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 54
+    },
+    {
+     "name": "switch",
+     "type": "BOOLEAN",
+     "link": 53,
+     "widget": {
+      "name": "switch"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "COMFY_MATCHTYPE_V3",
+     "links": [
+      55
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ComfySwitchNode"
+   },
+   "widgets_values": [
+    false
+   ],
+   "title": "Reference image to the LLM (i2i only)"
+  },
+  {
+   "id": 39,
+   "type": "ComfySwitchNode",
+   "pos": [
+    0.0,
+    810.0
+   ],
+   "size": [
+    400.0,
+    106.0
+   ],
+   "flags": {},
+   "order": 18,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "on_false",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 57
+    },
+    {
+     "name": "on_true",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 58
+    },
+    {
+     "name": "switch",
+     "type": "BOOLEAN",
+     "link": 56,
+     "widget": {
+      "name": "switch"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "output",
+     "type": "COMFY_MATCHTYPE_V3",
+     "links": [
+      59
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ComfySwitchNode"
+   },
+   "widgets_values": [
+    false
+   ],
+   "title": "LLM: Gemma (t2i) / Qwen3-VL (i2i, can see images)"
+  },
+  {
+   "id": 40,
+   "type": "PrimitiveString",
+   "pos": [
+    0.0,
+    560.0
+   ],
+   "size": [
+    400.0,
+    85.0
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      57
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveString"
+   },
+   "widgets_values": [
+    "gemma-4-12b-it-qat-sompoa-heresy"
+   ],
+   "title": "t2i LLM (LM Studio id)"
+  },
+  {
+   "id": 41,
+   "type": "PrimitiveString",
+   "pos": [
+    0.0,
+    685.0
+   ],
+   "size": [
+    400.0,
+    85.0
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      58
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveString"
+   },
+   "widgets_values": [
+    "qwen3-vl-8b-instruct-heretic"
+   ],
+   "title": "i2i LLM - must be vision-capable (LM Studio id)"
+  },
+  {
+   "id": 49,
+   "type": "MarkdownNote",
+   "pos": [
+    -560.0,
+    0.0
+   ],
+   "size": [
+    520.0,
+    1100.0
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "## \ud83d\udcf8 Qwen Image 2.1: Candid Photo (+ LLM..."
+   ],
+   "title": "\ud83d\udcd6 How to use"
+  }
+ ],
+ "links": [
+  [
+   3,
+   3,
+   0,
+   4,
+   0,
+   "MODEL"
+  ],
+  [
+   4,
+   4,
+   0,
+   5,
+   0,
+   "MODEL"
+  ],
+  [
+   5,
+   5,
+   0,
+   16,
+   0,
+   "MODEL"
+  ],
+  [
+   6,
+   5,
+   0,
+   18,
+   0,
+   "MODEL"
+  ],
+  [
+   7,
+   6,
+   0,
+   14,
+   0,
+   "CLIP"
+  ],
+  [
+   8,
+   7,
+   0,
+   21,
+   1,
+   "VAE"
+  ],
+  [
+   9,
+   7,
+   0,
+   26,
+   1,
+   "VAE"
+  ],
+  [
+   10,
+   8,
+   0,
+   10,
+   0,
+   "INT"
+  ],
+  [
+   11,
+   8,
+   0,
+   3,
+   1,
+   "INT"
+  ],
+  [
+   12,
+   9,
+   0,
+   10,
+   1,
+   "INT"
+  ],
+  [
+   13,
+   9,
+   0,
+   3,
+   2,
+   "INT"
+  ],
+  [
+   14,
+   11,
+   0,
+   12,
+   4,
+   "STRING"
+  ],
+  [
+   16,
+   13,
+   0,
+   14,
+   2,
+   "STRING"
+  ],
+  [
+   17,
+   14,
+   0,
+   16,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   18,
+   14,
+   1,
+   16,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   19,
+   15,
+   0,
+   20,
+   0,
+   "NOISE"
+  ],
+  [
+   20,
+   16,
+   0,
+   20,
+   1,
+   "GUIDER"
+  ],
+  [
+   21,
+   17,
+   0,
+   20,
+   2,
+   "SAMPLER"
+  ],
+  [
+   24,
+   24,
+   0,
+   25,
+   0,
+   "IMAGE"
+  ],
+  [
+   25,
+   25,
+   0,
+   26,
+   0,
+   "IMAGE"
+  ],
+  [
+   26,
+   23,
+   0,
+   27,
+   2,
+   "BOOLEAN"
+  ],
+  [
+   27,
+   10,
+   0,
+   27,
+   0,
+   "LATENT"
+  ],
+  [
+   28,
+   26,
+   0,
+   27,
+   1,
+   "LATENT"
+  ],
+  [
+   29,
+   27,
+   0,
+   20,
+   4,
+   "COMFY_MATCHTYPE_V3"
+  ],
+  [
+   30,
+   23,
+   0,
+   30,
+   2,
+   "BOOLEAN"
+  ],
+  [
+   31,
+   29,
+   0,
+   30,
+   0,
+   "FLOAT"
+  ],
+  [
+   32,
+   28,
+   0,
+   30,
+   1,
+   "FLOAT"
+  ],
+  [
+   33,
+   30,
+   0,
+   18,
+   1,
+   "COMFY_MATCHTYPE_V3"
+  ],
+  [
+   37,
+   20,
+   0,
+   21,
+   0,
+   "LATENT"
+  ],
+  [
+   38,
+   21,
+   0,
+   22,
+   0,
+   "IMAGE"
+  ],
+  [
+   46,
+   34,
+   0,
+   3,
+   0,
+   "MODEL"
+  ],
+  [
+   47,
+   35,
+   0,
+   12,
+   5,
+   "STRING"
+  ],
+  [
+   53,
+   23,
+   0,
+   38,
+   2,
+   "BOOLEAN"
+  ],
+  [
+   54,
+   25,
+   0,
+   38,
+   1,
+   "IMAGE"
+  ],
+  [
+   55,
+   38,
+   0,
+   12,
+   0,
+   "COMFY_MATCHTYPE_V3"
+  ],
+  [
+   56,
+   23,
+   0,
+   39,
+   2,
+   "BOOLEAN"
+  ],
+  [
+   57,
+   40,
+   0,
+   39,
+   0,
+   "STRING"
+  ],
+  [
+   58,
+   41,
+   0,
+   39,
+   1,
+   "STRING"
+  ],
+  [
+   59,
+   39,
+   0,
+   12,
+   6,
+   "COMFY_MATCHTYPE_V3"
+  ],
+  [
+   60,
+   12,
+   0,
+   13,
+   0,
+   "STRING"
+  ],
+  [
+   61,
+   1,
+   0,
+   34,
+   0,
+   "MODEL"
+  ],
+  [
+   62,
+   18,
+   0,
+   20,
+   3,
+   "SIGMAS"
+  ]
+ ],
+ "groups": [
+  {
+   "id": 1,
+   "title": "\u270f\ufe0f Prompt: idea \u2192 LLM enhancer",
+   "bounding": [
+    -30.0,
+    -70.0,
+    1400.0,
+    1214.0
+   ],
+   "color": "#3f5f3f",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 2,
+   "title": "\ud83d\udcd0 Canvas & seed (keep \u2265 2 MP)",
+   "bounding": [
+    1390.0,
+    -70.0,
+    310.0,
+    670.0
+   ],
+   "color": "#3f5f3f",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 3,
+   "title": "\ud83e\udde0 Models: Qwen 2.1 + shift + guidance patches",
+   "bounding": [
+    1710.0,
+    -70.0,
+    700.0,
+    891.0
+   ],
+   "color": "#335577",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 4,
+   "title": "\ud83c\udf9b\ufe0f Sampling: base model, 20 steps",
+   "bounding": [
+    2430.0,
+    -70.0,
+    820.0,
+    620.0
+   ],
+   "color": "#553355",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 5,
+   "title": "\ud83d\udcbe Output",
+   "bounding": [
+    3270.0,
+    -70.0,
+    620.0,
+    940.0
+   ],
+   "color": "#444444",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 6,
+   "title": "\ud83d\uddbc\ufe0f Image-to-image (optional: flip 'Use reference image')",
+   "bounding": [
+    1390.0,
+    1080.0,
+    1380.0,
+    550.0
+   ],
+   "color": "#665533",
+   "font_size": 24,
+   "flags": {}
+  }
+ ],
+ "config": {},
+ "extra": {
+  "draftsman_title": "Qwen Image 2.1 Candid Photo (Turbo + LLM)"
+ },
+ "version": 0.4
+}

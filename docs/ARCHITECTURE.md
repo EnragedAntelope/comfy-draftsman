@@ -704,6 +704,34 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   like this. `tests/test_round23_reader_priority.py` now pins both the
   narrowed case and the still-must-still-work terminal-writer case.
 
+- **Bypass is resolved the way the frontend resolves it, not by "first linked
+  input".** `Workflow._trace_origin` mirrors `ExecutableNodeDTO.resolveOutput` /
+  `_getBypassSlotIndex` (verified against the installed `comfyui_frontend_package`
+  bundle): the same-index input first if type-compatible, then the first input whose
+  type *equals* what the consumer's socket wants, then the first compatible one;
+  linked-ness is never consulted, so an unlinked chosen input drops the consumer's
+  input. The wanted type is the *consuming* socket's type, and each hop restarts with
+  the forwarded input's own type. `_lg_valid` is litegraph's `isValidConnection`,
+  deliberately not `types_compatible` (which has COMBO/MatchType rules the frontend's
+  bypass lacks). Order is the stored `node.inputs` order, which is what the browser
+  holds after loading.
+- **Organize stages need graph position, not just the schema.** `classify` /
+  `_classify_by_schema` decide from one node; `annotate._restage_by_graph` then
+  moves routing nodes (`utilities/logic`) to their leftmost consumer's stage and
+  pulls an IMAGE→IMAGE "post" node that is *not downstream of any sampling-stage
+  node* back to its source's stage. It does nothing when the graph has no sampling
+  stage (a pure image-processing graph is all post). `layout.apply_staged_layout`
+  flows a stage's columns into rows at `BAND_WRAP_W`; the Qwen 2.1 fixture is the
+  acceptance case (canvas ≤ 2.5× its height).
+- **A note may quote a family as a reference, never the graph's own values as
+  "tuned".** The sampling note compares the graph's steps/CFG to the family range
+  and, when outside, says so and omits the base-model numbers.
+- **Elicitation is best-effort and honest about it.** `_confirm` skips `elicit` when
+  the client did not advertise the capability (or `DRAFTSMAN_ELICITATION=off`) and
+  reports a dismissed dialog as `*_not_confirmed`, never as a decline.
+- **Lint `no-prompt-preview` only looks at CONDITIONING producers.** A node with a
+  `prompt` widget is not an encoder (LLM nodes have one).
+
 ## Remaining TODOs
 
 Open:
@@ -716,8 +744,8 @@ Open:
   against an instance with partner nodes installed settles it. Failing *open*
   (unknown is not billable) is the deliberate choice - see the spend-gate
   section above.
-- **[OPEN] VRAM floors for the six unsourced families.** chroma, krea2, ltx,
-  qwen_image, sd35 and sd15 carry no `hardware` block and correctly report
+- **[OPEN] VRAM floors for the unsourced families.** chroma, krea2, ltx,
+  qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
   nothing. sd15 in particular was left out on purpose: no citable floor was
   found for it, and it runs comfortably on anything ComfyUI itself supports, so
   the verdict would never fire. Add one only from a source that states the

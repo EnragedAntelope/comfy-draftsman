@@ -81,6 +81,45 @@ def types_compatible(out_type: str | None, in_type: str | None) -> bool:
         )
     return False
 
+
+def _lg_valid(a: str | None, b: str | None) -> bool:
+    """litegraph's ``isValidConnection`` exactly: '' / '*' are wildcards, the
+    rest compares lowercase, and comma unions match on any pair. Deliberately
+    NOT ``types_compatible`` - that one carries COMBO/MatchType rules the
+    frontend's bypass resolution does not have."""
+    a = "" if a in (None, "*") else str(a)
+    b = "" if b in (None, "*") else str(b)
+    if not a or not b or a == b:
+        return True
+    a, b = a.lower(), b.lower()
+    if "," not in a and "," not in b:
+        return a == b
+    return any(_lg_valid(x, y) for x in a.split(",") for y in b.split(","))
+
+
+def _bypass_input_index(node: Any, slot: int, want: str | None) -> int:
+    """Which input a bypassed node forwards for output ``slot`` when the
+    consumer wants type ``want`` - the frontend's ``_getBypassSlotIndex``.
+    Same-index input first (if type-compatible), then the first input whose
+    type EQUALS ``want``, then the first compatible one; -1 when none fits.
+    Linked-ness is never consulted, so the chosen input may be unlinked."""
+    inputs = node.inputs
+    if want in (None, "*", ""):
+        return slot if len(inputs) > slot else 0
+    out_type = node.outputs[slot].type if slot < len(node.outputs) else "*"
+    if slot < len(inputs) and _lg_valid(inputs[slot].type, out_type) and _lg_valid(
+        inputs[slot].type, want
+    ):
+        return slot
+    for i, inp in enumerate(inputs):
+        if inp.type == want:
+            return i
+    for i, inp in enumerate(inputs):
+        if _lg_valid(inp.type, out_type) and _lg_valid(inp.type, want):
+            return i
+    return -1
+
+
 # %date% / %date:FORMAT% filename-prefix tokens are substituted by a frontend
 # extension (pysssss / Custom-Scripts) before the browser submits; the backend
 # /prompt endpoint never processes them, so a headless run would pass the literal
@@ -1266,32 +1305,47 @@ class Workflow:
         through Reroute and bypassed nodes."""
         resolved: dict[tuple[int, int], tuple[int, int]] = {}
         for link in self.links.values():
-            origin = self._trace_origin(link.origin_id, link.origin_slot, depth=0)
+            target = self.nodes.get(link.target_id)
+            want = (
+                target.inputs[link.target_slot].type
+                if target is not None and link.target_slot < len(target.inputs)
+                else link.type
+            )
+            origin = self._trace_origin(link.origin_id, link.origin_slot, 0, want)
             if origin is not None:
                 resolved[(link.target_id, link.target_slot)] = origin
         return resolved
 
     def _trace_origin(
-        self, origin_id: int, origin_slot: int, depth: int
+        self, origin_id: int, origin_slot: int, depth: int, want_type: str | None = None
     ) -> tuple[int, int] | None:
+        """Real producer behind an output, mirroring the frontend's queue-time
+        resolution (ExecutableNodeDTO.resolveOutput/_getBypassSlotIndex). A
+        bypassed node forwards the input chosen by ``_bypass_input_index``; if
+        THAT input is unlinked the consumer's input is simply dropped - the
+        frontend never falls through to another linked input."""
         if depth > 100:
             return None
         node = self.nodes.get(origin_id)
         if node is None:
             return None
-        passthrough = node.type == "Reroute" or node.mode == MODE_BYPASS
-        if not passthrough:
-            return (origin_id, origin_slot)
-        # find this node's upstream feed: for Reroute, its single input; for
-        # bypass, the first input whose type matches the requested output type
-        wanted_type = (
-            node.outputs[origin_slot].type if origin_slot < len(node.outputs) else "*"
-        )
-        for slot in node.inputs:
-            if slot.link is None:
-                continue
-            if node.type == "Reroute" or wanted_type in ("*",) or slot.type == wanted_type:
-                upstream = self.links.get(slot.link)
+        if node.type == "Reroute":
+            for slot in node.inputs:
+                upstream = self.links.get(slot.link) if slot.link is not None else None
                 if upstream:
-                    return self._trace_origin(upstream.origin_id, upstream.origin_slot, depth + 1)
-        return None
+                    return self._trace_origin(
+                        upstream.origin_id, upstream.origin_slot, depth + 1, want_type
+                    )
+            return None
+        if node.mode != MODE_BYPASS:
+            return (origin_id, origin_slot)
+        if want_type is None:
+            want_type = node.outputs[origin_slot].type if origin_slot < len(node.outputs) else "*"
+        index = _bypass_input_index(node, origin_slot, want_type)
+        if index < 0 or index >= len(node.inputs):
+            return None
+        slot = node.inputs[index]
+        upstream = self.links.get(slot.link) if slot.link is not None else None
+        if not upstream:
+            return None
+        return self._trace_origin(upstream.origin_id, upstream.origin_slot, depth + 1, slot.type)

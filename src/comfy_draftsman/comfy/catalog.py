@@ -171,12 +171,23 @@ def node_summary(
     """One node's full slot schema, sized for an agent to wire it correctly.
 
     choices_filter / max_choices control combo-choice listing: filter is a
-    case-insensitive substring over every combo input's choices; max_choices
-    raises the per-combo cap (default MAX_COMBO_CHOICES)."""
+    case-insensitive substring over every combo input's choices, or "input:substr"
+    for just that combo; max_choices raises the per-combo cap (default
+    MAX_COMBO_CHOICES)."""
     schema = object_info[class_type]
     inputs = []
+    # "input:substr" scopes the filter to that one combo; without a prefix that
+    # names an input on this node it applies to every combo, as before
+    only_input = None
+    known = {
+        n for sec in ("required", "optional") for n in (schema.get("input", {}).get(sec) or {})
+    }
+    if ":" in choices_filter and choices_filter.split(":", 1)[0] in known:
+        only_input, choices_filter = choices_filter.split(":", 1)
+    full_filter = choices_filter
     for section in ("required", "optional"):
         for name, spec in schema.get("input", {}).get(section, {}).items():
+            choices_filter = full_filter if only_input in (None, name) else ""
             entry: dict[str, Any] = {
                 "name": name,
                 "required": section == "required",

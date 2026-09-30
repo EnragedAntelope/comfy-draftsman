@@ -47,6 +47,12 @@ class Config:
     # frontend normally injects this into the prompt payload's extra_data; without
     # it, headless MCP queues fail with "Unauthorized" on partner nodes.
     comfy_api_key: str = field(default_factory=lambda: os.environ.get("COMFY_API_KEY", ""))
+    # DRAFTSMAN_ELICITATION=off: never pop a confirmation dialog, always take the
+    # ask-in-chat fallback (for a client whose dialog never renders)
+    elicitation: bool = field(
+        default_factory=lambda: os.environ.get("DRAFTSMAN_ELICITATION", "on").lower()
+        not in ("off", "0", "false", "no")
+    )
 
 
 def load_config() -> Config:

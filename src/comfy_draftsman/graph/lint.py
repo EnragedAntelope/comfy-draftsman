@@ -83,10 +83,12 @@ def _missing_prompt_previews(
 ) -> list[dict[str, Any]]:
     """A positive prompt built upstream (wildcards, concatenators) is invisible
     to the user unless a Show Text-style node displays the final string."""
-    from .annotate import _prompt_role
+    from .annotate import _outputs_conditioning, _prompt_role
 
     findings = []
     for node in wf.nodes.values():
+        if not _outputs_conditioning(node):
+            continue  # an LLM/text node with a `prompt` input is not an encoder
         try:
             slots = set(w.widget_slot_names(node.type, object_info))
         except (ValueError, KeyError):
@@ -241,8 +243,42 @@ def lint(
             )
 
     findings.extend(_missing_prompt_previews(wf, object_info))
+    findings.extend(_output_behind_lazy_input(wf, object_info))
     findings.extend(_overlap_findings(wf))
     findings.extend(_resolution_alignment_findings(wf, object_info, learned_dir))
+    return findings
+
+
+def _output_behind_lazy_input(
+    wf: Workflow, object_info: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """ComfyUI runs every ``output_node`` on every queue; laziness only prunes
+    inputs. An output node wired straight into a lazy input (a switch's
+    on_true/on_false) therefore executes whether or not that branch is selected,
+    dragging its whole upstream in with it. Direct feeds only - a chain through
+    another node is not followed."""
+    findings = []
+    for link in wf.links.values():
+        origin, target = wf.nodes.get(link.origin_id), wf.nodes.get(link.target_id)
+        if origin is None or target is None or link.target_slot >= len(target.inputs):
+            continue
+        if origin.mode in (MODE_MUTE, MODE_BYPASS):
+            continue
+        if not (object_info.get(origin.type) or {}).get("output_node"):
+            continue
+        name = target.inputs[link.target_slot].name
+        inputs = (object_info.get(target.type) or {}).get("input") or {}
+        spec = {**(inputs.get("required") or {}), **(inputs.get("optional") or {})}.get(name)
+        if isinstance(spec, list | tuple) and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("lazy"):
+            findings.append(
+                _finding(
+                    "output-behind-lazy-input",
+                    f"{origin.type} #{origin.id} is an output node feeding lazy input "
+                    f"'{name}' of {target.type} #{target.id}; ComfyUI runs every output "
+                    "node on every queue, so it executes whichever branch is selected",
+                    origin.id,
+                )
+            )
     return findings
 
 

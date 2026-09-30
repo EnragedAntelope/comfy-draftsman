@@ -18,7 +18,14 @@ from typing import Any
 
 from .. import knowledge
 from . import knobs
-from .layout import X_GUTTER, Y_GAP, apply_staged_layout, is_text_display, resolve_overlaps
+from .layout import (
+    X_GUTTER,
+    Y_GAP,
+    _ranks,
+    apply_staged_layout,
+    is_text_display,
+    resolve_overlaps,
+)
 from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
@@ -67,6 +74,8 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
         # frontend gives it control_after_generate), so it belongs on the left
         # edge with the other tweakables - not in the middle of the sampler band
         return "inputs"
+    if "utilities/primitive" in ((object_info.get(node.type) or {}).get("category") or "").lower():
+        return "inputs"  # core PrimitiveInt/Float/String/...: the same hand-tweaked knobs
     stage = _classify_by_schema(node, object_info)
     # An UNWIRED prompt box on a conditioning ENCODER (CLIPTextEncode & kin) is
     # the classic single "type your prompt here" box - the most commonly
@@ -104,6 +113,17 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
         # genuine terminal writers in Output without over-trusting the flag.
         if schema.get("output_node") and not (out_types and out_types <= {"STRING"}):
             return "output"
+        in_types = {
+            str(spec[0]).upper()
+            for section in ("required", "optional")
+            for spec in (schema.get("input", {}).get(section, {}) or {}).values()
+            if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str)
+        }
+        if out_types == {"MODEL"} and "MODEL" in in_types:
+            # MODEL->MODEL patches (ModelSamplingFlux, FreSca, APG, ...) continue
+            # the loader/LoRA chain; filing them under Sampling strands them
+            # thousands of px from the model they patch
+            return "models"
         if "loaders" in category:
             return "models"
         if "conditioning" in category:
@@ -118,12 +138,6 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
             # steps) - the reader wants to see what feeds the final prompt one
             # step before the encoder, not buried in Conditioning wiring
             return "prompt_build"
-        in_types = {
-            str(spec[0]).upper()
-            for section in ("required", "optional")
-            for spec in (schema.get("input", {}).get(section, {}) or {}).values()
-            if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str)
-        }
         if "IMAGE" in in_types and "IMAGE" in out_types:
             return "post"  # image-in/image-out = post-processing (overlays, filters)
     if any(hint in name for hint in _POST_HINTS):
@@ -177,6 +191,63 @@ def _companion_sources(
             resolved[nid] = src
             stage_of_key[nid] = stage_of_key[src]
     return resolved
+
+
+def _source_stage(wf: Workflow, node: Node, stage_of_key: dict[int, str]) -> str | None:
+    """Stage of the node feeding the first linked non-BOOLEAN input (a switch's
+    BOOLEAN selector says nothing about where its data lives)."""
+    for slot in node.inputs:
+        link = wf.links.get(slot.link) if slot.link is not None else None
+        if link is not None and str(slot.type).upper() != "BOOLEAN" and link.origin_id in stage_of_key:
+            return stage_of_key[link.origin_id]
+    return None
+
+
+def _restage_by_graph(
+    wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]
+) -> None:
+    """Stage fixes that need graph position, not just the node's own schema.
+
+    - Routing nodes (``utilities/logic``: If/Else switches) take the stage of
+      their leftmost consumer, so wires keep flowing inputs -> consumer instead
+      of the switch being stranded in Sampling because the schema can't say.
+    - An IMAGE->IMAGE "post" node that is NOT downstream of the sampling stage
+      (an i2i reference scaler feeding VAEEncode) is preprocessing, not
+      post-processing: it joins the stage of its source. Skipped when the graph
+      has no sampling stage at all - a pure image-processing graph is all post.
+    """
+    rank = _ranks(wf)
+    consumers: dict[int, list[int]] = {}
+    for link in wf.links.values():
+        consumers.setdefault(link.origin_id, []).append(link.target_id)
+
+    def category(node: Node) -> str:
+        return ((object_info.get(node.type) or {}).get("category") or "").lower()
+
+    switches = [n for n in stage_of_key if "utilities/logic" in category(wf.nodes[n])]
+    for nid in sorted(switches, key=lambda n: (-rank.get(n, 0), n)):  # consumers first
+        stages = [
+            _STAGE_INDEX[stage_of_key[c]] for c in consumers.get(nid, []) if c in stage_of_key
+        ]
+        if stages:
+            stage_of_key[nid] = STAGES[min(stages)][0]
+        elif (src := _source_stage(wf, wf.nodes[nid], stage_of_key)) is not None:
+            stage_of_key[nid] = src
+
+    frontier = [n for n, s in stage_of_key.items() if s == "sampling"]
+    if not frontier:
+        return
+    after: set[int] = set()
+    while frontier:
+        for child in consumers.get(frontier.pop(), []):
+            if child not in after:
+                after.add(child)
+                frontier.append(child)
+    for nid in sorted(stage_of_key, key=lambda n: (rank.get(n, 0), n)):
+        if stage_of_key[nid] == "post" and nid not in after:
+            src = _source_stage(wf, wf.nodes[nid], stage_of_key)
+            if src is not None:
+                stage_of_key[nid] = src
 
 
 ZEROOUT_TYPE = "ConditioningZeroOut"
@@ -473,29 +544,46 @@ def _note_text(
         )
     elif stage == "sampling":
         graph_knobs = _graph_knobs(members, object_info)
-        sampler = next(
-            (n for n in members if "sampling" in (object_info.get(n.type, {}).get("category") or "")),
-            None,
+        sampling = g.get("sampling", {})
+        # the graph's own steps/cfg (steps on BasicScheduler, cfg on CFGGuider,
+        # or both on a KSampler). The family numbers are a REFERENCE for the
+        # base model; when the graph sits outside them (a turbo/lightning LoRA
+        # arrives through lora_name, which variant matching deliberately
+        # ignores) quoting them would contradict the graph
+        current: dict[str, Any] = {}
+        for n in members:
+            for k, v in _named_widgets(n, object_info).items():
+                if k in ("steps", "cfg"):
+                    current.setdefault(k, v)
+        outside = any(
+            isinstance((v := current.get(k)), int | float)
+            and not isinstance(v, bool)
+            and isinstance((b := sampling.get(k) or {}).get("min"), int | float)
+            and isinstance(b.get("max"), int | float)
+            and not b["min"] <= v <= b["max"]
+            for k in ("steps", "cfg")
         )
-        if sampler is not None:
-            named = _named_widgets(sampler, object_info)
-            current = ", ".join(
-                f"{k}={named[k]}"
-                for k in ("steps", "cfg", "sampler_name", "scheduler")
-                if k in named
+        if outside:
+            ref = ", ".join(
+                f"{label} {b['min']}-{b['max']}"
+                for k, label in (("steps", "steps"), ("cfg", "CFG"))
+                if isinstance((b := sampling.get(k) or {}).get("min"), int | float)
+                and isinstance(b.get("max"), int | float)
             )
-            if current:
-                lines.append(f"⚙️ Tuned for {family}: {current} — leave these alone.")
-        if notes.get("sampling"):
+            shown = ", ".join(f"{k}={current[k]}" for k in ("steps", "cfg") if k in current)
+            lines.append(
+                f"⚠️ This graph runs {shown}, outside {family}'s base reference ({ref}) - "
+                "likely an acceleration LoRA or variant; the base-model sampling numbers are omitted."
+            )
+        elif notes.get("sampling"):
             lines.append(notes["sampling"])
         if notes.get("latent"):
             lines.append("👇 " + notes["latent"])
-        sampling = g.get("sampling", {})
         cfg_block = sampling.get("cfg") or {}
         # a prose statement (H3: "No CFG - guidance-distilled") beats a numeric
         # range when there isn't one - but only when the graph actually has a
         # cfg knob to talk about (BasicGuider/SamplerCustomAdvanced don't)
-        if isinstance(cfg_block.get("note"), str) and "cfg" in graph_knobs:
+        if not outside and isinstance(cfg_block.get("note"), str) and "cfg" in graph_knobs:
             lines.append(cfg_block["note"])
         # each clause requires BOTH a real numeric min/max AND the knob being
         # present on this graph's actual sampling nodes - the bug this fixes
@@ -508,8 +596,8 @@ def _note_text(
             and isinstance((block := sampling.get(knob_key) or {}).get("min"), int | float)
             and isinstance(block.get("max"), int | float)
         ]
-        if range_clauses:
-            lines.append("Safe ranges: " + ", ".join(range_clauses) + ".")
+        if range_clauses and not outside:
+            lines.append("Family reference: " + ", ".join(range_clauses) + ".")
     elif stage == "post":
         for technique, settings in (g.get("techniques") or {}).items():
             hint = technique.replace("_", " ")
@@ -657,6 +745,7 @@ def annotate(
         for node in wf.nodes.values()
         if node.type not in ("Note", "MarkdownNote")
     }
+    _restage_by_graph(wf, object_info, stage_of_key)
     # display nodes follow whatever they display (stage + position)
     companion_of = _companion_sources(wf, object_info, stage_of_key)
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}

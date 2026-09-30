@@ -1,0 +1,113 @@
+family: qwen_image21
+display_name: Qwen-Image 2.1
+detect:
+  checkpoint_patterns:
+  - qwen_image_2.1
+  - qwen-image-2.1
+  - qwenimage21
+  - qwen_image21
+  - qwenimage2.1
+  - qwen-image2.1
+loader: unet_clip_vae
+components:
+  text_encoders:
+  - qwen3vl_8b int8_convrot/bf16 (CLIPLoader, type=qwen_image)
+  vae: qwen_image_2.1_vae_bf16.safetensors
+sampling:
+  cfg:
+    min: 1
+    max: 2
+    default: 1
+  steps:
+    min: 16
+    max: 40
+    default: 20
+  samplers:
+  - euler
+  schedulers:
+  - simple
+resolutions:
+- 1344x1760
+- 1760x1344
+- 1536x1536
+- 1248x1888
+- 1888x1248
+- 2048x2048
+- 1536x2720
+- 2720x1536
+notes:
+  loaders: 'Qwen-Image 2.1 is NOT Qwen-Image 1.x: Qwen3-VL 8B text encoder (CLIPLoader type=qwen_image)
+    + its own qwen_image_2.1_vae. Encode with TextEncodeQwenImage21 (prompt, negative, resolution; autogrow
+    images.image_N for edit references).'
+  conditioning: Official path runs WITHOUT CFG (cfg 1), so the negative prompt, APG and FreSca do nothing
+    unless cfg > 1. Long observer-style descriptions (official PE-T2I rewriter style) work best; turbo
+    LoRAs were distilled on PE-rewritten prompts.
+  sampling: 'Base: euler/simple, cfg 1, 20 steps is enough for candid photos (16-30; official 40). Render
+    at >= 2 MP (native 2048x2048; 1 MP is visibly worse). Core ComfyUI hardcodes shift mu=0.69 (the 1024x1024
+    value); ModelSamplingFlux(max_shift=0.69, base_shift=0.5, width, height) reproduces the official resolution-dependent
+    schedule. Turbo LoRAs via the stock loader on int8 degrade faces - see techniques.'
+  latent: 64-channel latent at 1/16 scale; plain EmptyLatentImage works (the sampler resizes it). FreSca
+    freq_cutoff counts latent indices, so halve SD/Flux values (~10 at 1 MP, ~20 at 2 MP).
+techniques:
+  viggle_turbo_6step:
+    strength: 1
+    graph: UNET -> LoraLoaderModelOnly(viggle, 1.0) -> ModelSamplingFlux(0.69, 0.5, W, H) -> CFGGuider;
+      sigmas = BasicScheduler(simple, 4 steps) -> ExtendIntermediateSigmas(steps=3, start_at_sigma=-1,
+      end_at_sigma=0.99, spacing=sine); euler; SamplerCustomAdvanced
+    notes: 'NOT RECOMMENDED with the stock LoRA loader on the int8 model: composition matches the base
+      model, but at 1:1 faces come out shiny, crunchy and oversharpened (an SD1.5 look), and small faces
+      go waxy. The 8-step schedule is worse still. Likely cause: the stock loader merges the LoRA into
+      int8 weights (Viggle''s README measures LPIPS 0.086 merged vs 0.038 with their unmerged ViggleTurboLora
+      node). Retest only with that node or a bf16 base. Composition-level and face-crop-at-1MP checks
+      hid this; always inspect faces 1:1 at the final resolution.'
+  apg_fresca_boost:
+    cfg: 2
+    apg:
+      eta: 0.5
+      norm_threshold: 30
+      momentum: -0.5
+    fresca:
+      scale_low: 0.9
+      scale_high: 1.15
+      freq_cutoff: 20
+    notes: 'On the base model at CFG 2 (20 steps): slightly more facial definition, no burn or shine,
+      ~25 s at 2.37 MP. APG norm_threshold caps at 50 and this model''s guidance norm is larger, so every
+      value clamps (15-50 only shifts contrast). Plain CFG 3 without APG regrades to teal/orange; res_2s/beta
+      looks glossier - both wrong for a candid photographic look.'
+  base_candid_default:
+    graph: UNET -> ModelSamplingFlux(0.69, 0.5, W, H) -> FreSca(0.9, 1.15, 20) -> APG(0.5, 30, -0.5) ->
+      CFGGuider; BasicScheduler(simple, 20); euler; SamplerCustomAdvanced; 1344x1760
+    notes: 'Chosen default for candid photos: 20 steps is enough (16-30 fine). CFG 1 = official path,
+      ~16 s at 2.37 MP. CFG 2 activates APG/FreSca + the negative prompt for slightly more facial definition,
+      ~25 s, no burn or shine.'
+  reference_edit:
+    graph: LoadImage -> ImageScaleToTotalPixels(2.37 MP, step 32) -> TextEncodeQwenImage21.images.image_1
+      (+ vae) AND -> VAEEncode -> sampler latent at denoise 1.0 (the output follows the reference's aspect
+      ratio)
+    notes: 'Use this for i2i, not classic img2img: VAEEncode + denoise 0.7 keeps the photo''s layout and
+      can''t move a subject into a new scene. Prompts should be edit INSTRUCTIONS (''Show the woman in
+      the image ...'') that point at the image for identity instead of re-describing the face (Qwen PE-I2I
+      guidance), and should give the eyes a concrete target in the new scene, or the reference''s gaze
+      carries over. Denoise 0.6-0.8 with the reference still attached = light touches that keep the layout.'
+sources:
+- match:
+  - qwen_image_2.1_int8_convrot.safetensors
+  - qwenImage21_21_int8.safetensors
+  what: diffusion model (int8)
+  url: https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors
+- match:
+  - qwen_image_2.1_bf16.safetensors
+  what: diffusion model (bf16)
+  url: https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_bf16.safetensors
+- match:
+  - qwen3vl_8b_int8_convrot.safetensors
+  - qwenImage21_21_txt_int8.safetensors
+  what: text encoder (Qwen3-VL 8B int8)
+  url: https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors
+- match:
+  - qwen_image_2.1_vae_bf16.safetensors
+  what: VAE
+  url: https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors
+research: 'Floor last reviewed 2026-09. Sources: https://huggingface.co/Qwen/Qwen-Image-2.1, https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I,
+  https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo; sampling and reference-edit findings from
+  local A/B renders on ComfyUI 0.37.0. Check the model card for newer releases.'

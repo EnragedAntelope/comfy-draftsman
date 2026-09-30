@@ -105,7 +105,10 @@ def test_notes_generated_with_model_aware_guidance(txt2img, object_info):
     assert "SDXL" in all_text  # family detected from checkpoint name
     # the two registers
     assert "👇" in all_text or "touch" in all_text.lower()
-    assert "⚙" in all_text or "leave" in all_text.lower()
+    # ...and the sampling note quotes the family as a REFERENCE - never the
+    # graph's own values as "tuned ... leave these alone"
+    assert "Family reference" in all_text or "base reference" in all_text
+    assert "leave these alone" not in all_text
 
 
 def test_notes_do_not_overlap_nodes(txt2img, object_info):

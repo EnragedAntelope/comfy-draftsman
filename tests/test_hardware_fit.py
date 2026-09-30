@@ -51,7 +51,7 @@ def test_vram_numbers_carry_a_source(path):
 def test_families_without_data_stay_silent():
     """The five unsourced families must report nothing rather than a default -
     and an agent asking about them must not be nagged on every call."""
-    for family in ("chroma", "krea2", "ltx", "qwen_image", "sd35", "sd15"):
+    for family in ("chroma", "krea2", "ltx", "qwen_image", "qwen_image21", "sd35", "sd15"):
         guidance = knowledge.get_guidance(family)
         assert "hardware" not in guidance, f"{family} gained an unsourced hardware block"
         assert knowledge.fit_verdict(guidance, _devices(4)) is None

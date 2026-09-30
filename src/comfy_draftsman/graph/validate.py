@@ -38,6 +38,22 @@ _FILE_COMBO_RE = re.compile(
 _DISABLED_IDS_SHOWN = 12
 
 
+_ANNOTATED_FILE_RE = re.compile(r"^.+ \[(input|output|temp)\]$")
+
+
+def _annotated_upload(spec: Any, value: Any) -> bool:
+    """``"sub/file.png [output]"`` on an upload combo (LoadImage & kin): ComfyUI's
+    own VALIDATE_INPUTS accepts the annotated form, though it is never in the
+    input folder's listing."""
+    opts = spec[1] if isinstance(spec, list | tuple) and len(spec) > 1 else None
+    return (
+        isinstance(value, str)
+        and isinstance(opts, dict)
+        and any(k.endswith("_upload") and opts[k] for k in opts)
+        and _ANNOTATED_FILE_RE.match(value) is not None
+    )
+
+
 def _looks_like_file_combo(choices: list[Any]) -> bool:
     return any(
         isinstance(c, str) and (_FILE_COMBO_RE.search(c) or "/" in c or "\\" in c)
@@ -118,7 +134,7 @@ def check_widget_value(
         )
     choices = _combo_choices(spec)
     if choices:
-        if value in choices:
+        if value in choices or _annotated_upload(spec, value):
             return None
         # A value absent from a non-authoritative combo (a third-party node that
         # populates its own list client-side: wildcard/LoRA/style picker) is most
@@ -236,7 +252,7 @@ def _connected_source_finding(
     or optional only gates "must it be wired" - a wired source's realness matters
     either way, so both callers (required and optional loops) share this check."""
     link = wf.links.get(slot.link)
-    origin = wf._trace_origin(link.origin_id, link.origin_slot, 0) if link is not None else None
+    origin = wf._trace_origin(link.origin_id, link.origin_slot, 0, slot.type) if link is not None else None
     if origin is None:
         return _finding(
             "error",
@@ -601,7 +617,12 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             if slot is not None and slot.link is not None:
                 continue  # connected: widget value is overridden
             choices = _combo_choices(spec)
-            if choices is not None and choices and value not in choices:
+            if (
+                choices is not None
+                and choices
+                and value not in choices
+                and not _annotated_upload(spec, value)
+            ):
                 close = difflib.get_close_matches(str(value), [str(c) for c in choices], n=1, cutoff=0.4)
                 if _authoritative_combo(node.type, choices, object_info):
                     # on-disk listing or a core node's baked enum: genuinely wrong

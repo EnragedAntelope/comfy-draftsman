@@ -206,10 +206,14 @@ def test_estimate_size_caps_dynamic_widget_nodes():
 def test_staged_layout_wraps_tall_columns(object_info):
     """Many parallel same-stage nodes must wrap into side-by-side columns
     instead of one very tall column (which forces a huge, mostly-empty group)."""
-    from comfy_draftsman.graph.layout import WRAP_TARGET_H, apply_staged_layout
+    from comfy_draftsman.graph.layout import (
+        BAND_WRAP_W,
+        WRAP_TARGET_H,
+        apply_staged_layout,
+    )
 
     wf = Workflow.new()
-    nodes = [wf.add_node("CLIPTextEncode", object_info=object_info) for _ in range(10)]
+    nodes = [wf.add_node("CLIPTextEncode", object_info=object_info) for _ in range(6)]
     stage_of = {n.id: 2 for n in nodes}
     boxes = apply_staged_layout(wf, object_info, stage_of)
     _x, _y, width, height = boxes[2]
@@ -217,6 +221,7 @@ def test_staged_layout_wraps_tall_columns(object_info):
         f"band is {height}px tall - columns did not wrap"
     )
     assert width > nodes[0].size[0], "wrapping should widen the band"
+    assert width <= BAND_WRAP_W
     # wrapped columns must not overlap
     items = list(_boxes(wf).items())
     for i, (id_a, box_a) in enumerate(items):

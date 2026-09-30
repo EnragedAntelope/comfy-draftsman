@@ -127,6 +127,7 @@ change the `args` line, restart your client, and optionally
 | `DRAFTSMAN_LEARNED_DIR` | `~/.comfy-draftsman/learned` | Persistent learned model knowledge |
 | `COMFYUI_MOUNT_DIR` | _(unset)_ | Folder a sandboxed client can reach; `save_output` (and `run_workflow`'s auto-relocate) copy finished renders — images, video, audio — here out of ComfyUI's `output/` tree |
 | `DRAFTSMAN_TIMEOUT` | `30` | HTTP timeout (seconds) |
+| `DRAFTSMAN_ELICITATION` | `on` | `off` never opens a confirmation dialog and always takes the ask-in-chat fallback — for a client whose dialog never renders |
 | `COMFY_API_KEY` | _(unset)_ | Comfy Org API key for partner/* nodes (Luma, Seedance, Kling, Runway); injected into the prompt payload's `extra_data` so headless queues authenticate |
 
 
@@ -173,6 +174,13 @@ but the actual prompting is your **client's** policy. To "approve once", add the
 read-only tools to your client's allowlist — see **[docs/PERMISSIONS.md](docs/PERMISSIONS.md)**
 for a copy-paste Claude Code `permissions.allow` block (and the tradeoffs of allowing
 the mutating tools like `run_workflow` / `save_workflow`).
+
+### Troubleshooting
+
+- **Draftsman's tools don't appear in Claude Code.** The server can be silently
+  disabled per project (`~/.claude.json` → your project → `disabledMcpServers`).
+  `check_setup` can't report that, because a disabled server never runs — re-enable
+  it from `/mcp`.
 
 ## Tools
 
