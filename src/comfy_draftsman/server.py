@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import difflib
 import inspect
+import io
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +26,7 @@ import yaml
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
+from PIL import Image as PILImage
 from pydantic import BaseModel, Field
 
 from . import __version__, knowledge
@@ -39,7 +43,14 @@ from .graph.port import port_workflow as port_engine
 from .graph.spend import api_nodes
 from .graph.validate import check_primitive_value, check_widget_value, validate
 from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names, widgets_to_named
-from .imaging import downscale_image
+from .imaging import (
+    CROP_MAX,
+    INLINE_MAX,
+    contact_sheet,
+    crop_tiles,
+    downscale_image,
+    to_png,
+)
 from .session import Session
 
 # Tool annotations let clients reason about safety and, where supported,
@@ -1350,6 +1361,336 @@ def _check_op(index: int, op: dict[str, Any]) -> str:
     return kind
 
 
+def _apply_ops(
+    wf: Workflow,
+    operations: list[dict[str, Any]],
+    object_info: dict[str, Any],
+    applied: list[str],
+    touched: set[int],
+) -> None:
+    """Apply edit ops in order, appending to ``applied``/``touched`` as it goes so a
+    failing op still reports what landed before it. Raises ValueError/KeyError."""
+    for index, op in enumerate(operations):
+        kind = _check_op(index, op)
+        if kind == "replace_in_widget":
+            op, kind = _replace_as_set_widget(wf, op, object_info), "set_widget"
+        if kind == "add_node":
+            class_type = op["class_type"]
+            widgets = op.get("widgets") or {}
+            # validate class + widget names BEFORE touching the graph so a
+            # failed add leaves no half-built stub node behind
+            if class_type in NOTE_TYPES:
+                if bad := sorted(set(widgets) - {"text"}):
+                    raise ValueError(
+                        f"{class_type} has a single widget 'text'; got {bad}"
+                    )
+            elif class_type in VIRTUAL_TYPES:
+                # PrimitiveNode/Reroute are frontend-only nodes, absent from
+                # object_info - the "installed?" check below would reject them
+                # even though ComfyUI has them. A primitive has no widgets until
+                # it adopts a socket's type on its first connection.
+                if widgets:
+                    raise ValueError(
+                        f"{class_type} takes no widgets at add time: connect it to "
+                        "a widget input first (it then mirrors that socket's type), "
+                        "then set_widget 'value' and, for a number/combo, "
+                        "'control_after_generate'; graph unchanged"
+                    )
+            elif class_type not in object_info:
+                raise ValueError(
+                    f"unknown node class {class_type!r} - not installed on this "
+                    "instance (search_nodes finds classes, resolve_missing_nodes "
+                    "finds packs); graph unchanged"
+                )
+            else:
+                # accept any widget that exists under some dynamic-combo
+                # selection; set_widget enforces option ordering at apply time
+                slots = all_slot_names(class_type, object_info)
+                if bad := sorted(set(widgets) - set(slots)):
+                    raise ValueError(
+                        f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
+                        "graph unchanged"
+                    )
+                if not op.get("force"):
+                    for name, value in widgets.items():
+                        problem = check_widget_value(
+                            class_type, name, value, object_info
+                        )
+                        if problem:
+                            raise ValueError(
+                                f"{class_type}: {problem}; graph unchanged"
+                            )
+            node = wf.add_node(class_type, object_info=object_info, title=op.get("title"))
+            for name, value in widgets.items():
+                wf.set_widget(node.id, name, value, object_info)
+            touched.add(node.id)
+            applied.append(f"added {node.type} as #{node.id}")
+        elif kind == "remove_node":
+            wf.remove_node(int(op["node_id"]))
+            applied.append(f"removed #{op['node_id']}")
+        elif kind == "connect":
+            from_output = op["from_output"]
+            if isinstance(from_output, str) and from_output.isdigit():
+                from_output = int(from_output)
+            # a link already feeding the target input gets replaced - say so
+            replaced = ""
+            target = wf.nodes.get(int(op["to_node"]))
+            pre_slot = None
+            if target is not None:
+                pre_slot = target.input_by_name(op["to_input"])
+                if pre_slot is not None and pre_slot.link is not None:
+                    old = wf.links.get(pre_slot.link)
+                    if old is not None:
+                        replaced = f" (replaced existing link from #{old.origin_id}[{old.origin_slot}])"
+            wf.connect(
+                int(op["from_node"]),
+                from_output,
+                int(op["to_node"]),
+                op["to_input"],
+                object_info,
+                force=bool(op.get("force")),
+            )
+            touched.update((int(op["from_node"]), int(op["to_node"])))
+            # a slot that didn't exist before and isn't a declared widget
+            # was force-created as an undeclared (frontend-only) socket -
+            # flag it so the caller knows to verify with a test run
+            undeclared_note = ""
+            if target is not None and pre_slot is None and op.get("force"):
+                try:
+                    is_declared_widget = op["to_input"] in all_slot_names(
+                        target.type, object_info
+                    )
+                except ValueError:
+                    is_declared_widget = False
+                if not is_declared_widget:
+                    undeclared_note = (
+                        f" - created undeclared input '{op['to_input']}' on "
+                        f"{target.type} (frontend-created slot, verify with a test run)"
+                    )
+            applied.append(
+                f"connected #{op['from_node']}.{op['from_output']} -> "
+                f"#{op['to_node']}.{op['to_input']}{replaced}{undeclared_note}"
+            )
+        elif kind == "set_widget":
+            node_id = int(op["node_id"])
+            node = wf.nodes[node_id]
+            if not op.get("force"):
+                if node.type == PRIMITIVE_TYPE and op["input"] != "control_after_generate":
+                    # a primitive's value must satisfy the widget it mirrors -
+                    # nothing else validates it, since its consumer's slot is
+                    # connected and so skips its own widget check
+                    problem = check_primitive_value(
+                        wf, node, op["value"], object_info
+                    )
+                elif node.type in VIRTUAL_TYPES:
+                    problem = None  # notes/reroutes/primitive control slots
+                else:
+                    problem = check_widget_value(
+                        node.type, op["input"], op["value"], object_info,
+                        node.widgets_values,
+                        {slot.name for slot in node.inputs},
+                    )
+                if problem:
+                    raise ValueError(f"{node.type} #{node_id}: {problem}")
+            wf.set_widget(node_id, op["input"], op["value"], object_info)
+            touched.add(node_id)
+            applied.append(f"set #{op['node_id']}.{op['input']} = {_clip(op['value'])!r}")
+        elif kind == "set_title":
+            wf.nodes[int(op["node_id"])].title = op["title"]
+            touched.add(int(op["node_id"]))
+            applied.append(f"titled #{op['node_id']}")
+        elif kind == "set_mode":
+            wf.nodes[int(op["node_id"])].mode = int(op["mode"])
+            touched.add(int(op["node_id"]))
+            applied.append(f"mode #{op['node_id']} = {op['mode']}")
+        elif kind == "set_pos":
+            node_id = int(op["node_id"])
+            node = wf.nodes[node_id]
+            pos = op["pos"]
+            if not (isinstance(pos, list | tuple) and len(pos) == 2):
+                raise ValueError(f"set_pos: 'pos' must be [x, y]; got {pos!r}")
+            node.pos = [float(pos[0]), float(pos[1])]
+            if "size" in op:
+                size = op["size"]
+                if not (isinstance(size, list | tuple) and len(size) == 2):
+                    raise ValueError(f"set_pos: 'size' must be [w, h]; got {size!r}")
+                node.size = [float(size[0]), float(size[1])]
+            touched.add(node_id)
+            applied.append(
+                f"moved #{node_id} to {node.pos}"
+                + (f", size {node.size}" if "size" in op else "")
+            )
+        elif kind == "add_group":
+            node_ids = [int(nid) for nid in op["node_ids"]]
+            group = wf.group_from_nodes(op["title"], node_ids, color=op.get("color", "#3f789e"))
+            applied.append(f"added group #{group.id} {group.title!r} ({len(node_ids)} nodes)")
+        elif kind == "set_group":
+            group = _find_group(wf, int(op["group_id"]))
+            if "title" in op:
+                group.title = op["title"]
+            if "color" in op:
+                group.color = op["color"]
+            if "node_ids" in op:
+                node_ids = [int(nid) for nid in op["node_ids"]]
+                group.bounding = wf.group_bounding_for(node_ids)
+            applied.append(f"updated group #{group.id} {group.title!r}")
+        elif kind == "remove_group":
+            group = _find_group(wf, int(op["group_id"]))
+            wf.groups = [g for g in wf.groups if g.id != group.id]
+            applied.append(f"removed group #{group.id}")
+        elif kind == "add_node_to_definition":
+            definition_id = op["definition_id"]
+            class_type = op["class_type"]
+            widgets = op.get("widgets") or {}
+            inner = wf.subgraph_as_workflow(definition_id)
+            if class_type in NOTE_TYPES:
+                if bad := sorted(set(widgets) - {"text"}):
+                    raise ValueError(
+                        f"{class_type} has a single widget 'text'; got {bad}"
+                    )
+            elif class_type not in object_info:
+                raise ValueError(
+                    f"unknown node class {class_type!r} - not installed on this "
+                    "instance; definition unchanged"
+                )
+            else:
+                slots = all_slot_names(class_type, object_info)
+                if bad := sorted(set(widgets) - set(slots)):
+                    raise ValueError(
+                        f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
+                        "definition unchanged"
+                    )
+                if not op.get("force"):
+                    for name, value in widgets.items():
+                        problem = check_widget_value(
+                            class_type, name, value, object_info
+                        )
+                        if problem:
+                            raise ValueError(
+                                f"{class_type}: {problem}; definition unchanged"
+                            )
+            new_node = inner.add_node(
+                class_type,
+                object_info=object_info,
+                title=op.get("title"),
+            )
+            for name, value in widgets.items():
+                inner.set_widget(new_node.id, name, value, object_info)
+            wf.update_subgraph(definition_id, inner)
+            touched.add(new_node.id)
+            applied.append(
+                f"added {class_type} as #{new_node.id} in definition {definition_id}"
+            )
+        elif kind == "connect_in_definition":
+            definition_id = op["definition_id"]
+            from_node = int(op["from_node"])
+            from_output = op["from_output"]
+            to_node = int(op["to_node"])
+            to_input = op["to_input"]
+            if from_node in (-10, -20) or to_node in (-10, -20):
+                raise ValueError(
+                    "cannot connect to boundary pseudo-nodes (-10/-20) directly"
+                )
+            if isinstance(from_output, str) and from_output.isdigit():
+                from_output = int(from_output)
+            inner = wf.subgraph_as_workflow(definition_id)
+            replaced = ""
+            target = inner.nodes.get(to_node)
+            if target is not None:
+                slot = target.input_by_name(to_input)
+                if slot is not None and slot.link is not None:
+                    old = inner.links.get(slot.link)
+                    if old is not None:
+                        replaced = (
+                            f" (replaced existing link from "
+                            f"#{old.origin_id}[{old.origin_slot}])"
+                        )
+            inner.connect(
+                from_node, from_output, to_node, to_input, object_info,
+            )
+            wf.update_subgraph(definition_id, inner)
+            applied.append(
+                f"connected #{from_node}.{from_output} -> "
+                f"#{to_node}.{to_input} in definition {definition_id}{replaced}"
+            )
+
+        elif kind == "remove_node_from_definition":
+            def_id = op["definition_id"]
+            inner_nid = int(op["node_id"])
+            inner_wf = wf.subgraph_as_workflow(def_id)
+            inner_wf.remove_node(inner_nid)
+            wf.update_subgraph(def_id, inner_wf)
+            warnings = []
+            for node in wf.nodes.values():
+                if node.type != def_id:
+                    continue
+                proxy = (node.properties or {}).get("proxyWidgets") or {}
+                found = False
+                if isinstance(proxy, dict):
+                    found = str(inner_nid) in proxy or inner_nid in proxy
+                elif isinstance(proxy, list):
+                    found = any(
+                        isinstance(p, (list, tuple)) and len(p) >= 1
+                        and str(p[0]) == str(inner_nid)
+                        for p in proxy
+                    )
+                if found:
+                    warnings.append(
+                        f"removed inner node #{inner_nid} but instance "
+                        f"#{node.id} has proxyWidgets for it; those widget "
+                        f"overrides will be dropped during flatten"
+                    )
+            result_msg = f"remove_node_from_definition: removed #{inner_nid} from definition {def_id}"
+            if warnings:
+                result_msg += f"; warnings: {'; '.join(warnings)}"
+            applied.append(result_msg)
+        elif kind == "set_title_in_definition":
+            def_id = op["definition_id"]
+            inner_nid = int(op["node_id"])
+            inner_wf = wf.subgraph_as_workflow(def_id)
+            inner_wf.nodes[inner_nid].title = op["title"]
+            wf.update_subgraph(def_id, inner_wf)
+            applied.append(f"set_title_in_definition: titled #{inner_nid} in definition {def_id}")
+        elif kind == "set_mode_in_definition":
+            def_id = op["definition_id"]
+            inner_nid = int(op["node_id"])
+            inner_wf = wf.subgraph_as_workflow(def_id)
+            inner_wf.nodes[inner_nid].mode = int(op["mode"])
+            wf.update_subgraph(def_id, inner_wf)
+            applied.append(
+                f"set_mode_in_definition: mode #{inner_nid} = {op['mode']} in definition {def_id}"
+            )
+        elif kind == "set_widget_in_definition":
+            def_id = op["definition_id"]
+            inner_nid = int(op["node_id"])
+            input_name = op["input"]
+            value = op["value"]
+            if any(input_name.endswith(s) for s in SYNTHETIC_SUFFIXES):
+                raise ValueError(
+                    f"cannot set synthetic control slot '{input_name}' on "
+                    "definition-internal node"
+                )
+            inner_wf = wf.subgraph_as_workflow(def_id)
+            inner_node = inner_wf.nodes[inner_nid]
+            if not op.get("force") and inner_node.type not in NOTE_TYPES:
+                problem = check_widget_value(
+                    inner_node.type, input_name, value, object_info,
+                    inner_node.widgets_values,
+                    {slot.name for slot in inner_node.inputs},
+                )
+                if problem:
+                    raise ValueError(
+                        f"{inner_node.type} #{inner_nid} in definition "
+                        f"{def_id}: {problem}"
+                    )
+            inner_wf.set_widget(inner_nid, input_name, value, object_info)
+            wf.update_subgraph(def_id, inner_wf)
+            touched.add(inner_nid)
+            applied.append(
+                f"set_widget_in_definition: set #{inner_nid}.{input_name} = {_clip(value)!r} in definition {def_id}"
+            )
+
+
 @mcp.tool(annotations=_EDIT_LOCAL)
 async def edit_workflow(
     workflow_id: str, operations: list[dict[str, Any]], summary: bool = False
@@ -1393,325 +1734,7 @@ async def edit_workflow(
     applied: list[str] = []
     touched: set[int] = set()
     try:
-        for index, op in enumerate(operations):
-            kind = _check_op(index, op)
-            if kind == "replace_in_widget":
-                op, kind = _replace_as_set_widget(wf, op, object_info), "set_widget"
-            if kind == "add_node":
-                class_type = op["class_type"]
-                widgets = op.get("widgets") or {}
-                # validate class + widget names BEFORE touching the graph so a
-                # failed add leaves no half-built stub node behind
-                if class_type in NOTE_TYPES:
-                    if bad := sorted(set(widgets) - {"text"}):
-                        raise ValueError(
-                            f"{class_type} has a single widget 'text'; got {bad}"
-                        )
-                elif class_type in VIRTUAL_TYPES:
-                    # PrimitiveNode/Reroute are frontend-only nodes, absent from
-                    # object_info - the "installed?" check below would reject them
-                    # even though ComfyUI has them. A primitive has no widgets until
-                    # it adopts a socket's type on its first connection.
-                    if widgets:
-                        raise ValueError(
-                            f"{class_type} takes no widgets at add time: connect it to "
-                            "a widget input first (it then mirrors that socket's type), "
-                            "then set_widget 'value' and, for a number/combo, "
-                            "'control_after_generate'; graph unchanged"
-                        )
-                elif class_type not in object_info:
-                    raise ValueError(
-                        f"unknown node class {class_type!r} - not installed on this "
-                        "instance (search_nodes finds classes, resolve_missing_nodes "
-                        "finds packs); graph unchanged"
-                    )
-                else:
-                    # accept any widget that exists under some dynamic-combo
-                    # selection; set_widget enforces option ordering at apply time
-                    slots = all_slot_names(class_type, object_info)
-                    if bad := sorted(set(widgets) - set(slots)):
-                        raise ValueError(
-                            f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
-                            "graph unchanged"
-                        )
-                    if not op.get("force"):
-                        for name, value in widgets.items():
-                            problem = check_widget_value(
-                                class_type, name, value, object_info
-                            )
-                            if problem:
-                                raise ValueError(
-                                    f"{class_type}: {problem}; graph unchanged"
-                                )
-                node = wf.add_node(class_type, object_info=object_info, title=op.get("title"))
-                for name, value in widgets.items():
-                    wf.set_widget(node.id, name, value, object_info)
-                touched.add(node.id)
-                applied.append(f"added {node.type} as #{node.id}")
-            elif kind == "remove_node":
-                wf.remove_node(int(op["node_id"]))
-                applied.append(f"removed #{op['node_id']}")
-            elif kind == "connect":
-                from_output = op["from_output"]
-                if isinstance(from_output, str) and from_output.isdigit():
-                    from_output = int(from_output)
-                # a link already feeding the target input gets replaced - say so
-                replaced = ""
-                target = wf.nodes.get(int(op["to_node"]))
-                pre_slot = None
-                if target is not None:
-                    pre_slot = target.input_by_name(op["to_input"])
-                    if pre_slot is not None and pre_slot.link is not None:
-                        old = wf.links.get(pre_slot.link)
-                        if old is not None:
-                            replaced = f" (replaced existing link from #{old.origin_id}[{old.origin_slot}])"
-                wf.connect(
-                    int(op["from_node"]),
-                    from_output,
-                    int(op["to_node"]),
-                    op["to_input"],
-                    object_info,
-                    force=bool(op.get("force")),
-                )
-                touched.update((int(op["from_node"]), int(op["to_node"])))
-                # a slot that didn't exist before and isn't a declared widget
-                # was force-created as an undeclared (frontend-only) socket -
-                # flag it so the caller knows to verify with a test run
-                undeclared_note = ""
-                if target is not None and pre_slot is None and op.get("force"):
-                    try:
-                        is_declared_widget = op["to_input"] in all_slot_names(
-                            target.type, object_info
-                        )
-                    except ValueError:
-                        is_declared_widget = False
-                    if not is_declared_widget:
-                        undeclared_note = (
-                            f" - created undeclared input '{op['to_input']}' on "
-                            f"{target.type} (frontend-created slot, verify with a test run)"
-                        )
-                applied.append(
-                    f"connected #{op['from_node']}.{op['from_output']} -> "
-                    f"#{op['to_node']}.{op['to_input']}{replaced}{undeclared_note}"
-                )
-            elif kind == "set_widget":
-                node_id = int(op["node_id"])
-                node = wf.nodes[node_id]
-                if not op.get("force"):
-                    if node.type == PRIMITIVE_TYPE and op["input"] != "control_after_generate":
-                        # a primitive's value must satisfy the widget it mirrors -
-                        # nothing else validates it, since its consumer's slot is
-                        # connected and so skips its own widget check
-                        problem = check_primitive_value(
-                            wf, node, op["value"], object_info
-                        )
-                    elif node.type in VIRTUAL_TYPES:
-                        problem = None  # notes/reroutes/primitive control slots
-                    else:
-                        problem = check_widget_value(
-                            node.type, op["input"], op["value"], object_info,
-                            node.widgets_values,
-                            {slot.name for slot in node.inputs},
-                        )
-                    if problem:
-                        raise ValueError(f"{node.type} #{node_id}: {problem}")
-                wf.set_widget(node_id, op["input"], op["value"], object_info)
-                touched.add(node_id)
-                applied.append(f"set #{op['node_id']}.{op['input']} = {_clip(op['value'])!r}")
-            elif kind == "set_title":
-                wf.nodes[int(op["node_id"])].title = op["title"]
-                touched.add(int(op["node_id"]))
-                applied.append(f"titled #{op['node_id']}")
-            elif kind == "set_mode":
-                wf.nodes[int(op["node_id"])].mode = int(op["mode"])
-                touched.add(int(op["node_id"]))
-                applied.append(f"mode #{op['node_id']} = {op['mode']}")
-            elif kind == "set_pos":
-                node_id = int(op["node_id"])
-                node = wf.nodes[node_id]
-                pos = op["pos"]
-                if not (isinstance(pos, list | tuple) and len(pos) == 2):
-                    raise ValueError(f"set_pos: 'pos' must be [x, y]; got {pos!r}")
-                node.pos = [float(pos[0]), float(pos[1])]
-                if "size" in op:
-                    size = op["size"]
-                    if not (isinstance(size, list | tuple) and len(size) == 2):
-                        raise ValueError(f"set_pos: 'size' must be [w, h]; got {size!r}")
-                    node.size = [float(size[0]), float(size[1])]
-                touched.add(node_id)
-                applied.append(
-                    f"moved #{node_id} to {node.pos}"
-                    + (f", size {node.size}" if "size" in op else "")
-                )
-            elif kind == "add_group":
-                node_ids = [int(nid) for nid in op["node_ids"]]
-                group = wf.group_from_nodes(op["title"], node_ids, color=op.get("color", "#3f789e"))
-                applied.append(f"added group #{group.id} {group.title!r} ({len(node_ids)} nodes)")
-            elif kind == "set_group":
-                group = _find_group(wf, int(op["group_id"]))
-                if "title" in op:
-                    group.title = op["title"]
-                if "color" in op:
-                    group.color = op["color"]
-                if "node_ids" in op:
-                    node_ids = [int(nid) for nid in op["node_ids"]]
-                    group.bounding = wf.group_bounding_for(node_ids)
-                applied.append(f"updated group #{group.id} {group.title!r}")
-            elif kind == "remove_group":
-                group = _find_group(wf, int(op["group_id"]))
-                wf.groups = [g for g in wf.groups if g.id != group.id]
-                applied.append(f"removed group #{group.id}")
-            elif kind == "add_node_to_definition":
-                definition_id = op["definition_id"]
-                class_type = op["class_type"]
-                widgets = op.get("widgets") or {}
-                inner = wf.subgraph_as_workflow(definition_id)
-                if class_type in NOTE_TYPES:
-                    if bad := sorted(set(widgets) - {"text"}):
-                        raise ValueError(
-                            f"{class_type} has a single widget 'text'; got {bad}"
-                        )
-                elif class_type not in object_info:
-                    raise ValueError(
-                        f"unknown node class {class_type!r} - not installed on this "
-                        "instance; definition unchanged"
-                    )
-                else:
-                    slots = all_slot_names(class_type, object_info)
-                    if bad := sorted(set(widgets) - set(slots)):
-                        raise ValueError(
-                            f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
-                            "definition unchanged"
-                        )
-                    if not op.get("force"):
-                        for name, value in widgets.items():
-                            problem = check_widget_value(
-                                class_type, name, value, object_info
-                            )
-                            if problem:
-                                raise ValueError(
-                                    f"{class_type}: {problem}; definition unchanged"
-                                )
-                new_node = inner.add_node(
-                    class_type,
-                    object_info=object_info,
-                    title=op.get("title"),
-                )
-                for name, value in widgets.items():
-                    inner.set_widget(new_node.id, name, value, object_info)
-                wf.update_subgraph(definition_id, inner)
-                touched.add(new_node.id)
-                applied.append(
-                    f"added {class_type} as #{new_node.id} in definition {definition_id}"
-                )
-            elif kind == "connect_in_definition":
-                definition_id = op["definition_id"]
-                from_node = int(op["from_node"])
-                from_output = op["from_output"]
-                to_node = int(op["to_node"])
-                to_input = op["to_input"]
-                if from_node in (-10, -20) or to_node in (-10, -20):
-                    raise ValueError(
-                        "cannot connect to boundary pseudo-nodes (-10/-20) directly"
-                    )
-                if isinstance(from_output, str) and from_output.isdigit():
-                    from_output = int(from_output)
-                inner = wf.subgraph_as_workflow(definition_id)
-                replaced = ""
-                target = inner.nodes.get(to_node)
-                if target is not None:
-                    slot = target.input_by_name(to_input)
-                    if slot is not None and slot.link is not None:
-                        old = inner.links.get(slot.link)
-                        if old is not None:
-                            replaced = (
-                                f" (replaced existing link from "
-                                f"#{old.origin_id}[{old.origin_slot}])"
-                            )
-                inner.connect(
-                    from_node, from_output, to_node, to_input, object_info,
-                )
-                wf.update_subgraph(definition_id, inner)
-                applied.append(
-                    f"connected #{from_node}.{from_output} -> "
-                    f"#{to_node}.{to_input} in definition {definition_id}{replaced}"
-                )
-
-            elif kind == "remove_node_from_definition":
-                def_id = op["definition_id"]
-                inner_nid = int(op["node_id"])
-                inner_wf = wf.subgraph_as_workflow(def_id)
-                inner_wf.remove_node(inner_nid)
-                wf.update_subgraph(def_id, inner_wf)
-                warnings = []
-                for node in wf.nodes.values():
-                    if node.type != def_id:
-                        continue
-                    proxy = (node.properties or {}).get("proxyWidgets") or {}
-                    found = False
-                    if isinstance(proxy, dict):
-                        found = str(inner_nid) in proxy or inner_nid in proxy
-                    elif isinstance(proxy, list):
-                        found = any(
-                            isinstance(p, (list, tuple)) and len(p) >= 1
-                            and str(p[0]) == str(inner_nid)
-                            for p in proxy
-                        )
-                    if found:
-                        warnings.append(
-                            f"removed inner node #{inner_nid} but instance "
-                            f"#{node.id} has proxyWidgets for it; those widget "
-                            f"overrides will be dropped during flatten"
-                        )
-                result_msg = f"remove_node_from_definition: removed #{inner_nid} from definition {def_id}"
-                if warnings:
-                    result_msg += f"; warnings: {'; '.join(warnings)}"
-                applied.append(result_msg)
-            elif kind == "set_title_in_definition":
-                def_id = op["definition_id"]
-                inner_nid = int(op["node_id"])
-                inner_wf = wf.subgraph_as_workflow(def_id)
-                inner_wf.nodes[inner_nid].title = op["title"]
-                wf.update_subgraph(def_id, inner_wf)
-                applied.append(f"set_title_in_definition: titled #{inner_nid} in definition {def_id}")
-            elif kind == "set_mode_in_definition":
-                def_id = op["definition_id"]
-                inner_nid = int(op["node_id"])
-                inner_wf = wf.subgraph_as_workflow(def_id)
-                inner_wf.nodes[inner_nid].mode = int(op["mode"])
-                wf.update_subgraph(def_id, inner_wf)
-                applied.append(
-                    f"set_mode_in_definition: mode #{inner_nid} = {op['mode']} in definition {def_id}"
-                )
-            elif kind == "set_widget_in_definition":
-                def_id = op["definition_id"]
-                inner_nid = int(op["node_id"])
-                input_name = op["input"]
-                value = op["value"]
-                if any(input_name.endswith(s) for s in SYNTHETIC_SUFFIXES):
-                    raise ValueError(
-                        f"cannot set synthetic control slot '{input_name}' on "
-                        "definition-internal node"
-                    )
-                inner_wf = wf.subgraph_as_workflow(def_id)
-                inner_node = inner_wf.nodes[inner_nid]
-                if not op.get("force") and inner_node.type not in NOTE_TYPES:
-                    problem = check_widget_value(
-                        inner_node.type, input_name, value, object_info,
-                        inner_node.widgets_values,
-                        {slot.name for slot in inner_node.inputs},
-                    )
-                    if problem:
-                        raise ValueError(
-                            f"{inner_node.type} #{inner_nid} in definition "
-                            f"{def_id}: {problem}"
-                        )
-                inner_wf.set_widget(inner_nid, input_name, value, object_info)
-                wf.update_subgraph(def_id, inner_wf)
-                touched.add(inner_nid)
-                applied.append(
-                    f"set_widget_in_definition: set #{inner_nid}.{input_name} = {_clip(value)!r} in definition {def_id}"
-                )
+        _apply_ops(wf, operations, object_info, applied, touched)
     except KeyError as e:
         return {
             "applied": applied,
@@ -1876,6 +1899,188 @@ queuing, so the user can choose front-of-queue vs waiting."""
 _QUEUE_BUSY_THRESHOLD = 2
 
 
+_SWEEP_MAX_RUNS = 24
+_SWEEP_MAX_CROPS = 4
+_SWEEP_THUMB = 384
+_SWEEP_BUDGET_S = 3600.0  # ponytail: one fixed wall-clock cap for a whole sweep
+
+
+def _sweep_spec(sweep: Any) -> tuple[list[dict[str, Any]], list[int | None], list[list[int]]] | str:
+    """Validated (variants, seeds, crops), or an error string."""
+    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops"}:
+        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]]}"
+    variants = sweep.get("variants") or [{"label": "base", "ops": []}]
+    if not isinstance(variants, list) or not all(
+        isinstance(v, dict) and isinstance(v.get("ops") or [], list) for v in variants
+    ):
+        return "variants must be a list of {label, ops:[edit_workflow ops]}"
+    seeds = sweep.get("seeds") or [None]
+    if not isinstance(seeds, list) or not all(
+        s is None or (isinstance(s, int) and not isinstance(s, bool)) for s in seeds
+    ):
+        return "seeds must be a list of integers"
+    crops = sweep.get("crops") or []
+    if not isinstance(crops, list) or len(crops) > _SWEEP_MAX_CROPS:
+        return f"crops must be a list of at most {_SWEEP_MAX_CROPS} [x0,y0,x1,y1] boxes"
+    for box in crops:
+        if not (isinstance(box, list) and len(box) == 4 and all(isinstance(n, int) for n in box)):
+            return f"crop {box!r} is not [x0,y0,x1,y1] integers"
+        if not (0 < box[2] - box[0] <= CROP_MAX and 0 < box[3] - box[1] <= CROP_MAX):
+            return f"crop {box!r}: each side must be 1-{CROP_MAX}px (crops are shown 1:1, never scaled)"
+    if len(variants) * len(seeds) > _SWEEP_MAX_RUNS:
+        return f"{len(variants)} variants x {len(seeds)} seeds exceeds {_SWEEP_MAX_RUNS} runs - split it"
+    return variants, seeds, crops
+
+
+async def _run_sweep(
+    wf: Workflow,
+    workflow_id: str,
+    sweep: Any,
+    timeout_seconds: float,
+    save_dir: str,
+    front: bool | None,
+    confirm_spend: bool,
+    ctx: Context | None,
+) -> Any:
+    """run_workflow(sweep=...): each variant (edit ops applied to a COPY - the session
+    workflow is never touched) x each seed, run one after another, then one labelled
+    contact sheet, an unscaled crop sheet, and a per-run timing table."""
+    spec = _sweep_spec(sweep)
+    if isinstance(spec, str):
+        return {"status": "invalid", "error": spec}
+    variants, seeds, crops = spec
+    object_info = await _object_info(refresh=True)
+    base_ui = wf.to_ui()
+    prepared: list[tuple[str, dict[str, Any] | None, str | None]] = []
+    for i, variant in enumerate(variants):
+        label = str(variant.get("label") or f"v{i + 1}")
+        trial = Workflow.from_ui(json.loads(json.dumps(base_ui)))
+        try:
+            _apply_ops(trial, variant.get("ops") or [], object_info, [], set())
+            errors = [f for f in validate(trial, object_info) if f["level"] == "error"]
+            if errors:
+                raise ValueError(f"{len(errors)} validation error(s), first: {errors[0]['message']}")
+            prepared.append((label, trial.to_api(object_info), None))
+        except (ValueError, KeyError) as e:
+            prepared.append((label, None, str(e)[:300]))
+    n_runs = len(seeds) * sum(1 for _, api, _ in prepared if api is not None)
+    if n_runs == 0:
+        return {
+            "status": "invalid",
+            "runs": [{"label": lab, "status": "invalid", "error": why} for lab, _, why in prepared],
+        }
+    billable = next((b for _, api, _ in prepared if api and (b := api_nodes(api, object_info))), [])
+    if billable:
+        if not _config().comfy_api_key:
+            return {
+                "status": "missing_api_key",
+                **_spend_payload(billable),
+                "hint": "partner/API nodes need COMFY_API_KEY in the server environment; nothing was queued",
+            }
+        if not confirm_spend:
+            refusal = await _confirm(
+                ctx,
+                f"This sweep queues {n_runs} runs of {len(billable)} partner/API node(s), each "
+                "charged to your Comfy Org account. Run it?",
+                _SPEND_HINT,
+                "spend",
+            )
+            if refusal is not None:
+                return {**refusal, **_spend_payload(billable), "sweep_runs": n_runs}
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if save_dir:
+        root, problem = _resolve_dest(save_dir)
+        if problem or root is None:
+            return {"status": "invalid", "error": problem}
+    else:
+        root = _config().session_dir / "sweeps"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {"status": "invalid", "error": f"cannot create {root}: {e}"}
+    extra_data = {"api_key_comfy_org": _config().comfy_api_key} if _config().comfy_api_key else None
+    runs: list[dict[str, Any]] = []
+    grid: list[list[tuple[PILImage.Image | None, str]]] = []
+    crop_grid: list[list[tuple[PILImage.Image | None, str]]] = []
+    halt: str | None = None
+    started = time.monotonic()
+    for label, api, problem in prepared:
+        if api is None:
+            runs.append({"label": label, "status": "invalid", "error": problem})
+            grid.append([(None, f"{label}: invalid")])
+            continue
+        row: list[tuple[PILImage.Image | None, str]] = []
+        for seed in seeds:
+            tag = label if seed is None else f"{label} s{seed}"
+            entry: dict[str, Any] = {"label": label, "seed": seed}
+            runs.append(entry)
+            if halt:
+                entry.update(status="skipped", reason=halt)
+                row.append((None, f"{tag}: skipped"))
+                continue
+            run_api = copy.deepcopy(api)
+            if seed is not None:
+                for node in run_api.values():
+                    for key in ("seed", "noise_seed"):
+                        v = node["inputs"].get(key)
+                        if isinstance(v, int) and not isinstance(v, bool):
+                            node["inputs"][key] = seed
+            try:
+                res = await _client().run_and_wait(
+                    run_api, timeout=timeout_seconds, extra_data=extra_data, front=bool(front)
+                )
+            except ComfyValidationError as e:
+                entry.update(status="rejected", error=str(e)[:200])
+                row.append((None, f"{tag}: rejected"))
+                continue
+            if res.get("prompt_id"):
+                _record_submission(res["prompt_id"], workflow_id)
+            entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
+            if res["status"] == "timeout":
+                halt = "an earlier run timed out (it may still be running on ComfyUI)"
+            elif time.monotonic() - started > _SWEEP_BUDGET_S:
+                halt = "the sweep's time budget ran out"
+            image = None
+            items = [o for o in res.get("outputs") or [] if o.get("kind") == "images"]
+            if res["status"] == "success" and items:
+                try:
+                    image = PILImage.open(io.BytesIO(await _client().fetch_output(items[0])))
+                    image.load()
+                except Exception:
+                    image = None
+            secs = f" - {entry['elapsed_s']}s" if entry.get("elapsed_s") is not None else ""
+            row.append((image, f"{tag}{secs}" if image else f"{tag}: {res['status']}"))
+            if crops:
+                tiles = crop_tiles(image, crops) if image else [None] * len(crops)
+                crop_grid.append([(t, f"{tag} c{j + 1}") for j, t in enumerate(tiles)])
+        grid.append(row)
+    out: dict[str, Any] = {
+        "status": "success" if all(r.get("status") == "success" for r in runs) else "partial",
+        "runs": runs,
+    }
+    content: list[Any] = [out]
+    if any(img is not None for r in grid for img, _ in r):
+        sheet = contact_sheet(grid, _SWEEP_THUMB)
+        path = root / f"contact-{stamp}.png"
+        path.write_bytes(to_png(sheet))
+        out["contact_sheet"] = str(path)
+        data, fmt, _, _ = downscale_image(to_png(sheet), INLINE_MAX)
+        content.append(Image(data=data, format=fmt))
+    if crop_grid and any(t is not None for r in crop_grid for t, _ in r):
+        csheet = contact_sheet(crop_grid, None)
+        cpath = root / f"crops-{stamp}.png"
+        cpath.write_bytes(to_png(csheet))
+        out["crop_sheet"] = str(cpath)
+        if max(csheet.size) <= INLINE_MAX:
+            content.append(Image(data=to_png(csheet), format="png"))
+        else:
+            out["crop_hint"] = (
+                f"crop sheet is {csheet.width}x{csheet.height}px - too large to show inline at 1:1; "
+                "open the file, or use fewer variants/seeds/crops"
+            )
+    return content if len(content) > 1 else out
+
+
 @mcp.tool(annotations=_WRITE_INSTANCE)
 async def run_workflow(
     workflow_id: str,
@@ -1887,6 +2092,7 @@ async def run_workflow(
     roll_seeds: bool = True,
     front: bool | None = None,
     confirm_spend: bool = False,
+    sweep: dict[str, Any] | None = None,
     ctx: Context | None = None,
 ) -> Any:
     """Queue the workflow and (by default) wait for completion. Returns status,
@@ -1899,10 +2105,9 @@ async def run_workflow(
     Text-only caller? Pass return_preview=False - result
     carries a file path instead of a thumbnail if save_dir/COMFYUI_MOUNT_DIR is set.
 
-    roll_seeds=True (default) mirrors the browser: every seed/PrimitiveNode set to
-    randomize/increment/decrement is re-rolled and persisted before submit - the
-    raw /prompt API never does, so headless runs repeat forever. False re-runs
-    the stored values.
+    roll_seeds=True (default) mirrors the browser: seeds/PrimitiveNodes set to
+    randomize/increment/decrement re-roll and persist before submit (the raw API
+    never does). False re-runs the stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
     final judge). save_dir (or COMFYUI_MOUNT_DIR) relocates finished outputs into a
@@ -1916,10 +2121,14 @@ async def run_workflow(
     confirm_spend: partner/API nodes charge per submit, so a
     graph containing one is gated - pass True only after they agree.
 
+    sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]]}: run each
+    variant (edit ops on a copy) x seed; returns a labelled contact sheet, 1:1 crop
+    sheet, per-run elapsed_s. <=24 runs, wait=True; crops <=512px.
+
     LONG RENDERS: a timeout cancels the caller's wait, not the ComfyUI job.
-    Submit wait=False, front=False, then poll get_run_status(prompt_id) until
-    success/error/partial and call save_output. prompt_id survives in
-    manage_queue(status).draftsman_submitted if your session dies mid-poll."""
+    Submit wait=False, front=False, poll get_run_status(prompt_id) until
+    success/error/partial, then save_output. prompt_id survives in
+    manage_queue(status).draftsman_submitted if your session dies."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
@@ -1937,6 +2146,10 @@ async def run_workflow(
                         "stay queued, untouched) or front=False to wait in line"
                     ),
                 }
+    if sweep is not None:
+        if not wait:
+            return {"status": "invalid", "error": "sweep needs wait=True"}
+        return await _run_sweep(wf, workflow_id, sweep, timeout_seconds, save_dir, front, confirm_spend, ctx)
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)

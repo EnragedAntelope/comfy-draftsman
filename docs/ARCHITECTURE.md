@@ -732,6 +732,13 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 - **Lint `no-prompt-preview` only looks at CONDITIONING producers.** A node with a
   `prompt` widget is not an encoder (LLM nodes have one).
 
+- **A sweep never mutates the session workflow.** `server._run_sweep` rebuilds a
+  fresh `Workflow` from `to_ui()` per variant and applies the ops with `_apply_ops`
+  (the loop `edit_workflow` uses), so a variant's edits cannot leak into the graph the
+  user is looking at. Seeds are applied to the API graph (every INT input literally
+  named `seed`/`noise_seed`), not the workflow, for the same reason. Crop tiles are
+  capped at 512 px per side and never rescaled: the point of a crop is the 1:1 pixels.
+
 ## Remaining TODOs
 
 Open:

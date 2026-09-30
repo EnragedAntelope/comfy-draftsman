@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.18.0 — sweep mode
+
+### Added
+
+- **`run_workflow(sweep={variants, seeds, crops})`** replaces the external A/B scripts.
+  Each variant is `{label, ops}` (the same ops as `edit_workflow`, applied to a *copy*;
+  the session workflow is never touched) and each is run for every seed, one after
+  another. The result is a per-run table (`label`, `seed`, `status`, `elapsed_s`,
+  `prompt_id`), a labelled **contact sheet** (rows = variants, columns = seeds), and,
+  when `crops=[[x0,y0,x1,y1], ...]` is given, a **crop sheet** cut from the full-res
+  output at 1:1 (never scaled) — whole-frame thumbnails are what let shiny turbo faces
+  through. Both sheets are also written to `save_dir` (or `<session dir>/sweeps/`); the
+  crop sheet is returned inline only when it fits 1568 px, otherwise a `crop_hint`.
+  Limits: at most 24 runs, 4 crops of at most 512 px per side, `wait=True`, one fixed
+  one-hour wall-clock budget (later runs report `skipped`), and a timeout stops the
+  sweep rather than queuing behind a job that is still running. A variant whose ops or
+  validation fail is reported `invalid` and not queued. The partner-node spend gate
+  runs once, states the run count, and `confirm_spend` covers the whole sweep.
+
+### Changed
+
+- `edit_workflow`'s op loop is now `_apply_ops`, shared with the sweep (behavior
+  unchanged).
+
 ## 0.17.0 — Round 27: Qwen Image 2.1, frontend-exact bypass, honest organize
 
 From a live Qwen Image 2.1 build (~150 A/B renders through draftsman).

@@ -495,3 +495,141 @@ async def test_confirm_never_elicits_without_the_capability_or_when_off(server_s
     off = _Ctx("accept")
     assert (await c(off, "m", "hint", "x"))["status"] == "x_confirmation_required"
     assert off.calls == 0
+
+
+# --- 4 sweep mode ------------------------------------------------------------------
+
+SWEEP_OI = {
+    "Gen": {
+        "input": {
+            "required": {
+                "seed": ["INT", {"default": 0, "min": 0, "max": 2**32}],
+                "steps": ["INT", {"default": 10, "min": 1, "max": 100}],
+            }
+        },
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
+        "output_node": True,
+    }
+}
+
+
+def _png(color):
+    import io
+
+    from PIL import Image
+
+    img = Image.new("RGB", (1024, 768))
+    px = img.load()
+    for x in range(1024):
+        for y in range(768):
+            px[x, y] = ((x + color) % 256, y % 256, color % 256)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class SweepClient:
+    def __init__(self):
+        self.apis = []
+
+    async def get_object_info(self, refresh=False):
+        return SWEEP_OI
+
+    async def run_and_wait(self, api, timeout=600.0, extra_data=None, front=False):
+        self.apis.append(api)
+        n = len(self.apis)
+        return {
+            "status": "success", "prompt_id": f"p{n}", "elapsed_s": 1.5,
+            "outputs": [{"filename": f"{n}.png", "subfolder": "", "type": "output", "kind": "images"}],
+        }
+
+    async def fetch_output(self, item):
+        return _png(int(item["filename"].split(".")[0]) * 40)
+
+
+@pytest.fixture()
+def sweep_env(server_state, tmp_path):
+    client = SweepClient()
+    server_state._State.client = client
+    wf = Workflow.new()
+    node = wf.add_node("Gen", object_info=SWEEP_OI)
+    wf_id = server_state._session().create(wf, title="t")
+    yield server_state, client, wf, node, wf_id, tmp_path / "out"
+    server_state._State.client = None
+
+
+def _variants():
+    return [
+        {"label": "base", "ops": []},
+        {"label": "fast", "ops": [{"op": "set_widget", "node_id": 1, "input": "steps", "value": 4}]},
+    ]
+
+
+async def test_sweep_runs_variants_x_seeds_and_builds_sheets(sweep_env):
+    import io
+
+    from PIL import Image
+
+    server, client, wf, node, wf_id, out = sweep_env
+    result = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out),
+        sweep={"variants": _variants(), "seeds": [7, 8], "crops": [[10, 20, 110, 120]]},
+    )
+    body, _thumb, *rest = result
+    assert [(r["label"], r["seed"], r["status"], r["elapsed_s"]) for r in body["runs"]] == [
+        ("base", 7, "success", 1.5), ("base", 8, "success", 1.5),
+        ("fast", 7, "success", 1.5), ("fast", 8, "success", 1.5),
+    ]
+    assert [a["1"]["inputs"]["seed"] for a in client.apis] == [7, 8, 7, 8]
+    assert [a["1"]["inputs"]["steps"] for a in client.apis] == [10, 10, 4, 4]
+    assert 10 in wf.nodes[node.id].widgets_values and 4 not in wf.nodes[node.id].widgets_values  # session wf untouched
+    assert Path(body["contact_sheet"]).is_file() and Path(body["crop_sheet"]).is_file()
+    # the first crop tile is the source region, pixel for pixel (1:1, never scaled)
+    source = Image.open(io.BytesIO(_png(40))).convert("RGB")
+    sheet = Image.open(body["crop_sheet"]).convert("RGB")
+    assert sheet.crop((0, 0, 100, 100)).tobytes() == source.crop((10, 20, 110, 120)).tobytes()
+    assert len(rest) == 1  # the 100px-wide crop sheet is small enough to inline
+
+
+async def test_sweep_refuses_more_than_24_runs_and_bad_specs(sweep_env):
+    server, client, _wf, _node, wf_id, _ = sweep_env
+    big = await server.run_workflow(wf_id, front=True, sweep={"variants": _variants(), "seeds": list(range(13))})
+    assert big["status"] == "invalid" and "24" in big["error"]
+    wide = await server.run_workflow(wf_id, front=True, sweep={"crops": [[0, 0, 600, 100]]})
+    assert wide["status"] == "invalid" and "512" in wide["error"]
+    bg = await server.run_workflow(wf_id, front=True, wait=False, sweep={})
+    assert bg["status"] == "invalid" and "wait=True" in bg["error"]
+    assert client.apis == []
+
+
+async def test_sweep_skips_an_invalid_variant_and_still_runs_the_rest(sweep_env):
+    server, client, _wf, _node, wf_id, out = sweep_env
+    variants = [
+        {"label": "broken", "ops": [{"op": "set_widget", "node_id": 99, "input": "steps", "value": 4}]},
+        {"label": "ok", "ops": []},
+    ]
+    result = await server.run_workflow(wf_id, front=True, save_dir=str(out), sweep={"variants": variants})
+    body = result[0] if isinstance(result, list) else result
+    assert [(r["label"], r["status"]) for r in body["runs"]] == [("broken", "invalid"), ("ok", "success")]
+    assert len(client.apis) == 1
+
+
+async def test_oversized_crop_sheet_is_a_file_not_an_inline_image(sweep_env):
+    server, _client, _wf, _node, wf_id, out = sweep_env
+    box = [0, 0, 512, 512]
+    result = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out), sweep={"crops": [box, box, box, box]}
+    )
+    body, *images = result
+    assert len(images) == 1  # contact sheet only
+    assert "crop_hint" in body and Path(body["crop_sheet"]).is_file()
+
+
+def test_crop_tiles_outside_the_image_are_none_not_bad_tiles():
+    from PIL import Image
+
+    from comfy_draftsman.imaging import crop_tiles
+
+    tiles = crop_tiles(Image.new("RGB", (100, 100)), [[10, 10, 50, 50], [200, 200, 300, 300]])
+    assert tiles[0].size == (40, 40) and tiles[1] is None
