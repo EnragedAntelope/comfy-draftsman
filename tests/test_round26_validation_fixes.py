@@ -106,6 +106,9 @@ async def test_import_workflow_reads_local_file(monkeypatch, tmp_path):
     created = {}
 
     class _Sess:
+        def persist(self, wid):
+            pass
+
         def create(self, wf, title=None):
             created["wf"] = wf
             return "new-id"

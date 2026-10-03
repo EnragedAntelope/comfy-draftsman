@@ -68,22 +68,29 @@ def contact_sheet(
     rows: list[list[tuple[PILImage.Image | None, str]]], thumb: int | None
 ) -> PILImage.Image:
     """Grid of labelled cells, one row per list. ``thumb`` fits every image into a
-    square of that size; ``None`` keeps them at 1:1 (cells grow to the largest)."""
+    square of that size; ``None`` keeps them at 1:1. Cells are sized to the largest
+    image AFTER fitting, so portrait/landscape renders don't sit in square cells."""
     from PIL import ImageDraw
 
-    images = [img for row in rows for img, _ in row if img is not None]
-    cell_w = thumb or max((i.width for i in images), default=96)
-    cell_h = (thumb or max((i.height for i in images), default=96)) + LABEL_H
-    ncols = max(len(r) for r in rows)
-    sheet = PILImage.new("RGB", (ncols * cell_w, len(rows) * cell_h), (24, 24, 24))
+    tiles: list[list[tuple[PILImage.Image | None, str]]] = []
+    for row in rows:
+        out_row = []
+        for img, label in row:
+            tile = img.convert("RGB") if img is not None else None  # always a copy
+            if tile is not None and thumb:
+                tile.thumbnail((thumb, thumb), PILImage.Resampling.LANCZOS)
+            out_row.append((tile, label))
+        tiles.append(out_row)
+    images = [t for row in tiles for t, _ in row if t is not None]
+    cell_w = max((i.width for i in images), default=96)
+    cell_h = max((i.height for i in images), default=96) + LABEL_H
+    ncols = max(len(r) for r in tiles)
+    sheet = PILImage.new("RGB", (ncols * cell_w, len(tiles) * cell_h), (24, 24, 24))
     draw = ImageDraw.Draw(sheet)
-    for r, row in enumerate(rows):
-        for c, (img, label) in enumerate(row):
+    for r, row in enumerate(tiles):
+        for c, (tile, label) in enumerate(row):
             x, y = c * cell_w, r * cell_h
-            if img is not None:
-                tile = img.convert("RGB")
-                if thumb:
-                    tile.thumbnail((thumb, thumb), PILImage.Resampling.LANCZOS)
+            if tile is not None:
                 sheet.paste(tile, (x, y))
             draw.text((x + 3, y + cell_h - LABEL_H + 3), label[: cell_w // 6], fill=(230, 230, 230))
     return sheet

@@ -633,3 +633,66 @@ def test_crop_tiles_outside_the_image_are_none_not_bad_tiles():
 
     tiles = crop_tiles(Image.new("RGB", (100, 100)), [[10, 10, 50, 50], [200, 200, 300, 300]])
     assert tiles[0].size == (40, 40) and tiles[1] is None
+
+
+# --- 0.19 feedback: sweep grid / reference / files / return_preview ---------------------
+
+
+async def test_sweep_return_preview_false_inlines_nothing(sweep_env):
+    server, _client, _wf, _node, wf_id, out = sweep_env
+    result = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out), return_preview=False,
+        sweep={"variants": _variants(), "crops": [[0, 0, 64, 64]]},
+    )
+    assert isinstance(result, dict)  # no Image items alongside it
+    assert Path(result["contact_sheet"]).is_file() and Path(result["crop_sheet"]).is_file()
+
+
+async def test_sweep_runs_list_their_output_files(sweep_env):
+    server, _client, _wf, _node, wf_id, out = sweep_env
+    body, *_ = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out), sweep={"variants": _variants()}
+    )
+    assert [r["files"] for r in body["runs"]] == [["1.png [output]"], ["2.png [output]"]]
+
+
+async def test_single_seed_sweep_wraps_into_a_grid_and_takes_a_reference(sweep_env):
+    from PIL import Image
+
+    server, client, _wf, _node, wf_id, out = sweep_env
+    fetched = []
+    original = client.fetch_output
+
+    async def spy(item):
+        fetched.append(item)
+        return await original({**item, "filename": "3.png"}) if item["filename"] == "me.png" else await original(item)
+
+    client.fetch_output = spy
+    variants = [{"label": f"v{i}", "ops": []} for i in range(3)]
+    body, *_ = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out),
+        sweep={"variants": variants, "reference": "faces/me.png [input]"},
+    )
+    assert {"filename": "me.png", "subfolder": "faces", "type": "input"} in fetched
+    sheet = Image.open(body["contact_sheet"])
+    # ref + 3 variants = 4 cells -> 2x2, not one tall column; 1024x768 renders -> landscape cells
+    assert sheet.width > sheet.height * 0.5 and sheet.height < 4 * 400
+    assert "reference_error" not in body
+
+
+async def test_a_bad_reference_is_reported_and_the_sweep_still_runs(sweep_env):
+    server, _client, _wf, _node, wf_id, out = sweep_env
+    body, *_ = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out), sweep={"reference": "../../etc/passwd [input]"}
+    )
+    assert "reference_error" in body and body["runs"][0]["status"] == "success"
+
+
+def test_contact_sheet_cells_follow_the_image_shape_not_a_square():
+    from PIL import Image
+
+    from comfy_draftsman.imaging import LABEL_H, contact_sheet
+
+    portrait = Image.new("RGB", (200, 400))
+    sheet = contact_sheet([[(portrait, "a"), (portrait, "b")]], 100)
+    assert sheet.size == (2 * 50, 100 + LABEL_H)  # fitted to 50x100, not 100x100
