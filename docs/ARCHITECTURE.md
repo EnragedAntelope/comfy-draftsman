@@ -738,6 +738,13 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   user is looking at. Seeds are applied to the API graph (every INT input literally
   named `seed`/`noise_seed`), not the workflow, for the same reason. Crop tiles are
   capped at 512 px per side and never rescaled: the point of a crop is the 1:1 pixels.
+- **The session store writes through.** `server._persist` runs after every mutating
+  tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
+  because the MCP server is a per-conversation process and an in-memory-only workflow
+  is gone when a conversation resumes. Do not add a mutating tool without it.
+- **The schema-title strip must not touch parameter names.** `_trim_published_surface`
+  skips the keys of a `properties` dict; popping every `"title"` key once deleted a real
+  parameter called `title` while `required` still listed it.
 
 ## Remaining TODOs
 

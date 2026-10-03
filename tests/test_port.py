@@ -113,3 +113,17 @@ def test_port_applies_technique_settings_to_detailer(object_info):
     assert wf.get_widget(detailer.id, "cfg", oi) == 1.0  # flux face_detailer technique
     assert wf.get_widget(detailer.id, "denoise", oi) == 0.40
     assert any("facedetailer" in c.lower() or "face_detailer" in c.lower() for c in report["changes"])
+
+
+def test_port_prefers_a_learned_sampler_but_falls_back_to_one_the_instance_has(object_info, tmp_path):
+    from comfy_draftsman.knowledge import save_learning
+
+    save_learning(tmp_path, "flux", {"sampling": {"sampler": "heun"}}, source="t")
+    wf, ids = _build_sdxl_txt2img(object_info)
+    port_workflow(wf, "flux", object_info, tmp_path)
+    assert wf.get_widget(ids["sampler"], "sampler_name", object_info) == "heun"  # learned leads
+
+    save_learning(tmp_path, "flux", {"sampling": {"sampler": "not_installed_sampler"}}, source="t")
+    wf, ids = _build_sdxl_txt2img(object_info)
+    port_workflow(wf, "flux", object_info, tmp_path)
+    assert wf.get_widget(ids["sampler"], "sampler_name", object_info) == "euler"  # floor fallback

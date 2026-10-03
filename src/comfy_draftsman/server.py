@@ -15,6 +15,7 @@ import difflib
 import inspect
 import io
 import json
+import math
 import re
 import time
 from collections.abc import AsyncIterator
@@ -321,6 +322,14 @@ async def _object_info(refresh: bool = False) -> dict[str, Any]:
 
 def _wf(workflow_id: str) -> Workflow:
     return _session().get(workflow_id)
+
+
+def _persist(workflow_id: str) -> None:
+    """Write the workflow through to the session dir so a restarted server (a
+    resumed conversation) still finds it. Best-effort: a read-only session dir
+    must never fail the edit that triggered it."""
+    with contextlib.suppress(OSError):
+        _session().persist(workflow_id)
 
 
 def _find_group(wf: Workflow, group_id: int):
@@ -900,6 +909,7 @@ async def create_workflow(title: str, template: str = "") -> dict[str, Any]:
     else:
         wf = Workflow.new()
     workflow_id = _session().create(wf, title=title)
+    _persist(workflow_id)
     return _summary(workflow_id, wf)
 
 
@@ -1241,6 +1251,7 @@ async def import_workflow(
             "{node_id: {class_type, inputs}}. export_workflow_json shows both shapes",
         }
     workflow_id = _session().create(wf, title=title or "imported")
+    _persist(workflow_id)
     return _summary(workflow_id, wf)
 
 
@@ -1273,7 +1284,7 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
 # raw KeyError, and misspelled keys (widgets_values, node, ...) are rejected
 # instead of silently ignored.
 _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
-    "add_node": ({"class_type"}, {"title", "widgets", "force"}),
+    "add_node": ({"class_type"}, {"title", "widgets", "force", "ref"}),
     "remove_node": ({"node_id"}, set()),
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
     "set_widget": ({"node_id", "input", "value"}, {"force"}),
@@ -1361,6 +1372,28 @@ def _check_op(index: int, op: dict[str, Any]) -> str:
     return kind
 
 
+_REF_KEYS = ("node_id", "from_node", "to_node")
+
+
+def _resolve_refs(op: dict[str, Any], refs: dict[str, int]) -> dict[str, Any]:
+    """Swap an add_node ``ref`` used as a node id for the id it was given."""
+
+    def one(value: Any) -> Any:
+        if isinstance(value, str) and not value.isdigit():
+            if value not in refs:
+                raise ValueError(f"unknown ref {value!r}; refs so far: {sorted(refs)}")
+            return refs[value]
+        return value
+
+    out = dict(op)
+    for key in _REF_KEYS:
+        if key in out:
+            out[key] = one(out[key])
+    if isinstance(out.get("node_ids"), list):
+        out["node_ids"] = [one(v) for v in out["node_ids"]]
+    return out
+
+
 def _apply_ops(
     wf: Workflow,
     operations: list[dict[str, Any]],
@@ -1370,13 +1403,18 @@ def _apply_ops(
 ) -> None:
     """Apply edit ops in order, appending to ``applied``/``touched`` as it goes so a
     failing op still reports what landed before it. Raises ValueError/KeyError."""
+    refs: dict[str, int] = {}
     for index, op in enumerate(operations):
         kind = _check_op(index, op)
+        ref = op.get("ref")
+        op = _resolve_refs(op, refs)
         if kind == "replace_in_widget":
             op, kind = _replace_as_set_widget(wf, op, object_info), "set_widget"
         if kind == "add_node":
             class_type = op["class_type"]
             widgets = op.get("widgets") or {}
+            if ref is not None and (not isinstance(ref, str) or ref.isdigit() or ref in refs):
+                raise ValueError(f"ref {ref!r} must be a non-numeric string not used earlier in this batch")
             # validate class + widget names BEFORE touching the graph so a
             # failed add leaves no half-built stub node behind
             if class_type in NOTE_TYPES:
@@ -1424,7 +1462,9 @@ def _apply_ops(
             for name, value in widgets.items():
                 wf.set_widget(node.id, name, value, object_info)
             touched.add(node.id)
-            applied.append(f"added {node.type} as #{node.id}")
+            if ref is not None:
+                refs[ref] = node.id
+            applied.append(f"added {node.type} as #{node.id}" + (f" (ref {ref})" if ref is not None else ""))
         elif kind == "remove_node":
             wf.remove_node(int(op["node_id"]))
             applied.append(f"removed #{op['node_id']}")
@@ -1450,7 +1490,6 @@ def _apply_ops(
                 object_info,
                 force=bool(op.get("force")),
             )
-            touched.update((int(op["from_node"]), int(op["to_node"])))
             # a slot that didn't exist before and isn't a declared widget
             # was force-created as an undeclared (frontend-only) socket -
             # flag it so the caller knows to verify with a test run
@@ -1697,7 +1736,7 @@ async def edit_workflow(
 ) -> dict[str, Any]:
     """Apply batched edits. Each op is a dict with 'op' plus:
 
-    - {"op": "add_node", "class_type": str, "title"?: str, "widgets"?: {name: value}}
+    - {"op": "add_node", "class_type": str, "title"?: str, "ref"?: str, "widgets"?: {name: value}}  # later ops may use a ref as a node id
     - {"op": "remove_node", "node_id": int}
     - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}
     - {"op": "set_widget", "node_id": int, "input": str, "value": any}
@@ -1712,9 +1751,8 @@ async def edit_workflow(
 
     Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
     add_group {title, node_ids, color?}; set_group {group_id, title?, node_ids?,
-    color?}; remove_group {group_id}. Bounds come from member extents; group_id is
-    the '#N' inspect_workflow shows. organize_workflow re-lays out and re-groups
-    everything, so run these after it.
+    color?}; remove_group {group_id} ('#N' in inspect_workflow). organize_workflow
+    re-lays out and re-groups, so run these after it.
 
     Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
     take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
@@ -1747,6 +1785,8 @@ async def edit_workflow(
             "error": str(e),
             "hint": "get_node_info gives slot/widget names; the op schemas are in this tool's description",
         }
+    finally:
+        _persist(workflow_id)  # ops that landed before a failure are real too
     if summary:
         return {"applied": applied, "summary": _summary(workflow_id, wf)}
     # compact delta: re-sending the whole graph after every edit batch was the
@@ -1783,6 +1823,7 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     learned_dir = _config().learned_dir
     report = annotate(wf, object_info, learned_dir=learned_dir)
     report["lint"] = _cap_lint(lint(wf, object_info, learned_dir=learned_dir))
+    _persist(workflow_id)
     return report
 
 
@@ -1872,6 +1913,7 @@ async def port_workflow(workflow_id: str, target_family: str) -> dict[str, Any]:
     wf = _wf(workflow_id)
     report = port_engine(wf, target_family, await _object_info(refresh=True), _config().learned_dir)
     report["validate"] = _cap_findings(validate(wf, await _object_info()))
+    _persist(workflow_id)
     return report
 
 
@@ -1901,14 +1943,18 @@ _QUEUE_BUSY_THRESHOLD = 2
 
 _SWEEP_MAX_RUNS = 24
 _SWEEP_MAX_CROPS = 4
-_SWEEP_THUMB = 384
 _SWEEP_BUDGET_S = 3600.0  # ponytail: one fixed wall-clock cap for a whole sweep
 
 
-def _sweep_spec(sweep: Any) -> tuple[list[dict[str, Any]], list[int | None], list[list[int]]] | str:
-    """Validated (variants, seeds, crops), or an error string."""
-    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops"}:
-        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]]}"
+def _sweep_spec(
+    sweep: Any,
+) -> tuple[list[dict[str, Any]], list[Any], list[list[int]], str] | str:
+    """Validated (variants, seeds, crops, reference), or an error string."""
+    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops", "reference"}:
+        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]], reference?: 'file [input]'}"
+    reference = sweep.get("reference") or ""
+    if not isinstance(reference, str):
+        return "reference must be a string like 'photo.png [input]'"
     variants = sweep.get("variants") or [{"label": "base", "ops": []}]
     if not isinstance(variants, list) or not all(
         isinstance(v, dict) and isinstance(v.get("ops") or [], list) for v in variants
@@ -1929,7 +1975,26 @@ def _sweep_spec(sweep: Any) -> tuple[list[dict[str, Any]], list[int | None], lis
             return f"crop {box!r}: each side must be 1-{CROP_MAX}px (crops are shown 1:1, never scaled)"
     if len(variants) * len(seeds) > _SWEEP_MAX_RUNS:
         return f"{len(variants)} variants x {len(seeds)} seeds exceeds {_SWEEP_MAX_RUNS} runs - split it"
-    return variants, seeds, crops
+    return variants, seeds, crops, reference
+
+
+def _output_ref(item: dict[str, Any]) -> str:
+    """'sub/file.png [output]' - the annotated form LoadImage takes as-is."""
+    sub = f"{item['subfolder']}/" if item.get("subfolder") else ""
+    return f"{sub}{item['filename']} [{item.get('type') or 'output'}]"
+
+
+def _parse_output_ref(ref: str) -> dict[str, str] | None:
+    """Inverse of _output_ref (type defaults to input); None if the path escapes."""
+    name, _, kind = ref.rpartition(" [")
+    if name and kind[:-1] in ("input", "output", "temp") and kind.endswith("]"):
+        ref_type = kind[:-1]
+    else:
+        name, ref_type = ref, "input"
+    subfolder, _, filename = name.replace(chr(92), "/").rpartition("/")
+    if not filename or _check_output_ref(filename, subfolder):
+        return None
+    return {"filename": filename, "subfolder": subfolder, "type": ref_type}
 
 
 async def _run_sweep(
@@ -1941,6 +2006,7 @@ async def _run_sweep(
     front: bool | None,
     confirm_spend: bool,
     ctx: Context | None,
+    return_preview: bool = True,
 ) -> Any:
     """run_workflow(sweep=...): each variant (edit ops applied to a COPY - the session
     workflow is never touched) x each seed, run one after another, then one labelled
@@ -1948,7 +2014,7 @@ async def _run_sweep(
     spec = _sweep_spec(sweep)
     if isinstance(spec, str):
         return {"status": "invalid", "error": spec}
-    variants, seeds, crops = spec
+    variants, seeds, crops, reference = spec
     object_info = await _object_info(refresh=True)
     base_ui = wf.to_ui()
     prepared: list[tuple[str, dict[str, Any] | None, str | None]] = []
@@ -2036,6 +2102,8 @@ async def _run_sweep(
             if res.get("prompt_id"):
                 _record_submission(res["prompt_id"], workflow_id)
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
+            if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
+                entry["files"] = files
             if res["status"] == "timeout":
                 halt = "an earlier run timed out (it may still be running on ComfyUI)"
             elif time.monotonic() - started > _SWEEP_BUDGET_S:
@@ -2060,18 +2128,40 @@ async def _run_sweep(
     }
     content: list[Any] = [out]
     if any(img is not None for r in grid for img, _ in r):
-        sheet = contact_sheet(grid, _SWEEP_THUMB)
+        ref_cell: tuple[PILImage.Image | None, str] | None = None
+        if reference:
+            item = _parse_output_ref(reference)
+            try:
+                if item is None:
+                    raise ValueError("invalid path")
+                ref_img = PILImage.open(io.BytesIO(await _client().fetch_output(item)))
+                ref_img.load()
+                ref_cell = (ref_img, "ref")
+            except Exception as e:
+                out["reference_error"] = f"{reference!r}: {str(e)[:120]}"
+        if all(len(r) == 1 for r in grid):
+            # one seed: a single column wastes the sheet, so wrap into a square-ish grid
+            cells = ([ref_cell] if ref_cell else []) + [r[0] for r in grid]
+            ncols = math.ceil(math.sqrt(len(cells)))
+            grid = [cells[i : i + ncols] for i in range(0, len(cells), ncols)]
+        elif ref_cell:
+            grid = [[ref_cell, *r] for r in grid]
+        ncols = max(len(r) for r in grid)
+        sheet = contact_sheet(grid, max(256, min(512, INLINE_MAX // ncols)))
         path = root / f"contact-{stamp}.png"
         path.write_bytes(to_png(sheet))
         out["contact_sheet"] = str(path)
-        data, fmt, _, _ = downscale_image(to_png(sheet), INLINE_MAX)
-        content.append(Image(data=data, format=fmt))
+        if return_preview:
+            data, fmt, _, _ = downscale_image(to_png(sheet), INLINE_MAX)
+            content.append(Image(data=data, format=fmt))
     if crop_grid and any(t is not None for r in crop_grid for t, _ in r):
         csheet = contact_sheet(crop_grid, None)
         cpath = root / f"crops-{stamp}.png"
         cpath.write_bytes(to_png(csheet))
         out["crop_sheet"] = str(cpath)
-        if max(csheet.size) <= INLINE_MAX:
+        if not return_preview:
+            pass
+        elif max(csheet.size) <= INLINE_MAX:
             content.append(Image(data=to_png(csheet), format="png"))
         else:
             out["crop_hint"] = (
@@ -2102,12 +2192,12 @@ async def run_workflow(
     wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
     workflow works before saving/delivering.
 
-    Text-only caller? Pass return_preview=False - result
-    carries a file path instead of a thumbnail if save_dir/COMFYUI_MOUNT_DIR is set.
+    return_preview=False (text-only caller): no inline images, sweeps included; a
+    file path comes back if save_dir/COMFYUI_MOUNT_DIR is set.
 
-    roll_seeds=True (default) mirrors the browser: seeds/PrimitiveNodes set to
-    randomize/increment/decrement re-roll and persist before submit (the raw API
-    never does). False re-runs the stored values.
+    roll_seeds=True (default) mirrors the browser: randomize/increment/decrement
+    seeds and PrimitiveNodes re-roll and persist before submit. False re-runs
+    the stored values.
 
     allow_invalid=True submits despite local validation errors (ComfyUI is the
     final judge). save_dir (or COMFYUI_MOUNT_DIR) relocates finished outputs into a
@@ -2121,14 +2211,14 @@ async def run_workflow(
     confirm_spend: partner/API nodes charge per submit, so a
     graph containing one is gated - pass True only after they agree.
 
-    sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]]}: run each
-    variant (edit ops on a copy) x seed; returns a labelled contact sheet, 1:1 crop
-    sheet, per-run elapsed_s. <=24 runs, wait=True; crops <=512px.
+    sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]],reference?:
+    "file [input]"}: each variant (ops on a copy) x seed; returns a contact sheet
+    (reference = first cell), 1:1 crop sheet, per-run elapsed_s/files. <=24 runs,
+    wait=True; crops <=512px.
 
-    LONG RENDERS: a timeout cancels the caller's wait, not the ComfyUI job.
-    Submit wait=False, front=False, poll get_run_status(prompt_id) until
-    success/error/partial, then save_output. prompt_id survives in
-    manage_queue(status).draftsman_submitted if your session dies."""
+    LONG RENDERS: a timeout cancels your wait, not the job. wait=False, front=False,
+    poll get_run_status(prompt_id) to success/error/partial, then save_output;
+    manage_queue(status).draftsman_submitted keeps prompt_ids."""
     wf = _wf(workflow_id)
     if front is None:
         # best-effort etiquette check; an unreachable /queue never blocks a run
@@ -2149,7 +2239,9 @@ async def run_workflow(
     if sweep is not None:
         if not wait:
             return {"status": "invalid", "error": "sweep needs wait=True"}
-        return await _run_sweep(wf, workflow_id, sweep, timeout_seconds, save_dir, front, confirm_spend, ctx)
+        return await _run_sweep(
+            wf, workflow_id, sweep, timeout_seconds, save_dir, front, confirm_spend, ctx, return_preview
+        )
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
     object_info = await _object_info(refresh=True)
@@ -2222,8 +2314,7 @@ async def run_workflow(
         # persist so inspect_workflow reflects what ran and increment/decrement
         # advance across calls; best-effort (a read-only session dir shouldn't
         # block the run)
-        with contextlib.suppress(OSError):
-            _session().persist(workflow_id)
+        _persist(workflow_id)
         api = wf.to_api(object_info)  # re-serialize with the rolled values
     extra_data: dict[str, Any] | None = None
     if _config().comfy_api_key:
@@ -2977,6 +3068,15 @@ async def get_model_guidance(family: str = "", model_filename: str = "") -> dict
     # ride along on EVERY guidance call while being useful only when the verdict
     # is bad. fit_verdict folds what matters into `fit`; the rest is dropped.
     guidance.pop("hardware", None)
+    # research provenance is a changelog, not guidance: newest entry only (the
+    # full history stays in the learned YAML)
+    history = guidance.get("learned_sources")
+    if isinstance(history, list) and history and isinstance(history[-1], dict):
+        guidance["learned_sources"] = [
+            {**history[-1], "source": str(history[-1].get("source", ""))[:200]}
+        ]
+        if len(history) > 1:
+            guidance["learned_sources_total"] = len(history)
     return _cap_sources({**detected, **guidance, **({"fit": fit} if fit else {})})
 
 
@@ -3146,11 +3246,14 @@ def _trim_published_surface() -> int:
     rather than raising at import time.
     """
 
-    def walk(node: Any) -> None:
+    def walk(node: Any, names: bool = False) -> None:
+        # names=True: the keys are PARAMETER names (a "properties" dict), so a
+        # param literally called "title" must survive - only annotations go.
         if isinstance(node, dict):
-            node.pop("title", None)
-            for value in node.values():
-                walk(value)
+            if not names:
+                node.pop("title", None)
+            for key, value in node.items():
+                walk(value, names=key == "properties" and isinstance(value, dict))
         elif isinstance(node, list):
             for value in node:
                 walk(value)

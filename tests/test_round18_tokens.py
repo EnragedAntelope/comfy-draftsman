@@ -320,9 +320,12 @@ async def test_no_schema_carries_a_redundant_title():
     this test notices."""
     tools, _ = await _surface()
 
-    def titles(node):
+    def titles(node, names=False):
         if isinstance(node, dict):
-            return ("title" in node) or any(titles(v) for v in node.values())
+            # a key under "properties" is a parameter NAME, not an annotation
+            return (not names and "title" in node) or any(
+                titles(v, k == "properties" and isinstance(v, dict)) for k, v in node.items()
+            )
         if isinstance(node, list):
             return any(titles(v) for v in node)
         return False
@@ -330,6 +333,19 @@ async def test_no_schema_carries_a_redundant_title():
     offenders = [t.name for t in tools if titles(t.inputSchema)]
     assert not offenders, f"schema titles came back for: {offenders}"
     assert server._trim_published_surface() == len(tools)
+
+
+@pytest.mark.asyncio
+async def test_a_param_named_title_survives_the_title_strip():
+    """The strip once deleted every key called "title" - including the parameter
+    itself - so create_workflow published required:["title"] with no such property."""
+    tools = {t.name: t.inputSchema for t in await server.mcp.list_tools()}
+    assert "title" in tools["create_workflow"]["properties"]
+    assert tools["create_workflow"]["required"] == ["title"]
+    assert "title" in tools["import_workflow"]["properties"]
+    for name, schema in tools.items():
+        missing = [r for r in schema.get("required", []) if r not in schema.get("properties", {})]
+        assert not missing, f"{name} requires {missing} but publishes no such property"
 
 
 @pytest.mark.asyncio

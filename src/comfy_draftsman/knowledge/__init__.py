@@ -115,6 +115,8 @@ def get_guidance(
     if learned:
         deep_merge(data, learned.get("data", {}))
         data["learned_sources"] = learned.get("sources", [])
+        # before the variant overlay: a variant's own sampler list must still win
+        _fold_singular_choices(data.get("sampling"))
     variants = data.pop("variants", {}) or {}
     data["variant"] = None
     if model_filename:
@@ -124,7 +126,21 @@ def get_guidance(
                 deep_merge(data, overlay)
                 data["variant"] = variant_name
                 break
+    _fold_singular_choices(data.get("sampling"))
     return data
+
+
+def _fold_singular_choices(sampling: Any) -> None:
+    """A learned overlay says ``sampler: x`` while the floor says ``samplers: [y]``;
+    shipping both contradicts itself (and port only reads the lists). Fold the
+    singular winner to the front of the plural list so there is one field."""
+    if not isinstance(sampling, dict):
+        return
+    for one, many in (("sampler", "samplers"), ("scheduler", "schedulers")):
+        if one in sampling:
+            value = sampling.pop(one)
+            rest = [v for v in sampling.get(many) or [] if v != value]
+            sampling[many] = [value, *rest]
 
 
 def save_learning(

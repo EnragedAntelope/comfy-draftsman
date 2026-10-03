@@ -47,10 +47,12 @@ def _set_if_valid(
     value: Any,
     object_info: dict[str, Any],
     changes: list[str],
-) -> None:
+) -> bool:
+    """Set ``name`` unless the slot or value is unusable. False only when the value
+    is not among the combo's choices (so a caller may try the next candidate)."""
     node = wf.nodes[node_id]
     if name not in _slots(wf, node_id, object_info):
-        return
+        return True
     schema = object_info[node.type]
     spec = None
     for section in ("required", "optional"):
@@ -58,12 +60,12 @@ def _set_if_valid(
     if spec is not None:
         choices = _combo_choices(spec)
         if choices is not None and value not in choices:
-            return
+            return False
     old = wf.get_widget(node_id, name, object_info)
-    if old == value:
-        return
-    wf.set_widget(node_id, name, value, object_info)
-    changes.append(f"{node.type} #{node_id}: {name} {old!r} -> {value!r}")
+    if old != value:
+        wf.set_widget(node_id, name, value, object_info)
+        changes.append(f"{node.type} #{node_id}: {name} {old!r} -> {value!r}")
+    return True
 
 
 def _matching_files(choices: list[Any], patterns: list[str]) -> list[str]:
@@ -89,9 +91,13 @@ def _retune_samplers(wf, guidance, object_info, changes) -> None:
             source = sampling.get(knowledge_key)
             if source is None:
                 continue
-            value = source["default"] if isinstance(source, dict) else source[0]
+            # a list is ordered best-first (a learned pick leads the floor's), so
+            # take the first one this instance actually offers
+            candidates = [source["default"]] if isinstance(source, dict) else source
             for widget_name in widget_names:
-                _set_if_valid(wf, node.id, widget_name, value, object_info, changes)
+                for value in candidates:
+                    if _set_if_valid(wf, node.id, widget_name, value, object_info, changes):
+                        break
 
 
 def _swap_latent_nodes(wf, guidance, object_info, changes) -> None:

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.19.0 - live-use feedback fixes
+
+From an identity A/B session that logged three bugs and five token/usability problems.
+
+### Fixed
+
+- **`create_workflow` published `required: ["title"]` with no `title` property.** The
+  schema-title stripper deleted every key named `title`, including a parameter of that
+  name (`import_workflow` lost its `title` too). It now only drops schema annotations;
+  a test asserts no tool requires a property it does not publish.
+- **`run_workflow(sweep, return_preview=False)` still inlined the sheets.** It now
+  returns the paths only.
+- **Workflows were lost when the server restarted** (a resumed conversation reported
+  "no workflow with id"). They were written to disk only on a seed roll or save. Create,
+  import, edit (including the ops that landed before a failure), organize and port now
+  write through, best-effort (a read-only session dir never fails the edit).
+- **A learned sampler/scheduler contradicted the floor's** in `get_model_guidance`
+  (`sampler: er_sde` next to `samplers: [euler]`). The learned pick is now folded to
+  the front of the plural list, so there is one field. `port_workflow` reads that list,
+  so it now honors the learned pick, falling back to the first one the instance offers.
+
+### Changed
+
+- Sweep contact sheet: cells fit each image's real shape (no square padding), a
+  single-seed sweep wraps into a square-ish grid instead of one tall column, and the
+  thumbnail size is chosen to fit the inline cap. New `sweep.reference` (`"file
+  [input]"`, the form LoadImage accepts) becomes the first cell; a bad one is
+  reported as `reference_error` and the sweep still runs.
+- Each sweep run lists its `files` (`"sub/name.png [output]"`, usable as a LoadImage
+  value), so no `get_run_status` per run.
+- `edit_workflow`: a `connect` no longer echoes both endpoints in `changed` (the
+  `applied` line already names the link). `add_node` takes an optional `ref` that later
+  ops in the same batch can use as a node id (also in sweep variants).
+- `get_model_guidance` reports only the newest `learned_sources` entry (source clipped
+  to 200 chars) plus `learned_sources_total`; the full history stays in the learned YAML.
+- Tool docstrings trimmed to pay for the above; the surface ceiling is unchanged.
+
+### Not changed
+
+- Old session files are not pruned. Add it if the session dir becomes a problem.
+- `remove_node` on a missing id still reports success (pre-existing, found while testing).
+
 ## 0.18.0 — sweep mode
 
 ### Added
