@@ -29,9 +29,6 @@ from .model import (
 # belongs to a core node (baked enums like sampler_name/scheduler). Third-party
 # nodes commonly repopulate their combos client-side (wildcard/LoRA/style
 # pickers), so a saved value absent from their snapshot isn't necessarily wrong.
-_FILE_COMBO_RE = re.compile(
-    r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|sft|vae|pkl|yaml|yml)$", re.IGNORECASE
-)
 
 # How many disabled node ids to name in the single collapsed `node-disabled`
 # note; the rest are counted. The full list is always in its `node_ids` field.
@@ -54,19 +51,8 @@ def _annotated_upload(spec: Any, value: Any) -> bool:
     )
 
 
-def _looks_like_file_combo(choices: list[Any]) -> bool:
-    return any(
-        isinstance(c, str) and (_FILE_COMBO_RE.search(c) or "/" in c or "\\" in c)
-        for c in choices
-    )
-
-
-def _is_custom_node(class_type: str, object_info: dict[str, Any]) -> bool:
-    """True if this class comes from a third-party pack (python_module under
-    ``custom_nodes``) rather than core/bundled ComfyUI. Missing -> treated as
-    core (strict), so an unknown never silently relaxes validation."""
-    module = str((object_info.get(class_type) or {}).get("python_module") or "")
-    return module.startswith("custom_nodes")
+_looks_like_file_combo = w.looks_like_file_combo
+_is_custom_node = w.is_custom_node
 
 
 def _authoritative_combo(
@@ -548,6 +534,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
 
         socket_names = {slot.name for slot in node.inputs}
         slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
+        unmapped = False
         if isinstance(node.widgets_values, list) and len(node.widgets_values) != len(slots):
             # dynamic nodes (text concatenators, switches...) declare dozens of
             # optional widgets in their schema but the frontend serializes only
@@ -562,8 +549,40 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             # stash the text/data they show into widgets_values beyond their declared
             # schema widgets - an overflow there is the norm, not schema drift.
             display_overflow = len(node.widgets_values) > len(slots) and schema.get("output_node")
-            if display_overflow:
+            surplus = len(node.widgets_values) > len(slots)
+            if surplus and not w.positional_mapping_plausible(
+                node.type, node.widgets_values, object_info, socket_names
+            ):
+                # every name would read the wrong value, so per-slot checks
+                # below would only add false errors - one finding instead
+                findings.append(
+                    _finding(
+                        "error",
+                        "widget-layout-unmapped",
+                        f"{node.type} #{node.id}: saved widget values don't line up "
+                        "with its schema (the pack's JS adds or reorders widgets), so "
+                        "draftsman can't read or set them by name. The saved file works "
+                        "in ComfyUI; a headless run can't. Edit with set_widget "
+                        "index=N (inspect_workflow shows positions)",
+                        node.id,
+                        headless=True,
+                    )
+                )
+                unmapped = True
+            elif display_overflow:
                 pass  # expected for display nodes - stay silent (pure noise otherwise)
+            elif surplus:
+                findings.append(
+                    _finding(
+                        "info",
+                        "widget-count-drift",
+                        f"{node.type} #{node.id}: {len(node.widgets_values) - len(slots)} "
+                        "saved value(s) past the schema's widgets (pack frontend state, "
+                        "or a removed parameter) - ignored",
+                        node.id,
+                        expected=slots,
+                    )
+                )
             elif dynamic_short:
                 findings.append(
                     _finding(
@@ -593,8 +612,10 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
         # of a dynamic combo's chosen option - so their values get validated too
         specs = w.widget_specs(node.type, object_info, node.widgets_values, socket_names)
         named = w.widgets_to_named(node.type, node.widgets_values, object_info, socket_names)
+        if unmapped:
+            named = {}
         for name, value in named.items():
-            if value is None:
+            if value is None and not name.endswith(w.SYNTHETIC_SUFFIXES):
                 # the frontend runs string replacement over every widget value
                 # when queueing, so a null crashes it even if the slot is
                 # connected or optional
@@ -723,6 +744,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         "the pack's plain-STRING variant / a core equivalent",
                         node.id,
                         input=name,
+                        headless=True,
                     )
                 )
             elif slot is None or slot.link is None:

@@ -143,22 +143,51 @@ def _fold_singular_choices(sampling: Any) -> None:
             sampling[many] = [value, *rest]
 
 
+def replaced_leaves(
+    old: Any, updates: dict[str, Any], prefix: str = ""
+) -> list[tuple[str, Any]]:
+    """(dotted key, old value) for every leaf ``updates`` would overwrite with a
+    DIFFERENT value - what deep_merge silently discards."""
+    if not isinstance(old, dict):
+        return []
+    found: list[tuple[str, Any]] = []
+    for key, new in updates.items():
+        if key not in old:
+            continue
+        dotted = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(new, dict) and isinstance(old[key], dict):
+            found.extend(replaced_leaves(old[key], new, dotted))
+        elif old[key] != new:
+            found.append((dotted, old[key]))
+    return found
+
+
 def save_learning(
     learned_dir: Path | str,
     family: str,
     updates: dict[str, Any],
     source: str,
 ) -> Path:
-    """Merge researched findings into the persistent learned overlay for a family."""
+    """Merge researched findings into the persistent learned overlay for a family.
+
+    A leaf the update overwrites is kept under the file's top-level
+    ``superseded:`` list (never served by get_guidance, which reads ``data``),
+    so a new note can't silently erase an older lesson."""
     path = _learned_path(learned_dir, family)
     path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict[str, Any] = {}
     if path.is_file():
         existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     existing.setdefault("family", family)
+    today = date.today().isoformat()
+    replaced = replaced_leaves(existing.get("data", {}), updates)
+    if replaced:
+        existing.setdefault("superseded", []).extend(
+            {"date": today, "key": key, "value": value} for key, value in replaced
+        )
     existing["data"] = deep_merge(existing.get("data", {}), updates)
     sources = existing.setdefault("sources", [])
-    sources.append({"date": date.today().isoformat(), "source": source})
+    sources.append({"date": today, "source": source})
     path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return path
 

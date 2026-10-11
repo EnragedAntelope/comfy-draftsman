@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.20.0 - widget mapping, organize and learning fixes
+
+From a live Krea2 build session that logged ten problems. Each was reproduced on the
+real deliverable and surveyed across the user's saved workflows; seven were bugs.
+
+### Fixed
+
+- **Packs whose JS adds or reorders widgets were read wrong, silently.** Widget values
+  map to names by schema position, so a header widget's null hole (Identity Forge) or a
+  reordered widget (older LoRA Manager toggles, easy promptLine, ...) shifted every
+  name onto the wrong value: `validate` reported nulls and bad combos that were not
+  there, and `to_api` emitted them. When a node saved more values than its schema has
+  slots AND a real slot then holds an impossible value (a null on a custom node, a
+  value outside a non-file combo, a wrong primitive type), `validate` now reports ONE
+  `widget-layout-unmapped` error for the node and skips its per-widget checks.
+- **A by-name `set_widget` dropped a pack's saved state.** The rebuild kept only the
+  schema's slots, so values past them (pack frontend state, button placeholders) were
+  lost. They are now carried over, and a by-name set on an unmapped node is refused
+  with the index form to use instead.
+- **rgthree Seed and kin raised a false `null-widget-value`** on the synthetic
+  control slot that their buttons' nulls landed in. Synthetic slots are skipped.
+- **`organize_workflow` staged pack nodes wrong.** Prompt builders filed under a
+  `conditioning/` category but outputting only STRING (Identity Forge) now go to
+  Prompt Building; a node outputting CONDITIONING goes to Conditioning; a node the
+  schema says nothing about (LoRA pool/randomizer/combiner configs, SAM and detector
+  loaders, resolution pickers) takes the stage of the nodes it feeds instead of
+  defaulting to Sampling.
+- **Organize overlapped tall pack nodes.** Layout replaced each node's saved size with
+  an estimate (a LoRA Manager loader: 124 px estimated, 760 px rendered). The estimate
+  is now a minimum, as in the editor.
+- **Green "knob" highlights.** No longer painted: nodes that feed nothing (including a
+  text box flagged `output_node` for its preview), a canvas node whose size is wired,
+  and a negative prompt whose samplers all run at a hand-set CFG <= 1 (now titled
+  "🚫 Negative (no effect at CFG 1)"). Now painted: model and LoRA pickers (not
+  MODEL->MODEL tuning patches without a model file) and prompt builders with an
+  unwired choice or prompt-text widget.
+- **The sampling note warned "outside the base reference" using the refiner's steps.**
+  The base pass (denoise 1, or none) now supplies steps/cfg.
+- **`record_learning` silently replaced an earlier lesson** when a new note reused the
+  key. Overwritten values are now kept under `superseded:` in the learned file (never
+  served as guidance), and the result lists `replaced` keys with a hint to merge.
+
+### Changed
+
+- `edit_workflow` `set_widget` takes `index` (raw `widgets_values` position) in place
+  of `input`, for pack JS widgets the name mapping cannot see (LoRA Manager `loras`).
+  It is written as given: no value check, no rebuild.
+- `save_workflow` saves despite errors marked `headless: true`
+  (`js-widget-input`, `widget-layout-unmapped`): those break only a raw-API run, and
+  the saved file works in the editor. Its note says `run_workflow` will refuse the
+  graph; `run_workflow` still blocks on them.
+- `widget-count-drift` for MORE saved values than schema slots, when they map
+  plausibly, is `info` instead of a "parameters changed" warning, which fired on most
+  healthy display and pack nodes.
+- krea2 floor: one generic line on A/B-testing third-party VAE fine-tunes at 1:1.
+
+### Behavior changes
+
+- `save_workflow` no longer refuses a graph whose only errors are headless ones.
+- New finding code `widget-layout-unmapped` (error, `headless: true`).
+- `set_widget` by name on an unmapped node now raises instead of writing a
+  misplaced value.
+- Surplus-value `widget-count-drift` is `info`.
+
+### Not changed
+
+- Sweep face/region crops located automatically: needs a detector, a new dependency.
+  `crops` takes explicit boxes. The 24-run cap stays; split larger grids. Swapping the
+  UNet or VAE per variant already works with `set_widget` ops.
+- No lint for long output filenames: the cap is pack-specific and the name is token
+  expansion done at run time.
+- No realignment of misaligned packs: a survey found no hole-skipping rule that
+  recovers the reordered ones, so draftsman reports the node instead of guessing.
+
 ## 0.19.0 - live-use feedback fixes
 
 From an identity A/B session that logged three bugs and five token/usability problems.
