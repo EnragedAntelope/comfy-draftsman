@@ -620,7 +620,7 @@ async def test_tool_schemas_stay_within_the_session_budget():
     golden master), but a new tool or a docstring that doubles will trip it."""
     tools = await server.mcp.list_tools()
     total = sum(
-        len(t.description or "") + len(json.dumps(t.inputSchema)) for t in tools
+        len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools
     )
     assert total < 25_000, f"tool schemas grew to {total} chars"
     # no single tool should dominate: the two fattest are the op-schema mirror

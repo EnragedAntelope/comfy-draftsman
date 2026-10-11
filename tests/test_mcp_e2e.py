@@ -8,7 +8,7 @@ import json
 import os
 
 import pytest
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp import Client
 
 pytestmark = pytest.mark.integration
 
@@ -31,15 +31,15 @@ def draftsman_server(tmp_path, monkeypatch):
 
 
 def _json(result):
-    assert not result.isError, result.content
+    assert not result.is_error, result.content
     return json.loads(result.content[0].text)
 
 
 async def test_full_agent_flow(draftsman_server):
     # session lives entirely inside the test body: anyio cancel scopes must
     # enter and exit in the same task
-    async with create_connected_server_and_client_session(
-        draftsman_server.mcp._mcp_server
+    async with Client(
+        draftsman_server.mcp
     ) as mcp_session:
         await _flow(mcp_session)
 
@@ -94,7 +94,7 @@ async def _flow(mcp_session):
     run = await mcp_session.call_tool(
         "run_workflow", {"workflow_id": wf_id, "timeout_seconds": 300}
     )
-    assert not run.isError
+    assert not run.is_error
     payload = json.loads(run.content[0].text)
     assert payload["status"] == "success", payload
     # preview image comes back as MCP image content
@@ -109,8 +109,8 @@ async def test_dynamic_combo_flow(draftsman_server):
     """Regression: a graph containing COMFY_DYNAMICCOMBO_V3 nodes (Depth-Anything-3
     + SaveImageAdvanced) validates, exports dotted-key API inputs, and is accepted
     by the live /prompt - end-to-end through the draftsman alone, no manual glue."""
-    async with create_connected_server_and_client_session(
-        draftsman_server.mcp._mcp_server
+    async with Client(
+        draftsman_server.mcp
     ) as mcp_session:
         info = _json(await mcp_session.call_tool(
             "get_node_info", {"class_types": ["LoadDA3Model", "DA3Inference", "DA3Render"]}

@@ -152,7 +152,7 @@ async def test_view_output_returns_meta(view_wired):
     result = await server.view_output("test.png")
     assert isinstance(result, list) and len(result) == 2
     meta_block, image = result
-    from mcp.server.fastmcp.utilities.types import Image
+    from mcp.server.mcpserver.utilities.types import Image
     assert isinstance(image, Image), "image block must be present for vision models"
     meta = meta_block["meta"]
     assert meta["filename"] == "test.png"

@@ -143,7 +143,7 @@ async def test_run_thumbnail_then_view_full_size(live_server, live_client):
     """run_workflow inlines a downscaled thumbnail; view_output serves full size."""
     import io
 
-    from mcp.server.fastmcp.utilities.types import Image
+    from mcp.server.mcpserver.utilities.types import Image
     from PIL import Image as PILImage
 
     object_info = await live_client.get_object_info()
@@ -192,7 +192,7 @@ async def test_upload_image_roundtrip(live_server):
     import base64
     import io
 
-    from mcp.server.fastmcp.utilities.types import Image
+    from mcp.server.mcpserver.utilities.types import Image
     from PIL import Image as PILImage
 
     buf = io.BytesIO()

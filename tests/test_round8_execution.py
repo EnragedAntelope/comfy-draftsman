@@ -12,7 +12,7 @@ import io
 import httpx
 import pytest
 import respx
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.server.mcpserver.utilities.types import Image
 from PIL import Image as PILImage
 
 from comfy_draftsman import server

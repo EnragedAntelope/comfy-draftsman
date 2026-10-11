@@ -2,7 +2,7 @@
 
 tests/test_mcp_e2e.py already drives the real protocol surface, but it is
 integration-marked and needs a running instance, so it never runs in CI or in a
-sandboxed session. This module mounts the same FastMCP server against a
+sandboxed session. This module mounts the same MCPServer server against a
 respx-mocked ComfyUI, which means the protocol layer - tool registration,
 schema generation, annotations, elicitation round-trips, the JSON that actually
 reaches a client - is covered on every commit.
@@ -17,8 +17,7 @@ import json
 import httpx
 import pytest
 import respx
-from mcp import types
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp import Client, types
 
 BASE = "http://comfy.offline.test"
 
@@ -92,12 +91,14 @@ def offline(tmp_path, monkeypatch):
 
 
 def _json(result):
-    assert not result.isError, result.content
+    assert not result.is_error, result.content
     return json.loads(result.content[0].text)
 
 
 async def _session(server, **kwargs):
-    return create_connected_server_and_client_session(server.mcp._mcp_server, **kwargs)
+    # ctx.elicit needs a back-channel, which only the pre-2026 handshake has
+    kwargs.setdefault("mode", "legacy" if "elicitation_callback" in kwargs else "auto")
+    return Client(server.mcp, **kwargs)
 
 
 # --- orientation -----------------------------------------------------------
@@ -326,6 +327,22 @@ async def test_spend_gate_decline_queues_nothing(with_key):
     assert state["queued"] == []
 
 
+async def test_spend_gate_on_2026_protocol_degrades_to_the_confirm_flag(with_key):
+    """On the 2026-07-28 protocol ctx.elicit has no back-channel and raises
+    NoBackChannelError even for an eliciting client. That must land on the same
+    documented fallback as a non-eliciting client, never queue the paid run."""
+    server, state = with_key
+    async with Client(
+        server.mcp, mode="2026-07-28", elicitation_callback=_elicit("accept", {"confirm": True})
+    ) as mcp_session:
+        wf_id = await _build_paid(mcp_session)
+        result = _json(
+            await mcp_session.call_tool("run_workflow", {"workflow_id": wf_id, "wait": False})
+        )
+    assert result["status"] == "spend_confirmation_required"
+    assert state["queued"] == []
+
+
 async def test_spend_gate_without_elicitation_capability_explains_the_way_out(with_key):
     """No elicitation_callback = a client that cannot ask. This is the path that
     silently regresses, because nothing in the transcript looks wrong."""
@@ -507,17 +524,17 @@ async def test_read_only_annotations_match_what_the_tools_actually_do(offline):
     for name, tool in by_name.items():
         annotations = tool.annotations
         assert annotations is not None, name
-        assert annotations.readOnlyHint is (name not in mutating), name
+        assert annotations.read_only_hint is (name not in mutating), name
 
 
 async def test_the_injected_context_parameter_is_not_on_the_wire(offline):
-    """ctx is FastMCP-injected; if it ever leaked into a schema it would cost
+    """ctx is MCPServer-injected; if it ever leaked into a schema it would cost
     tokens on every request and invite a client to pass nonsense."""
     server, _state = offline
     async with await _session(server) as mcp_session:
         tools = (await mcp_session.list_tools()).tools
     for tool in tools:
-        assert "ctx" not in tool.inputSchema.get("properties", {}), tool.name
+        assert "ctx" not in tool.input_schema.get("properties", {}), tool.name
 
 
 async def test_the_new_parameters_are_optional(offline):
@@ -527,7 +544,7 @@ async def test_the_new_parameters_are_optional(offline):
     async with await _session(server) as mcp_session:
         tools = {t.name: t for t in (await mcp_session.list_tools()).tools}
     for tool_name, param in (("run_workflow", "confirm_spend"), ("manage_queue", "confirm")):
-        schema = tools[tool_name].inputSchema
+        schema = tools[tool_name].input_schema
         assert param in schema["properties"], tool_name
         assert param not in schema.get("required", []), tool_name
 

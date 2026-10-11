@@ -106,4 +106,4 @@ def test_widget_preview_truncates_dict_widgets():
 def test_diagnose_workflow_annotated_read_only():
     tool = server.mcp._tool_manager.get_tool("diagnose_workflow")
     assert tool.annotations is not None
-    assert tool.annotations.readOnlyHint is True
+    assert tool.annotations.read_only_hint is True

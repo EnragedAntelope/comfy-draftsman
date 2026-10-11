@@ -3,7 +3,7 @@
 1. run_workflow silently reported success when ComfyUI accepted the prompt (HTTP
    200) but rejected part of the graph (node_errors) and ran only the rest -
    node_errors are now surfaced and the status downgraded to "partial".
-2. view_output returned a dict *containing* an Image (which FastMCP repr's into
+2. view_output returned a dict *containing* an Image (which MCPServer repr's into
    text instead of rendering) - now returns the image block in list form.
 3. widget-count-drift warnings fired on every display/output node (ShowText,
    rgthree previews) that stashes shown text into widgets_values - suppressed.
@@ -14,7 +14,7 @@ import io
 import httpx
 import pytest
 import respx
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.server.mcpserver.utilities.types import Image
 from PIL import Image as PILImage
 
 from comfy_draftsman import server
