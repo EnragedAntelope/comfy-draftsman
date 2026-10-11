@@ -9,7 +9,7 @@ detect:
 loader: unet_clip_vae
 components:
   text_encoders: ["Qwen3-VL 4B fp8 (CLIPLoader, type=krea2)"]
-  vae: "qwen_image_vae.safetensors (or the Krea-2 real VAE)"
+  vae: "qwen_image_vae.safetensors (or the Krea-2 real VAE). Third-party VAE fine-tunes differ in fine texture - A/B them on one fixed latent, judged at 1:1"
 loader_nodes:
   model:
     class: UNETLoader

@@ -64,7 +64,9 @@ def _is_canvas_node(class_type: str) -> bool:
     return "empty" in name and "latent" in name
 
 
-def classify(node: Node, object_info: dict[str, Any]) -> str:
+def classify(node: Node, object_info: dict[str, Any], default: str = "sampling") -> str:
+    """The node's stage from its own schema. ``default`` is returned when the
+    schema says nothing (organize passes "" and lets graph position decide)."""
     if node.type in _INPUT_CLASSES:
         return "inputs"
     if _is_canvas_node(node.type):
@@ -77,6 +79,8 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
     if "utilities/primitive" in ((object_info.get(node.type) or {}).get("category") or "").lower():
         return "inputs"  # core PrimitiveInt/Float/String/...: the same hand-tweaked knobs
     stage = _classify_by_schema(node, object_info)
+    if stage is None:
+        return default
     # An UNWIRED prompt box on a conditioning ENCODER (CLIPTextEncode & kin) is
     # the classic single "type your prompt here" box - the most commonly
     # edited thing in almost any workflow, so it belongs on the left edge with
@@ -94,7 +98,7 @@ def classify(node: Node, object_info: dict[str, Any]) -> str:
     return stage
 
 
-def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
+def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str | None:
     schema = object_info.get(node.type)
     name = node.type.lower()
     if schema is not None:
@@ -113,6 +117,13 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
         # genuine terminal writers in Output without over-trusting the flag.
         if schema.get("output_node") and not (out_types and out_types <= {"STRING"}):
             return "output"
+        if out_types and out_types <= {"STRING"}:
+            # pure text machinery (wildcards, concatenators, LLM/VLM prompt
+            # steps, character builders) - the reader wants to see what feeds
+            # the final prompt one step before the encoder. Checked BEFORE the
+            # category: packs file prompt builders under "conditioning/..."
+            # even though they never output CONDITIONING.
+            return "prompt_build"
         in_types = {
             str(spec[0]).upper()
             for section in ("required", "optional")
@@ -133,16 +144,13 @@ def _classify_by_schema(node: Node, object_info: dict[str, Any]) -> str:
         if category.startswith("image") or category.startswith("mask"):
             return "post"
         # category didn't decide - infer from the data types flowing through
-        if out_types and out_types <= {"STRING"}:
-            # pure text machinery (wildcards, concatenators, LLM/VLM prompt
-            # steps) - the reader wants to see what feeds the final prompt one
-            # step before the encoder, not buried in Conditioning wiring
-            return "prompt_build"
+        if "CONDITIONING" in out_types:
+            return "conditioning"
         if "IMAGE" in in_types and "IMAGE" in out_types:
             return "post"  # image-in/image-out = post-processing (overlays, filters)
     if any(hint in name for hint in _POST_HINTS):
         return "post"
-    return "sampling"
+    return None  # undecided: _restage_by_graph places it by its consumers
 
 
 def _is_display_companion(node: Node, object_info: dict[str, Any]) -> bool:
@@ -204,13 +212,20 @@ def _source_stage(wf: Workflow, node: Node, stage_of_key: dict[int, str]) -> str
 
 
 def _restage_by_graph(
-    wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]
+    wf: Workflow,
+    object_info: dict[str, Any],
+    stage_of_key: dict[int, str],
+    undecided: set[int] | None = None,
 ) -> None:
     """Stage fixes that need graph position, not just the node's own schema.
 
     - Routing nodes (``utilities/logic``: If/Else switches) take the stage of
       their leftmost consumer, so wires keep flowing inputs -> consumer instead
       of the switch being stranded in Sampling because the schema can't say.
+    - ``undecided`` nodes (the schema said nothing: LoRA pool/randomizer
+      config nodes, detector loaders, resolution pickers) do the same, so a
+      Pool -> Randomizer -> LoRA loader chain lands in Models and a detector
+      provider sits with the detailer it feeds. No consumer -> Sampling.
     - An IMAGE->IMAGE "post" node that is NOT downstream of the sampling stage
       (an i2i reference scaler feeding VAEEncode) is preprocessing, not
       post-processing: it joins the stage of its source. Skipped when the graph
@@ -224,14 +239,15 @@ def _restage_by_graph(
     def category(node: Node) -> str:
         return ((object_info.get(node.type) or {}).get("category") or "").lower()
 
-    switches = [n for n in stage_of_key if "utilities/logic" in category(wf.nodes[n])]
-    for nid in sorted(switches, key=lambda n: (-rank.get(n, 0), n)):  # consumers first
+    switches = {n for n in stage_of_key if "utilities/logic" in category(wf.nodes[n])}
+    movable = switches | (undecided or set())
+    for nid in sorted(movable, key=lambda n: (-rank.get(n, 0), n)):  # consumers first
         stages = [
             _STAGE_INDEX[stage_of_key[c]] for c in consumers.get(nid, []) if c in stage_of_key
         ]
         if stages:
             stage_of_key[nid] = STAGES[min(stages)][0]
-        elif (src := _source_stage(wf, wf.nodes[nid], stage_of_key)) is not None:
+        elif nid in switches and (src := _source_stage(wf, wf.nodes[nid], stage_of_key)) is not None:
             stage_of_key[nid] = src
 
     frontier = [n for n, s in stage_of_key.items() if s == "sampling"]
@@ -254,7 +270,8 @@ ZEROOUT_TYPE = "ConditioningZeroOut"
 
 # titles we generate ourselves - safe to rewrite on a later organize pass;
 # anything else is human-authored and must never be clobbered
-ROLE_TITLES = {"✅ Positive Prompt", "🚫 Negative Prompt"}
+INERT_NEGATIVE_TITLE = "🚫 Negative (no effect at CFG 1)"
+ROLE_TITLES = {"✅ Positive Prompt", "🚫 Negative Prompt", INERT_NEGATIVE_TITLE}
 
 
 def _outputs_conditioning(node: Node) -> bool:
@@ -341,7 +358,11 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> int:
                 node.title = "✅ Positive Prompt"
                 titled += 1
             elif role == "negative":
-                node.title = "🚫 Negative Prompt"
+                node.title = (
+                    INERT_NEGATIVE_TITLE
+                    if _negative_is_inert(wf, node, object_info)
+                    else "🚫 Negative Prompt"
+                )
                 titled += 1
         if "loaders" in (schema.get("category") or "") and node.title is None:
             filenames = [
@@ -396,6 +417,89 @@ def _wired_input(node: Node, name: str) -> bool:
     return slot is not None and slot.link is not None
 
 
+def _negative_samplers(wf: Workflow, node: Node, depth: int = 0) -> list[Node]:
+    """Nodes whose ``negative`` input this node's conditioning reaches."""
+    found: list[Node] = []
+    if depth > 5:
+        return found
+    for out in node.outputs:
+        for lid in out.links:
+            link = wf.links.get(lid)
+            target = wf.nodes.get(link.target_id) if link is not None else None
+            if target is None or link is None or link.target_slot >= len(target.inputs):
+                continue
+            if target.inputs[link.target_slot].name.lower() == "negative":
+                found.append(target)
+            else:
+                found.extend(_negative_samplers(wf, target, depth + 1))
+    return found
+
+
+def _negative_is_inert(wf: Workflow, node: Node, object_info: dict[str, Any]) -> bool:
+    """True when every sampler/guider this negative prompt feeds runs at a
+    hand-set CFG <= 1, where the negative branch has no effect at all."""
+    samplers = _negative_samplers(wf, node)
+    if not samplers:
+        return False
+    for sampler in samplers:
+        cfg = _named_widgets(sampler, object_info).get("cfg")
+        if (
+            _wired_input(sampler, "cfg")
+            or not isinstance(cfg, int | float)
+            or isinstance(cfg, bool)
+            or cfg > 1.0
+        ):
+            return False
+    return True
+
+
+def _is_orphan(node: Node, object_info: dict[str, Any]) -> bool:
+    """Feeds nothing and is no output itself: a leftover, not a knob."""
+    if node.type == PRIMITIVE_TYPE and node.outputs and not any(o.links for o in node.outputs):
+        return True
+    schema = object_info.get(node.type)
+    if schema is None:
+        return False
+    outs = {str(t).upper() for t in (schema.get("output") or [])}
+    # a STRING-only "output_node" is a text box flagged for its UI preview
+    # (see _classify_by_schema), not a terminal writer
+    writes = schema.get("output_node") and not (outs and outs <= {"STRING"})
+    return not writes and not any(o.links for o in node.outputs)
+
+
+def _is_model_patch(node: Node, object_info: dict[str, Any]) -> bool:
+    """MODEL->MODEL patch (ModelSamplingFlux, FreSca...) holding no model file:
+    tuned machinery, not a knob. LoraLoaderModelOnly holds a file, so it is."""
+    schema = object_info.get(node.type) or {}
+    outs = {str(t).upper() for t in (schema.get("output") or [])}
+    ins = {
+        str(spec[0]).upper()
+        for section in ("required", "optional")
+        for spec in (schema.get("input", {}).get(section, {}) or {}).values()
+        if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str)
+    }
+    if outs != {"MODEL"} or "MODEL" not in ins:
+        return False
+    values = node.widgets_values if isinstance(node.widgets_values, list) else []
+    return not any(isinstance(v, str) and _MODEL_FILE_RE.search(v) for v in values)
+
+
+def _has_unwired_choice(node: Node, object_info: dict[str, Any]) -> bool:
+    """An unwired combo or prompt-text widget, judged from the SCHEMA (names and
+    types), never from saved values - those can be misaligned on packs whose JS
+    reorders widgets."""
+    from . import widgets as w
+
+    schema = object_info.get(node.type) or {}
+    for section in ("required", "optional"):
+        for name, spec in (schema.get("input", {}).get(section, {}) or {}).items():
+            if not w.is_widget_input(spec) or _wired_input(node, name):
+                continue
+            if name in _PROMPT_WIDGETS or w.combo_choices(spec):
+                return True
+    return False
+
+
 def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]) -> int:
     """Highlight user-editable knobs green. Returns how many nodes were painted."""
     painted = 0
@@ -409,15 +513,35 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
         # LLM step's own text) are the two stages where a prompt knob can be
         # genuinely hand-typed; classify() never routes a WIRED one into
         # either, so the wired check below is redundant-but-cheap insurance.
-        editable_prompt_knob = stage in ("inputs", "prompt_build") and any(
-            not _wired_input(node, name) for name in prompt_knobs
+        editable_prompt_knob = (
+            stage in ("inputs", "prompt_build")
+            and any(not _wired_input(node, name) for name in prompt_knobs)
+            # a negative prompt at CFG 1 changes nothing - not a knob
+            and not (
+                _prompt_role(wf, node) == "negative"
+                and _negative_is_inert(wf, node, object_info)
+            )
         )
-        is_knob = (
+        canvas_knob = _is_canvas_node(node.type) and any(
+            not _wired_input(node, name)
+            for name in slots
+            if name != "batch_size" and "__" not in name
+        )
+        has_values = bool(node.widgets_values)
+        is_knob = not _is_orphan(node, object_info) and (
             node.type in _INPUT_CLASSES
             or editable_prompt_knob
-            or _is_canvas_node(node.type)
+            or canvas_knob
             # a primitive IS a hand-set value, whatever socket it mirrors
             or node.type == PRIMITIVE_TYPE
+            # model/LoRA pickers - but not MODEL->MODEL tuning patches
+            or (stage == "models" and has_values and not _is_model_patch(node, object_info))
+            # prompt builders: character/style pickers, wildcard banks
+            or (
+                stage == "prompt_build"
+                and not _is_display_companion(node, object_info)
+                and _has_unwired_choice(node, object_info)
+            )
         )
         if is_knob:
             node.color, node.bgcolor = GREEN
@@ -430,6 +554,10 @@ def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[i
             # picked is left alone.
             node.color, node.bgcolor = None, None
     return painted
+
+
+def _is_partial_denoise(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and value < 1.0
 
 
 def _wrap(text: str, width: int = 58) -> str:
@@ -551,8 +679,12 @@ def _note_text(
         # arrives through lora_name, which variant matching deliberately
         # ignores) quoting them would contradict the graph
         current: dict[str, Any] = {}
-        for n in members:
-            for k, v in _named_widgets(n, object_info).items():
+        # base pass first: a refiner/detail pass (denoise < 1) runs its own
+        # short schedule and would read as "outside the reference"
+        named = [_named_widgets(n, object_info) for n in members]
+        base = [v for v in named if not _is_partial_denoise(v.get("denoise"))]
+        for widgets in base + [v for v in named if v not in base]:
+            for k, v in widgets.items():
                 if k in ("steps", "cfg"):
                     current.setdefault(k, v)
         outside = any(
@@ -740,12 +872,16 @@ def annotate(
             family, model_filename=filenames[0] if filenames else None, learned_dir=learned_dir
         )
 
-    stage_of_key = {
-        node.id: classify(node, object_info)
-        for node in wf.nodes.values()
-        if node.type not in ("Note", "MarkdownNote")
-    }
-    _restage_by_graph(wf, object_info, stage_of_key)
+    stage_of_key: dict[int, str] = {}
+    undecided: set[int] = set()
+    for node in wf.nodes.values():
+        if node.type in ("Note", "MarkdownNote"):
+            continue
+        key = classify(node, object_info, default="")
+        if not key:
+            undecided.add(node.id)
+        stage_of_key[node.id] = key or "sampling"
+    _restage_by_graph(wf, object_info, stage_of_key, undecided)
     # display nodes follow whatever they display (stage + position)
     companion_of = _companion_sources(wf, object_info, stage_of_key)
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}

@@ -746,18 +746,33 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   skips the keys of a `properties` dict; popping every `"title"` key once deleted a real
   parameter called `title` while `required` still listed it.
 
+- **Widget values map by POSITION, and pack JS can break that.** The frontend writes
+  one `widgets_values` entry per `node.widgets` item, so a pack that adds a button or
+  header widget (a null hole) or moves a widget (Identity Forge, older LoRA Manager
+  toggles, easy promptLine) shifts every later value off its schema name. There is no
+  general realignment: a survey of real saves found hole-skipping recovers too few
+  nodes. `widgets.positional_mapping_plausible` instead DETECTS it, only when values
+  outnumber slots: a null on a custom node, a value outside a non-file combo, or a wrong
+  primitive type in a real slot. Missing files never count (uninstalled model, not
+  misalignment), and core nulls stay `null-widget-value`. A misaligned node gets one
+  `widget-layout-unmapped` error and no per-slot findings; by-name `set_widget` refuses
+  it and points at `index`. Surplus values that map plausibly are pack state and are
+  carried through a by-name set (`model.set_widget` appends the old tail).
+- **`headless: true` findings block runs, not saves.** `js-widget-input` and
+  `widget-layout-unmapped` mean the raw API can't carry the node, while the editor can;
+  `save_workflow` filters them out of its gate, `run_workflow` and the sweep do not.
+  Do not mark a finding headless if the editor would also break on it (a null string
+  widget crashes the editor at queue time, so `null-widget-value` stays a save error).
+- **Organize treats a saved node size as a minimum** (`layout._fit_size`). A pack's
+  JS-drawn widget can be hundreds of pixels taller than `estimate_size` predicts.
+- **`classify(default=...)`.** The public default stays "sampling"; organize passes
+  `""` and lets `_restage_by_graph` place undecided nodes by their consumers
+  (consumer-first, so config chains like Pool -> Randomizer -> Loader propagate).
+
 ## Remaining TODOs
 
 Open:
 
-- **[OPEN] `api_node` detection is unverified against a live instance.** The
-  test fixture's `LumaImageNode` entry was written by hand from the documented
-  shape; every *real* class in it carries `api_node: false`. If a production
-  ComfyUI omits the field on partner nodes, the `category` fallback is what
-  carries the gate, and only `COMFYUI_TEST_URL=... uv run pytest -m integration`
-  against an instance with partner nodes installed settles it. Failing *open*
-  (unknown is not billable) is the deliberate choice - see the spend-gate
-  section above.
 - **[OPEN] VRAM floors for the unsourced families.** chroma, krea2, ltx,
   qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
   nothing. sd15 in particular was left out on purpose: no citable floor was
@@ -785,7 +800,8 @@ Open:
   (`slotType` + a nested `inputs` dict, expanded under a dotted prefix) is close
   enough to autogrow that `graph/widgets.py`'s autogrow helpers are the model to
   copy. Do not implement it speculatively — wait for a pack that uses it, then
-  verify against a real serialized node the way round 21 did.
+  verify against a real serialized node the way round 21 did. Re-checked
+  2026-10-10 on a live stock instance: still zero.
 - **[OPEN] Widget-backed custom-JS inputs stay a loud stop, by design.** Packs
   like LoraManager (`text` / `AUTOCOMPLETE_TEXT_LORAS`) and StyleStringInjector2
   (`gallery` / `ZIPN_STYLE_GALLERY_BUTTON`) expose an input as a widget-backed
@@ -820,6 +836,10 @@ Open:
     and only the unflagged ones. If a pack ever flags a genuinely JS-resolved
     input, that rule breaks and this becomes a real bug; there is no test that
     can catch it locally, so it is written here.
+  - **Round 29 eased the cost without changing the verdict.** `js-widget-input` is a
+    `headless` finding, so such a graph can be SAVED (the editor resolves the pack
+    state) while `run_workflow` still refuses it, and `set_widget` by `index` can edit
+    the raw pack value. Per-pack resolution for a headless run remains open.
 - **[OPEN] `multiple_of` unset for wan, qwen_image, krea2.** Round 23
   investigated all three: LTX's 32 came from Lightricks' own docs, and
   sd15/sdxl/sd35/flux came straight from their empty-latent node's own live
@@ -831,12 +851,20 @@ Open:
   as inferred, not schema-verified, in its own YAML comment. Verify each
   against a live instance's `/object_info` (whichever Empty*LatentImage/Video
   node the family's template uses) or the model's own release notes before
-  adding - do not guess from general video-DiT conventions.
+  adding - do not guess from general video-DiT conventions. Re-checked 2026-10-10:
+  the families' YAMLs still name no latent node, and the live widget steps
+  (EmptyLatentImage 8; EmptySD3LatentImage / EmptyHunyuanLatentVideo 16) say what the
+  editor allows, not what the model needs - so still open.
 - **[OPEN] `refresh_node` / `sync_node_schema` to re-read a node's live schema after install.** Reported as Feature 1: installing a custom node pack mid-session leaves `get_node_info` / `search_nodes` serving the stale pre-install schema until the process restarts. A `refresh_node` tool (or `sync_node_schema` call) that re-fetches `/object_info` for one class — or invalidates the catalog cache — would close it without a restart. Large: needs a cache-invalidation contract in `comfy/catalog.py` and `server._object_info`, plus a scope decision (one class vs. whole doc). Deferred from round 26; validate against a live instance before implementing.
 - **[OPEN] `diff_workflow` to show what changed between two workflow revisions.** Reported as Nice-to-have 3: callers currently export → hand-diff JSON to see what moved. A `diff_workflow(a, b)` returning added/removed/changed nodes + edges (bounded, like the rest of the surface) would replace that. Deferred from round 26; design the output shape to stay under the tool-surface token ceiling.
 - **[OPEN] MCP 2.x migration (keep the `mcp>=1.10,<2` pin until then).** mcp 2.0.0 removed `mcp.server.fastmcp`, which `server.py` imports at module scope, so an unbounded pin means a fresh install resolves 2.x and cannot start at all (this shipped once as 0.15.0 with 729 passing tests and an unstartable server). Migration needs a fastmcp shim or a rewrite of the wiring layer; both wheel checks import `comfy_draftsman.server`, so any runtime pin whose major breaks a module-scope import needs a ceiling. Track the port, don't loosen the pin.
 
 Recently closed:
+- **[DONE, round 29 / 0.20.0] Widget-mapping plausibility, organize staging/knobs/sizes,
+  learned-note history.** See `CHANGELOG.md` 0.20.0 and the Gotchas entries above.
+  Also closed: **`api_node` detection verified live** (2026-10-10: partner classes
+  on a stock instance carry `api_node: true`, so the field, not the category
+  fallback, carries the spend gate).
 - **[DONE, round 26] Validation fixes + token-surface trims.** Closed 8 of 11 reported items after direct validation (the other 3 were real but deferred — see Open above). Implemented: `model._as_dict` coercion so string-serialized UI dicts (`properties`/`flags`/`extra`/`config`) no longer crash `organize_workflow` (`'str' object has no attribute 'get'`); `run_workflow` now hard-rejects `save_dir` on a `wait=False` run with `status:"invalid"` (previously it silently ignored `save_dir` and a background run's files were unreachable); `run_and_wait` surfaces the queued `prompt_id` on timeout instead of raising and losing it; `export_workflow_json(path=...)` writes the JSON to a file and returns `saved_to` instead of embedding the graph; `import_workflow(file_path=...)` reads a local `.json` file; `node_summary` exposes `widget_count`/`input_count`; `combo-value-unlisted` demoted from `warning` to `info` (it was noise on valid custom-client combos); `edit_workflow` docstring documents the `group_id`/`color` shape. **Behavior change to note:** `save_dir` + `wait=False` used to be a silent no-op and now errors — callers that passed both must switch to `save_output(prompt_id=..., dest_dir=...)` after `get_run_status` reports success. `refresh_node`, `diff_workflow`, and the MCP 2.x port are tracked as Open TODOs.
 
 

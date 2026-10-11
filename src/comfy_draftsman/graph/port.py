@@ -53,6 +53,10 @@ def _set_if_valid(
     node = wf.nodes[node_id]
     if name not in _slots(wf, node_id, object_info):
         return True
+    if not w.positional_mapping_plausible(
+        node.type, node.widgets_values, object_info, {s.name for s in node.inputs}
+    ):
+        return True  # pack JS misaligned its widgets: no name is usable
     schema = object_info[node.type]
     spec = None
     for section in ("required", "optional"):

@@ -176,7 +176,9 @@ def test_widget_count_drift_suppressed_for_display_node():
     assert not [f for f in findings if f["code"] == "widget-count-drift"]
 
 
-def test_widget_count_drift_still_warns_for_ordinary_node():
+def test_widget_count_drift_surplus_on_ordinary_node_is_info():
+    # round 29: plausible surplus values are pack state or a dropped trailing
+    # parameter - the old warning fired on ~1,100 healthy saved nodes
     ui = {
         "nodes": [{
             "id": 1,
@@ -189,4 +191,4 @@ def test_widget_count_drift_still_warns_for_ordinary_node():
     }
     findings = validate(Workflow.from_ui(ui), _DISPLAY_OI)
     drift = [f for f in findings if f["code"] == "widget-count-drift"]
-    assert drift and drift[0]["level"] == "warning"
+    assert drift and drift[0]["level"] == "info"

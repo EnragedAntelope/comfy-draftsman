@@ -29,6 +29,7 @@ value-aware: pass the node's ``widgets_values`` so the right option expands.
 from __future__ import annotations
 
 import random
+import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -485,6 +486,79 @@ def widget_specs(
         for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names)
         if spec is not None
     }
+
+
+# A combo listing on-disk files: a value missing from it usually means "model
+# not installed", not "wrong slot" - so it is no evidence of misalignment.
+FILE_COMBO_RE = re.compile(
+    r"\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|sft|vae|pkl|yaml|yml)$", re.IGNORECASE
+)
+
+
+def looks_like_file_combo(choices: list[Any]) -> bool:
+    return any(
+        isinstance(c, str) and (FILE_COMBO_RE.search(c) or "/" in c or "\\" in c)
+        for c in choices
+    )
+
+
+def is_custom_node(class_type: str, object_info: dict[str, Any]) -> bool:
+    """True if this class comes from a third-party pack (python_module under
+    ``custom_nodes``) rather than core/bundled ComfyUI. Missing -> treated as
+    core (strict), so an unknown never silently relaxes validation."""
+    module = str((object_info.get(class_type) or {}).get("python_module") or "")
+    return module.startswith("custom_nodes")
+
+
+def positional_mapping_plausible(
+    class_type: str,
+    widgets_values: Any,
+    object_info: dict[str, Any],
+    socket_names: set[str] | None = None,
+) -> bool:
+    """False when a node saved MORE values than its schema has slots AND the
+    positional mapping puts an impossible value in a real slot.
+
+    Mapping is positional by schema order, but some packs' JS inserts button
+    or header widgets (serialized as null holes) or reorders widgets, so the
+    values no longer line up and every name reads the wrong value. Surplus
+    values alone are normal (display text, pack state appended after the
+    schema widgets), so only a type/choice contradiction counts: a null on a
+    custom node (core nulls stay the null-widget-value error), a value outside
+    a non-file combo, or a wrong primitive type. Not realignment - a survey of
+    real saves found no hole-skipping rule that recovers the reordered packs."""
+    if not isinstance(widgets_values, list) or class_type not in object_info:
+        return True
+    slots = widget_slot_names(class_type, object_info, widgets_values, socket_names)
+    if len(widgets_values) <= len(slots):
+        return True
+    specs = widget_specs(class_type, object_info, widgets_values, socket_names)
+    custom = is_custom_node(class_type, object_info)
+    for name, value in zip(slots, widgets_values, strict=False):
+        spec = specs.get(name)
+        if spec is None or name.endswith(SYNTHETIC_SUFFIXES):
+            continue
+        if value is None:
+            if custom:
+                return False
+            continue
+        choices = combo_choices(spec)
+        kind = spec[0]
+        if choices:
+            if value not in choices and not looks_like_file_combo(choices):
+                return False
+        elif kind == "INT":
+            if not isinstance(value, int) or isinstance(value, bool):
+                return False
+        elif kind == "FLOAT":
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                return False
+        elif kind == "BOOLEAN":
+            if not isinstance(value, bool):
+                return False
+        elif kind == "STRING" and not isinstance(value, str):
+            return False
+    return True
 
 
 def all_slot_names(class_type: str, object_info: dict[str, Any]) -> list[str]:

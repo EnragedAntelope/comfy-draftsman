@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from . import widgets as w
-from .model import VIRTUAL_TYPES, Workflow
+from .model import VIRTUAL_TYPES, Node, Workflow
 
 X_GUTTER = 90.0
 Y_GAP = 40.0
@@ -51,6 +51,18 @@ _TEXTY_WIDGETS = {"text", "prompt", "wildcard_text", "populated_text", "string"}
 def is_text_display(class_type: str) -> bool:
     """Show Text-style display nodes (populated with generated text at run time)."""
     return _TEXT_DISPLAY_RE.search(class_type) is not None
+
+
+def _fit_size(node: Node, object_info: dict[str, Any]) -> list[float]:
+    """The estimate as a MINIMUM, like the frontend's computeSize: a size the
+    editor saved (a pack's tall JS widget, a node the user enlarged) is real,
+    and shrinking it to the estimate makes the next node in the column overlap."""
+    est = estimate_size(node.type, object_info, _node_widget_count(node))
+    stored = node.size if isinstance(node.size, list | tuple) and len(node.size) >= 2 else []
+    return [
+        max(float(e), float(stored[i]) if i < len(stored) and isinstance(stored[i], int | float) else 0.0)
+        for i, e in enumerate(est[:2])
+    ]
 
 
 def estimate_size(
@@ -162,7 +174,7 @@ def apply_layout(
     for nid in rank:
         node = wf.nodes[nid]
         if node.type not in VIRTUAL_TYPES:
-            node.size = list(estimate_size(node.type, object_info, _node_widget_count(node)))
+            node.size = _fit_size(node, object_info)
 
     columns: dict[int, list[int]] = {}
     for nid, r in rank.items():
@@ -299,9 +311,7 @@ def apply_staged_layout(
         # absent from object_info, so estimate_size would flatten a 75x26 Reroute
         # and a multiline primitive alike into the generic unknown-class box
         if node.type not in VIRTUAL_TYPES:
-            node.size = list(
-                estimate_size(node.type, object_info, _node_widget_count(node))
-            )
+            node.size = _fit_size(node, object_info)
 
     # bands hold cluster heads only; companions ride along with their source
     bands: dict[int, list[int]] = {}

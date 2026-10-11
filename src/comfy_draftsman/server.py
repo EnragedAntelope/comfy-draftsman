@@ -1287,7 +1287,8 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "add_node": ({"class_type"}, {"title", "widgets", "force", "ref"}),
     "remove_node": ({"node_id"}, set()),
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
-    "set_widget": ({"node_id", "input", "value"}, {"force"}),
+    # exactly one of input/index - checked in _apply_ops
+    "set_widget": ({"node_id", "value"}, {"input", "index", "force"}),
     "replace_in_widget": ({"node_id", "input", "old", "new"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
@@ -1513,6 +1514,32 @@ def _apply_ops(
         elif kind == "set_widget":
             node_id = int(op["node_id"])
             node = wf.nodes[node_id]
+            if ("input" in op) == ("index" in op):
+                raise ValueError(
+                    f"operation {index} (set_widget): pass exactly one of 'input' (by "
+                    "name) or 'index' (raw widgets_values position)"
+                )
+            if "index" in op:
+                # raw positional write for widgets the name mapping can't see
+                # (pack JS widgets, reordered packs): no check, no round-trip
+                pos = int(op["index"])
+                values = node.widgets_values
+                if not isinstance(values, list):
+                    raise ValueError(
+                        f"{node.type} #{node_id} stores named widgets; use 'input'"
+                    )
+                if not 0 <= pos < len(values):
+                    raise ValueError(
+                        f"{node.type} #{node_id}: index {pos} out of range "
+                        f"(widgets_values has {len(values)})"
+                    )
+                values[pos] = op["value"]
+                touched.add(node_id)
+                applied.append(
+                    f"set #{node_id} widgets_values[{pos}] = "
+                    f"{_clip(op['value'])!r} (raw, unchecked)"
+                )
+                continue
             if not op.get("force"):
                 if node.type == PRIMITIVE_TYPE and op["input"] != "control_after_generate":
                     # a primitive's value must satisfy the widget it mirrors -
@@ -1739,7 +1766,7 @@ async def edit_workflow(
     - {"op": "add_node", "class_type": str, "title"?: str, "ref"?: str, "widgets"?: {name: value}}  # later ops may use a ref as a node id
     - {"op": "remove_node", "node_id": int}
     - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}
-    - {"op": "set_widget", "node_id": int, "input": str, "value": any}
+    - {"op": "set_widget", "node_id": int, "input": str | "index": int, "value": any}
     - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' must match once
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
@@ -2889,7 +2916,10 @@ async def save_workflow(
     wf = _wf(workflow_id)
     object_info = await _object_info(refresh=True)
     findings = validate(wf, object_info)
-    errors = [f for f in findings if f["level"] == "error"]
+    # headless errors (pack JS widgets) break only a raw-API run; the saved
+    # file works in the ComfyUI editor, which is what this tool produces
+    errors = [f for f in findings if f["level"] == "error" and not f.get("headless")]
+    headless = any(f["level"] == "error" and f.get("headless") for f in findings)
     if errors and not allow_invalid:
         return {
             "saved": False,
@@ -2961,6 +2991,12 @@ async def save_workflow(
         "validation": _cap_findings(findings),
         "lint": _cap_lint(warnings),
         "note": persist_note
+        + (
+            "saved, but some nodes need the ComfyUI editor (headless errors in "
+            "validation) - run_workflow will refuse this graph. "
+            if headless
+            else ""
+        )
         + (
             f"'{name}' already existed, so this saved as '{filename}' - the original file is untouched. "
             if renamed_from
@@ -3100,8 +3136,17 @@ async def record_learning(family: str, updates: dict[str, Any], source: str) -> 
     each file - it never invents a URL, so this is the only way one appears:
     {"sources": [{"match": ["mymodel_v1.safetensors"], "what": "checkpoint",
     "url": "https://..."}]}. Verify the URL resolves before recording it."""
+    before = knowledge._load_learned(_config().learned_dir, family) or {}
+    replaced = [k for k, _ in knowledge.replaced_leaves(before.get("data", {}), updates)]
     path = knowledge.save_learning(_config().learned_dir, family, updates, source)
-    return {"saved": str(path), "updated": _leaf_keys(updates)[:20]}
+    result: dict[str, Any] = {"saved": str(path), "updated": _leaf_keys(updates)[:20]}
+    if replaced:
+        result["replaced"] = replaced[:20]
+        result["hint"] = (
+            "the previous values are kept under superseded: in that file - if you "
+            "meant to ADD to a note, re-send it with the old text merged in"
+        )
+    return result
 
 
 # --------------------------------------------------------------------------

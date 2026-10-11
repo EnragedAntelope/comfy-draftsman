@@ -149,6 +149,13 @@ def _substitute_filename_tokens(value: str, now: datetime) -> str:
 # UI-only annotation nodes: never in object_info, single 'text' widget
 NOTE_TYPES = {"Note", "MarkdownNote"}
 
+# taught in set_widget errors rather than the edit_workflow docstring, which
+# is re-sent on every request
+_INDEX_HINT = (
+    'Set it by position: {{"op": "set_widget", "node_id": {node_id}, "index": i, '
+    '"value": ...}} - inspect_workflow lists widgets_values in order.'
+)
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
 )
@@ -902,11 +909,22 @@ class Workflow:
                 f"{node.type} has no widget '{input_name}'.\n"
                 f"Widgets: {real_widgets}.\n"
                 f"Synthetic control slots: {control_slots}. "
-                f"Use 'seed__control_after_generate' to set randomize/fixed/increment/decrement."
+                f"Use 'seed__control_after_generate' to set randomize/fixed/increment/decrement. "
+                f"A pack JS widget has no name here: {_INDEX_HINT.format(node_id=node_id)}"
             )
         if not isinstance(node.widgets_values, list):
             node.widgets_values[input_name] = value
             return
+        if not w.positional_mapping_plausible(
+            node.type, node.widgets_values, object_info, socket_names
+        ):
+            raise ValueError(
+                f"{node.type} #{node_id}: saved widgets don't line up with the schema "
+                f"(the pack's JS adds or reorders widgets). {_INDEX_HINT.format(node_id=node_id)}"
+            )
+        # values past the schema's slots are pack frontend state (or display
+        # text): the rebuild below only knows schema slots, so carry them over
+        tail = node.widgets_values[len(slots):]
         # Round-trip through the named form so that setting a dynamic combo's
         # main key rebuilds its sub-widget slots (seeded with the new option's
         # defaults) exactly as the ComfyUI frontend does, and a short array gets
@@ -918,7 +936,7 @@ class Workflow:
         named[input_name] = value
         node.widgets_values = w.named_to_widgets(
             node.type, named, object_info, socket_names
-        )
+        ) + tail
 
     def _primitive_widget_names(self, node: Node) -> tuple[str | None, set[str]]:
         """(mirrored widget name, accepted control-slot names) for a primitive."""
