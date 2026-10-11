@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import yaml
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.utilities.types import Image
 from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
 from PIL import Image as PILImage
 from pydantic import BaseModel, Field
@@ -58,11 +58,11 @@ from .session import Session
 # auto-approve safe calls. Read tools that query the live instance are
 # read-only + open-world; session-local reads are read-only + closed-world.
 # See docs/PERMISSIONS.md for the recommended Claude Code allowlist.
-_READ_INSTANCE = ToolAnnotations(readOnlyHint=True, openWorldHint=True, idempotentHint=True)
-_READ_LOCAL = ToolAnnotations(readOnlyHint=True, openWorldHint=False, idempotentHint=True)
-_EDIT_LOCAL = ToolAnnotations(readOnlyHint=False, openWorldHint=False, destructiveHint=False)
-_WRITE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=False)
-_DESTRUCTIVE_INSTANCE = ToolAnnotations(readOnlyHint=False, openWorldHint=True, destructiveHint=True)
+_READ_INSTANCE = ToolAnnotations(read_only_hint=True, open_world_hint=True, idempotent_hint=True)
+_READ_LOCAL = ToolAnnotations(read_only_hint=True, open_world_hint=False, idempotent_hint=True)
+_EDIT_LOCAL = ToolAnnotations(read_only_hint=False, open_world_hint=False, destructive_hint=False)
+_WRITE_INSTANCE = ToolAnnotations(read_only_hint=False, open_world_hint=True, destructive_hint=False)
+_DESTRUCTIVE_INSTANCE = ToolAnnotations(read_only_hint=False, open_world_hint=True, destructive_hint=True)
 
 class _State:
     config: Config | None = None
@@ -86,7 +86,7 @@ class _State:
 
 
 # INVARIANT: the lazy accessors below (_config/_client/_registry/_session/
-# _tracker) must stay SYNCHRONOUS. FastMCP dispatches tool calls concurrently on
+# _tracker) must stay SYNCHRONOUS. MCPServer dispatches tool calls concurrently on
 # one event loop, and a sync function body cannot be preempted mid-way - that is
 # the only reason "check None, then construct" is safe here without a lock. Add
 # an `await` inside one of them and two racing cold calls could each build a
@@ -95,7 +95,7 @@ class _State:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Close the lazily-created HTTP clients and stop the progress tracker on
     shutdown, so a clean exit doesn't leak 'unclosed client session' warnings or
     leave the websocket reconnect loop running."""
@@ -111,9 +111,10 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
                     await handle.close()
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "comfy-draftsman",
     lifespan=_lifespan,
+    version=__version__,
     instructions=(
         "Draft, repair, port, validate, run, and SAVE ComfyUI workflows against the "
         "user's local ComfyUI instance. The finished artifact is always an organized, "
@@ -217,8 +218,8 @@ async def _confirm(
     2. the user explicitly declines -> ``{prefix}_declined``
     3. the dialog was cancelled/dismissed (a client that never rendered it looks
        the same) -> ``{prefix}_not_confirmed``: NOT a refusal - ask in chat
-    4. client cannot elicit at all (capability not advertised, or
-       DRAFTSMAN_ELICITATION=off) -> ``{prefix}_confirmation_required`` carrying
+    4. client cannot elicit at all (capability not advertised, no back-channel
+       on the 2026-07-28 protocol, or DRAFTSMAN_ELICITATION=off) -> ``{prefix}_confirmation_required`` carrying
        ``fallback_hint``, the instructions for re-running once the user really
        has agreed - or, when ``fallback_hint`` is None, simply proceed.
 
@@ -2442,7 +2443,7 @@ async def view_output(
         data, fmt, width, height = downscale_image(data, max_dim)
     except ValueError as e:
         return {"error": str(e), "hint": "only image outputs can be viewed inline"}
-    # FastMCP serializes an Image only as a standalone return or a list element -
+    # MCPServer serializes an Image only as a standalone return or a list element -
     # a dict *containing* an Image gets repr'd into text and never renders. Return
     # the image block plus a sibling meta dict (same list form as run_workflow's
     # preview) so text-only models still get the dimensions/filename.
@@ -3259,7 +3260,7 @@ def _trim_published_surface() -> int:
 
     Two independent wins, both applied to the published tool surface:
 
-    **1. Docstring indentation.** FastMCP publishes ``fn.__doc__`` raw, and
+    **1. Docstring indentation.** MCPServer publishes ``fn.__doc__`` raw, and
     Python only strips a docstring's common leading whitespace at compile time
     from 3.13 onward. On 3.11/3.12 - and 3.11 is this package's declared floor -
     every description therefore ships its own source indentation, ~650 chars

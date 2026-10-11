@@ -243,7 +243,7 @@ async def test_search_nodes_detail_folds_everything_when_it_fits(
 async def _surface():
     tools = await server.mcp.list_tools()
     return tools, sum(
-        len(t.description or "") + len(json.dumps(t.inputSchema)) for t in tools
+        len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools
     )
 
 
@@ -270,11 +270,11 @@ async def test_the_handshake_block_stays_under_its_ceiling():
 
 @pytest.mark.asyncio
 async def test_the_injected_context_parameter_costs_nothing():
-    """FastMCP hides Context from the JSON schema. The spend gate's whole
+    """MCPServer hides Context from the JSON schema. The spend gate's whole
     token story depends on that being true rather than assumed."""
     tools, _ = await _surface()
     for tool in tools:
-        assert "ctx" not in (tool.inputSchema.get("properties") or {}), tool.name
+        assert "ctx" not in (tool.input_schema.get("properties") or {}), tool.name
 
 
 # --- gate payloads ------------------------------------------------------------
@@ -330,7 +330,7 @@ async def test_no_schema_carries_a_redundant_title():
             return any(titles(v) for v in node)
         return False
 
-    offenders = [t.name for t in tools if titles(t.inputSchema)]
+    offenders = [t.name for t in tools if titles(t.input_schema)]
     assert not offenders, f"schema titles came back for: {offenders}"
     assert server._trim_published_surface() == len(tools)
 
@@ -339,7 +339,7 @@ async def test_no_schema_carries_a_redundant_title():
 async def test_a_param_named_title_survives_the_title_strip():
     """The strip once deleted every key called "title" - including the parameter
     itself - so create_workflow published required:["title"] with no such property."""
-    tools = {t.name: t.inputSchema for t in await server.mcp.list_tools()}
+    tools = {t.name: t.input_schema for t in await server.mcp.list_tools()}
     assert "title" in tools["create_workflow"]["properties"]
     assert tools["create_workflow"]["required"] == ["title"]
     assert "title" in tools["import_workflow"]["properties"]
@@ -353,16 +353,16 @@ async def test_stripping_titles_did_not_break_argument_validation():
     """Validation runs off fn_metadata.arg_model, not the published schema. That
     separation is the reason stripping is safe, so prove it rather than assume:
     a bad argument must still be rejected."""
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     tool = server.mcp._tool_manager.get_tool("view_output")
     with pytest.raises(ToolError, match="max_dim"):
-        await tool.run({"max_dim": "not-an-int"})
+        await tool.run({"max_dim": "not-an-int"}, None)
 
 
 @pytest.mark.asyncio
 async def test_descriptions_carry_no_source_indentation():
-    """FastMCP publishes ``fn.__doc__`` raw, and only Python 3.13+ strips a
+    """MCPServer publishes ``fn.__doc__`` raw, and only Python 3.13+ strips a
     docstring's common leading whitespace at compile time. Without the cleandoc
     pass, every description ships its own source indentation on 3.11/3.12 - the
     versions most users are on, and 3.11 is this package's floor - and the

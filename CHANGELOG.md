@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.21.0 - MCP 2.x
+
+The server now runs on the MCP Python SDK 2.x. The 1.x line is maintenance-only, and
+clients are moving to the 2026-07-28 protocol, which only 2.x speaks.
+
+### Changed
+
+- Requires `mcp>=2.3,<3` (was `<2`). `MCPServer` replaces `FastMCP`; the tool
+  surface, tool names, arguments and results are unchanged.
+- The server reports its own version in the MCP handshake.
+
+### Behavior changes
+
+- **Minimum pydantic is now 2.12** (mcp 2.x requires it).
+- **Confirmation dialogs on the 2026-07-28 protocol** (paid API nodes, clearing
+  someone else's queued job, overwriting a saved workflow) fall back to the existing
+  ask-in-chat path: the tool returns `*_confirmation_required` and the explicit
+  confirm flag proceeds. On that protocol the SDK has no back-channel for a
+  mid-call dialog. Clients on the older handshake still get the dialog.
+
+### Not changed
+
+- The native 2026 elicitation flow (resolver-based `InputRequiredResult`) is not
+  adopted yet; see `docs/ARCHITECTURE.md` → Remaining TODOs.
+
 ## 0.20.0 - widget mapping, organize and learning fixes
 
 From a live Krea2 build session that logged ten problems. Each was reproduced on the

@@ -165,7 +165,7 @@ after itself stays silent, which is what keeps the prompt meaningful. It needs
 no new parameter because the condition is inferred from state draftsman already
 tracks.
 
-`Context` is FastMCP-injected and hidden from the JSON schema, so `ctx` costs
+`Context` is MCPServer-injected and hidden from the JSON schema, so `ctx` costs
 nothing on the wire - asserted, not assumed, in `test_round18_tokens.py`.
 
 ## Subgraphs (schema 1.0 `definitions.subgraphs`)
@@ -216,7 +216,7 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   one caller who asked for it. So the cheapest place to explain a new behavior
   is the response of the gate that fires, not the docstring everyone loads.
   `server._trim_published_surface()` runs at import, after the last `@mcp.tool`.
-  It does two things. It `inspect.cleandoc`s every description, because FastMCP
+  It does two things. It `inspect.cleandoc`s every description, because MCPServer
   publishes `fn.__doc__` raw and only Python 3.13+ strips docstring indentation
   at compile time - without this, 3.11/3.12 users pay ~650 chars of source
   indentation forever, and the surface measures differently per interpreter
@@ -272,7 +272,7 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   NotImplementedError.
 - **proxyWidgets** — removing an inner node may invalidate instance
   proxyWidgets overrides — a warning is returned in the op result.
-- **FastMCP image returns must be a bare `Image` or a list element** — a dict
+- **MCPServer image returns must be a bare `Image` or a list element** — a dict
   that *contains* an `Image` (e.g. `{"image": Image(...)}`) is repr'd into text
   and never renders. `view_output` and `run_workflow`'s inline preview both
   return the **list** form `[{"meta": {...}}, Image(...)]` (a sibling meta dict
@@ -857,9 +857,10 @@ Open:
   editor allows, not what the model needs - so still open.
 - **[OPEN] `refresh_node` / `sync_node_schema` to re-read a node's live schema after install.** Reported as Feature 1: installing a custom node pack mid-session leaves `get_node_info` / `search_nodes` serving the stale pre-install schema until the process restarts. A `refresh_node` tool (or `sync_node_schema` call) that re-fetches `/object_info` for one class — or invalidates the catalog cache — would close it without a restart. Large: needs a cache-invalidation contract in `comfy/catalog.py` and `server._object_info`, plus a scope decision (one class vs. whole doc). Deferred from round 26; validate against a live instance before implementing.
 - **[OPEN] `diff_workflow` to show what changed between two workflow revisions.** Reported as Nice-to-have 3: callers currently export → hand-diff JSON to see what moved. A `diff_workflow(a, b)` returning added/removed/changed nodes + edges (bounded, like the rest of the surface) would replace that. Deferred from round 26; design the output shape to stay under the tool-surface token ceiling.
-- **[OPEN] MCP 2.x migration (keep the `mcp>=1.10,<2` pin until then).** mcp 2.0.0 removed `mcp.server.fastmcp`, which `server.py` imports at module scope, so an unbounded pin means a fresh install resolves 2.x and cannot start at all (this shipped once as 0.15.0 with 729 passing tests and an unstartable server). Migration needs a fastmcp shim or a rewrite of the wiring layer; both wheel checks import `comfy_draftsman.server`, so any runtime pin whose major breaks a module-scope import needs a ceiling. Track the port, don't loosen the pin.
+- **[OPEN] Elicitation on the 2026-07-28 protocol.** mcp 2.x carries elicitation in an `InputRequiredResult` round-trip on that protocol, and `ctx.elicit` raises `NoBackChannelError` there, so `_confirm` takes its documented fallback (`*_confirmation_required` + the explicit confirm flag) even for an eliciting client. Pre-2026 handshakes (`initialize`, what clients send today) still get the dialog. The native path is a resolver (`Annotated[ElicitationResult[...], Resolve(fn)]` returning `Elicit(...)`), but each gate decides *whether* to ask deep inside the tool (paid nodes, foreign queue jobs, existing file), so it means lifting those checks into resolvers. Do it when a client negotiates 2026 by default.
 
 Recently closed:
+- **[DONE, 0.21.0] MCP 2.x port.** `mcp>=2.3,<3` (`MCPServer` replaces `FastMCP`; result and annotation fields are snake_case). The ceiling stays: a major can break a module-scope import, as 2.0.0 did to 0.15.0.
 - **[DONE, round 29 / 0.20.0] Widget-mapping plausibility, organize staging/knobs/sizes,
   learned-note history.** See `CHANGELOG.md` 0.20.0 and the Gotchas entries above.
   Also closed: **`api_node` detection verified live** (2026-10-10: partner classes
