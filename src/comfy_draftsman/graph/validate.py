@@ -144,6 +144,10 @@ def check_widget_value(
             f"'{input_name}' = {value!r} is not an available option on this "
             f"instance - {listing}{browse}. Only listed values run; "
             '"force": true overrides if you know better'
+            + (
+                "; file lists are cached - validate_workflow refreshes them if the file was just added"
+                if _looks_like_file_combo(choices) else ""
+            )
         )
     # widgetType, not the io type: a union like "FLOAT,INT" names no single
     # checkable kind, but its widgetType ("FLOAT") does

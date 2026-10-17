@@ -176,6 +176,55 @@ def _resolution_alignment_findings(
     return findings
 
 
+def _model_sampling_size_findings(
+    wf: Workflow, object_info: dict[str, Any]
+) -> list[dict[str, Any]]:
+    from .annotate import _is_canvas_node
+
+    canvases: set[tuple[int, int]] = set()
+    samplers: list[tuple[Node, tuple[int, int]]] = []
+    unknown_canvas = False  # a wired/unreadable latent size makes the latent ambiguous
+    for node in wf.nodes.values():
+        if node.mode in (MODE_MUTE, MODE_BYPASS):
+            continue
+        is_canvas = _is_canvas_node(node.type)
+        if not is_canvas and node.type != "ModelSamplingFlux":
+            continue
+        size: tuple[int, int] | None = None
+        if not any(
+            (slot := node.input_by_name(dim)) is not None and slot.link is not None
+            for dim in ("width", "height")
+        ):
+            try:
+                named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+            except (ValueError, KeyError):
+                named = {}
+            width, height = named.get("width"), named.get("height")
+            if type(width) is int and type(height) is int:
+                size = (width, height)
+        if is_canvas:
+            if size is None:
+                unknown_canvas = True
+            else:
+                canvases.add(size)
+        elif size is not None:
+            samplers.append((node, size))
+    if unknown_canvas or len(canvases) != 1:
+        return []
+    canvas_width, canvas_height = next(iter(canvases))
+    return [
+        _finding(
+            "model-sampling-size-mismatch",
+            f"ModelSamplingFlux #{node.id}: {width}x{height} but the latent is "
+            f"{canvas_width}x{canvas_height} - the shift schedule is computed "
+            "for the wrong resolution",
+            node.id,
+        )
+        for node, (width, height) in samplers
+        if (width, height) != (canvas_width, canvas_height)
+    ]
+
+
 def lint(
     wf: Workflow,
     object_info: dict[str, Any],
@@ -248,6 +297,7 @@ def lint(
     findings.extend(_output_behind_lazy_input(wf, object_info))
     findings.extend(_overlap_findings(wf))
     findings.extend(_resolution_alignment_findings(wf, object_info, learned_dir))
+    findings.extend(_model_sampling_size_findings(wf, object_info))
     return findings
 
 

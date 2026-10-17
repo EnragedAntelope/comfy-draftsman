@@ -912,7 +912,20 @@ async def create_workflow(title: str, template: str = "") -> dict[str, Any]:
         wf = Workflow.new()
     workflow_id = _session().create(wf, title=title)
     _persist(workflow_id)
-    return _summary(workflow_id, wf)
+    result = _summary(workflow_id, wf)
+    if template:
+        errors = [
+            f for f in validate(wf, await _object_info(refresh=True))
+            if f["level"] == "error"
+        ]
+        if errors:
+            capped = _cap_findings(errors)
+            result.update(
+                template_findings=capped,
+                **_subgraph_edit_hint(capped),
+                hint="the template does not validate here (missing model files or node classes) - list_models finds installed models, diagnose_workflow resolves missing nodes; swap values with set_widget (set_widget_in_definition inside a subgraph) or build flat",
+            )
+    return result
 
 
 @mcp.tool(annotations=_READ_INSTANCE)
@@ -1440,13 +1453,13 @@ def _apply_ops(
                         f"{class_type} takes no widgets at add time: connect it to "
                         "a widget input first (it then mirrors that socket's type), "
                         "then set_widget 'value' and, for a number/combo, "
-                        "'control_after_generate'; graph unchanged"
+                        "'control_after_generate'"
                     )
             elif class_type not in object_info:
                 raise ValueError(
                     f"unknown node class {class_type!r} - not installed on this "
                     "instance (search_nodes finds classes, resolve_missing_nodes "
-                    "finds packs); graph unchanged"
+                    "finds packs)"
                 )
             else:
                 # accept any widget that exists under some dynamic-combo
@@ -1454,8 +1467,7 @@ def _apply_ops(
                 slots = all_slot_names(class_type, object_info)
                 if bad := sorted(set(widgets) - set(slots)):
                     raise ValueError(
-                        f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
-                        "graph unchanged"
+                        f"{class_type} has no widget(s) {bad}; widgets: {slots}"
                     )
                 if not op.get("force"):
                     for name, value in widgets.items():
@@ -1464,7 +1476,7 @@ def _apply_ops(
                         )
                         if problem:
                             raise ValueError(
-                                f"{class_type}: {problem}; graph unchanged"
+                                f"{class_type}: {problem}"
                             )
             node = wf.add_node(class_type, object_info=object_info, title=op.get("title"))
             for name, value in widgets.items():
@@ -1828,12 +1840,14 @@ async def edit_workflow(
     except KeyError as e:
         return {
             "applied": applied,
+            **({"note": f"the {len(applied)} op(s) in 'applied' landed and were kept; the failing op and everything after it did not run"} if applied else {}),
             "error": f"unknown node id {e}",
             "hint": "inspect_workflow lists current node ids",
         }
     except ValueError as e:
         return {
             "applied": applied,
+            **({"note": f"the {len(applied)} op(s) in 'applied' landed and were kept; the failing op and everything after it did not run"} if applied else {}),
             "error": str(e),
             "hint": "get_node_info gives slot/widget names; the op schemas are in this tool's description",
         }
@@ -2163,6 +2177,12 @@ async def _run_sweep(
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
                 entry["files"] = files
+            if save_dir and res["status"] == "success":
+                saved, errs = await _relocate_outputs(_client(), res.get("outputs") or [], root)
+                if saved:
+                    entry["saved_paths"] = saved
+                if errs:
+                    entry["save_errors"] = errs
             if res["status"] == "timeout":
                 halt = "an earlier run timed out (it may still be running on ComfyUI)"
             elif time.monotonic() - started > _SWEEP_BUDGET_S:
@@ -2186,6 +2206,8 @@ async def _run_sweep(
         "runs": runs,
     }
     content: list[Any] = [out]
+    if any(r.get("files") for r in runs):
+        out["hint"] = "each run's files are LoadImage-ready refs ('name.png [output]'): set_widget a LoadImage image to one to reuse a render - no upload needed"
     if any(img is not None for r in grid for img, _ in r):
         ref_cell: tuple[PILImage.Image | None, str] | None = None
         if reference:
@@ -2446,6 +2468,7 @@ async def run_workflow(
                 f"inline image is a <={PREVIEW_MAX_DIM}px thumbnail of "
                 f"{image_items[0].get('filename')} - view_output(filename=..., "
                 "max_dim=None) for full size or other outputs"
+                "; LoadImage takes '<filename> [output]' as-is to reuse it"
             )
             return [result, Image(data=thumb, format=fmt)]
     return result
@@ -2816,6 +2839,8 @@ async def upload_image(
         uploaded = await client.upload_mask(data, name, ref, subfolder=subfolder, overwrite=overwrite)
     else:
         uploaded = await client.upload_image(data, name, subfolder=subfolder, overwrite=overwrite)
+    with contextlib.suppress(Exception):
+        await _object_info(refresh=True)
     served_name = uploaded.get("name", name)
     served_sub = uploaded.get("subfolder", "")
     return {
