@@ -858,6 +858,10 @@ def annotate(
         n.id for n in wf.nodes.values() if n.properties.get("draftsman") == NOTE_MARKER
     ]:
         wf.remove_node(nid)
+    # the relayout moves every node, so no old group box still fits - but a
+    # human's groups vanishing silently is a surprise, so name them in the report
+    generated = {title for _, title, _ in STAGES} | {"\U0001f9e0 Models", "📐 Image Size", "✍️ Prompts"}
+    own_groups = [g.title for g in wf.groups if g.title not in generated]
     wf.groups = []
 
     detail = knowledge.detect_family_detail(wf, object_info, learned_dir=learned_dir)
@@ -980,6 +984,11 @@ def annotate(
             "foreign_notes_parked": foreign_parked,
         },
     }
+    if own_groups:
+        report["groups_replaced"] = (
+            f"{own_groups}: the user's own groups no longer fit the new layout and "
+            "were replaced - tell them; re-import the saved workflow to undo"
+        )
     if family:
         report["family_matched_on"] = detail["matched_on"]
     else:

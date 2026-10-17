@@ -284,6 +284,8 @@ class Workflow:
         self._next_link_id = 1
         # populated by subgraph_as_workflow; restored by update_subgraph
         self._subgraph_meta: dict[str, Any] = {}
+        # link repairs from_ui made; import_workflow reports them once
+        self.import_notes: list[str] = []
 
     # --- construction ---
 
@@ -383,7 +385,39 @@ class Workflow:
             )
         wf._next_node_id = max(wf.nodes, default=0) + 1
         wf._next_link_id = max(wf.links, default=0) + 1
+        wf.import_notes = wf._repair_link_slots()
         return wf
+
+    def _repair_link_slots(self) -> list[str]:
+        """Re-point a link at the input that claims it (``inputs[i].link``) when
+        its ``target_slot`` disagrees - a hand-edited file that drops an input
+        shifts the later slots but leaves the link table stale. Every reader
+        skips an out-of-range slot, so the link vanished silently. A link no
+        input claims is reported, never guessed at."""
+        notes: list[str] = []
+        claimed: set[int] = set()
+        for node in self.nodes.values():
+            for idx, slot in enumerate(node.inputs):
+                link = self.links.get(slot.link) if slot.link is not None else None
+                if link is None or link.target_id != node.id:
+                    continue
+                claimed.add(link.id)
+                if link.target_slot != idx:
+                    notes.append(
+                        f"link {link.id} -> #{node.id}.{slot.name}: target_slot "
+                        f"{link.target_slot} fixed to {idx}"
+                    )
+                    link.target_slot = idx
+        for link in self.links.values():
+            target = self.nodes.get(link.target_id)
+            if link.id not in claimed and (
+                target is None or link.target_slot >= len(target.inputs)
+            ):
+                notes.append(
+                    f"link {link.id} #{link.origin_id}[{link.origin_slot}] -> "
+                    f"#{link.target_id} slot {link.target_slot}: no such input, ignored"
+                )
+        return notes
 
     @staticmethod
     def _is_api_connection(value: Any, node_ids: set[str]) -> bool:
@@ -517,7 +551,10 @@ class Workflow:
                         )
                     continue
                 slot_type = spec[0] if isinstance(spec[0], str) else "COMBO"
-                node.inputs.append(InputSlot(name=name, type=slot_type))
+                # a pack JS widget gets the widget-backed slot the frontend
+                # saves; its value stays out of widgets_values (pack JS state)
+                js_widget = name if w.is_unfed_custom_input(spec, object_info) else None
+                node.inputs.append(InputSlot(name=name, type=slot_type, widget_name=js_widget))
             out_names = schema.get("output_name") or schema.get("output") or []
             out_types = schema.get("output") or []
             for idx, out_type in enumerate(out_types):
@@ -567,6 +604,23 @@ class Workflow:
                 slot = target.inputs[link.target_slot]
                 if slot.link == lid:
                     slot.link = None
+
+    def disconnect(self, node_id: int, input_name: str) -> Link:
+        """Remove the link feeding one input; the socket itself stays."""
+        node = self.nodes[node_id]
+        slot = node.input_by_name(input_name)
+        if slot is None or slot.link is None or slot.link not in self.links:
+            raise ValueError(
+                f"node {node_id} ({node.type}) has no linked input '{input_name}'; "
+                f"linked: {[i.name for i in node.inputs if i.link is not None]}"
+            )
+        link = self.links.pop(slot.link)
+        slot.link = None
+        origin = self.nodes.get(link.origin_id)
+        if origin and link.origin_slot < len(origin.outputs):
+            out = origin.outputs[link.origin_slot]
+            out.links = [x for x in out.links if x != link.id]
+        return link
 
     def group_bounding_for(self, node_ids: list[int]) -> list[float]:
         """Bounding box enclosing exactly these nodes' real extents, with the
@@ -663,14 +717,24 @@ class Workflow:
                 # widget to an input is a visible change (the node grows an empty
                 # socket and stops accepting a typed value), so undo it
                 target.inputs.remove(in_slot)
+            bridge = ""
+            if out_slot.type == "STRING" and in_slot.type == "COMBO" and object_info:
+                # a generated string driving a combo needs a converter node -
+                # name the ones this instance has instead of leaving a search
+                bridges = [
+                    c for c in object_info
+                    if re.search(r"(string|text).{0,3}to.{0,3}combo", c, re.IGNORECASE)
+                ][:3]
+                if bridges:
+                    bridge = f" Bridge a STRING through {bridges} to feed a combo."
             raise ValueError(
                 f"type mismatch: {origin.type}.{out_slot.name} ({out_slot.type}) -> "
                 f"{target.type}.{target_input} ({in_slot.type}). ComfyUI rejects this "
                 "at queue time (return_type_mismatch) and then runs only the REST of "
                 f"the graph, so the failure is silent. To drive a {in_slot.type} "
                 "widget: set_widget it directly, or feed it a PrimitiveNode (it "
-                "mirrors the socket's own type and can carry control_after_generate). "
-                'Add "force": true to wire it anyway.'
+                "mirrors the socket's own type and can carry control_after_generate)."
+                f'{bridge} Add "force": true to wire it anyway.'
             )
         # a primitive takes its type from the socket it first feeds - do that
         # before the link is made, so the link records the resolved type

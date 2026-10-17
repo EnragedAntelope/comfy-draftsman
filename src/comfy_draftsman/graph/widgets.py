@@ -312,6 +312,29 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
     return isinstance(kind, str) and kind != "*" and name not in socket_names
 
 
+def is_unfed_custom_input(spec: Any, object_info: dict[str, Any]) -> bool:
+    """True for a bespoke io type that no installed node outputs. Nothing can be
+    wired into it, so on a freshly added node it can only be a pack's JS widget
+    (LoRA Manager's ``LORAS``/``AUTOCOMPLETE_TEXT_LORAS``, ``RANDOMIZER_CONFIG``):
+    ``add_node`` gives it the frontend's widget-backed slot instead of a bare
+    socket that validates as a blocking ``unconnected-input``."""
+    # ponytail: also matches a real socket whose producer pack isn't installed
+    # (Impact's IPADAPTER_PIPE); that slot is unwireable here either way
+    if is_widget_input(spec) or not isinstance(spec, list | tuple) or not spec:
+        return False
+    kind = spec[0]
+    if not isinstance(kind, str) or kind == "*" or _opts(spec).get("forceInput"):
+        return False
+    if is_v3_meta_type(kind) or autogrow_template(spec) is not None:
+        return False
+    wanted = {part.strip() for part in kind.split(",")}
+    return not any(
+        isinstance(out, str) and wanted & {part.strip() for part in out.split(",")}
+        for schema in object_info.values()
+        for out in schema.get("output") or []
+    )
+
+
 # --- dynamic combo helpers ---------------------------------------------------
 
 
