@@ -117,17 +117,18 @@ mcp = MCPServer(
     version=__version__,
     instructions=(
         "Draft, repair, port, validate, run, and SAVE ComfyUI workflows against the "
-        "user's local ComfyUI instance. The finished artifact is always an organized, "
-        "labeled workflow: run organize_workflow before save_workflow. Ground truth is "
-        "the live instance (search_nodes/get_node_info/list_models); templates "
-        "(list_templates) are the best starting points for current models. Batch "
+        "user's local ComfyUI instance. Run organize_workflow before save_workflow on a "
+        "graph you built; it re-lays out everything, so keep a user's hand-arranged "
+        "layout (place new nodes with set_pos). Ground truth is the live instance "
+        "(search_nodes/get_node_info/list_models); list_templates has the best starts "
+        "for current models. Batch "
         "get_node_info lookups (it takes a list) in ONE call. For a workflow already "
         "saved in ComfyUI, use list_workflows then import_workflow(name=...) - never "
         "ask for pasted JSON. get_model_guidance has tuned per-family settings; "
         "persist anything you research with record_learning. A GENERATED positive "
         "prompt (wildcards/concatenators) should pass through a Show Text node before "
-        "the encoder (lint: no-prompt-preview). When modernizing, spell out any "
-        "capability that would be LOST before dropping nodes - never silently."
+        "the encoder (lint: no-prompt-preview). When modernizing, name any capability "
+        "LOST before dropping nodes - never silently."
     ),
 )
 
@@ -1253,7 +1254,10 @@ async def import_workflow(
         }
     workflow_id = _session().create(wf, title=title or "imported")
     _persist(workflow_id)
-    return _summary(workflow_id, wf)
+    summary = _summary(workflow_id, wf)
+    if wf.import_notes:
+        summary["link_repairs"] = wf.import_notes[:_FINDINGS_CAP]
+    return summary
 
 
 @mcp.tool(annotations=_READ_LOCAL)
@@ -1288,14 +1292,16 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "add_node": ({"class_type"}, {"title", "widgets", "force", "ref"}),
     "remove_node": ({"node_id"}, set()),
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
+    "disconnect": ({"node_id", "input"}, set()),
     # exactly one of input/index - checked in _apply_ops
     "set_widget": ({"node_id", "value"}, {"input", "index", "force"}),
     "replace_in_widget": ({"node_id", "input", "old", "new"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
     "set_pos": ({"node_id", "pos"}, {"size"}),
+    "set_color": ({"node_id", "color"}, {"bgcolor"}),
     "add_group": ({"title", "node_ids"}, {"color"}),
-    "set_group": ({"group_id"}, {"title", "node_ids", "color"}),
+    "set_group": ({"group_id"}, {"title", "node_ids", "color", "bounding"}),
     "remove_group": ({"group_id"}, set()),
     "add_node_to_definition": (
         {"definition_id", "class_type"},
@@ -1470,6 +1476,13 @@ def _apply_ops(
         elif kind == "remove_node":
             wf.remove_node(int(op["node_id"]))
             applied.append(f"removed #{op['node_id']}")
+        elif kind == "disconnect":
+            link = wf.disconnect(int(op["node_id"]), op["input"])
+            touched.add(int(op["node_id"]))
+            applied.append(
+                f"disconnected #{link.origin_id}[{link.origin_slot}] -> "
+                f"#{op['node_id']}.{op['input']}"
+            )
         elif kind == "connect":
             from_output = op["from_output"]
             if isinstance(from_output, str) and from_output.isdigit():
@@ -1570,6 +1583,12 @@ def _apply_ops(
             wf.nodes[int(op["node_id"])].mode = int(op["mode"])
             touched.add(int(op["node_id"]))
             applied.append(f"mode #{op['node_id']} = {op['mode']}")
+        elif kind == "set_color":
+            node = wf.nodes[int(op["node_id"])]
+            node.color = op["color"]
+            node.bgcolor = op.get("bgcolor", node.bgcolor)
+            touched.add(node.id)
+            applied.append(f"colored #{node.id} {node.color}")
         elif kind == "set_pos":
             node_id = int(op["node_id"])
             node = wf.nodes[node_id]
@@ -1600,6 +1619,11 @@ def _apply_ops(
             if "node_ids" in op:
                 node_ids = [int(nid) for nid in op["node_ids"]]
                 group.bounding = wf.group_bounding_for(node_ids)
+            if "bounding" in op:
+                box = op["bounding"]
+                if not (isinstance(box, list | tuple) and len(box) == 4):
+                    raise ValueError(f"set_group: 'bounding' must be [x, y, w, h]; got {box!r}")
+                group.bounding = [float(v) for v in box]
             applied.append(f"updated group #{group.id} {group.title!r}")
         elif kind == "remove_group":
             group = _find_group(wf, int(op["group_id"]))
@@ -1766,21 +1790,22 @@ async def edit_workflow(
 
     - {"op": "add_node", "class_type": str, "title"?: str, "ref"?: str, "widgets"?: {name: value}}  # later ops may use a ref as a node id
     - {"op": "remove_node", "node_id": int}
-    - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}
+    - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}  # replaces a link
+    - {"op": "disconnect", "node_id": int, "input": str}
     - {"op": "set_widget", "node_id": int, "input": str | "index": int, "value": any}
     - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' must match once
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
 
-    All but replace_in_widget have a definition-scoped twin taking an extra "definition_id" for
+    All but replace_in_widget/disconnect have a definition-scoped twin taking an extra "definition_id" for
     subgraph edits: add_node_to_definition, remove_node_from_definition, and
-    connect/set_widget/set_title/set_mode_in_definition. A malformed op reports
-    its own required keys.
+    connect/set_widget/set_title/set_mode_in_definition. A malformed op lists
+    its keys.
 
-    Layout/group ops (no definition twin): set_pos {node_id, pos:[x,y], size?:[w,h]};
-    add_group {title, node_ids, color?}; set_group {group_id, title?, node_ids?,
-    color?}; remove_group {group_id} ('#N' in inspect_workflow). organize_workflow
-    re-lays out and re-groups, so run these after it.
+    Layout ops (no twin): set_pos {node_id, pos:[x,y], size?:[w,h]}; set_color
+    {node_id, color, bgcolor?}; add_group {title, node_ids, color?}; set_group
+    {group_id, title?, node_ids?, color?, bounding?:[x,y,w,h]}; remove_group
+    {group_id} ('#N' in inspect_workflow). organize_workflow redoes all layout.
 
     Slot/widget names come from get_node_info. Virtual classes: Note/MarkdownNote
     take one widget 'text'; Reroute/PrimitiveNode take none at add - connect a
@@ -1789,11 +1814,10 @@ async def edit_workflow(
 
     Ops apply in order; a failing op stops the batch (graph unchanged past that
     point). Widget values and link types are checked live - "force": true on
-    set_widget/add_node/connect overrides; on connect it also lets a
-    frontend-only input (no /object_info entry - rgthree switches, dynamic
-    collectors) be wired by creating the socket.
+    set_widget/add_node/connect overrides; on connect it also creates a
+    frontend-only input (rgthree switches, dynamic collectors).
 
-    Result is a compact delta; summary=true or inspect_workflow gives the full graph.
+    Result is a delta; summary=true gives the full graph.
     """
     wf = _wf(workflow_id)
     object_info = await _object_info()
@@ -1841,7 +1865,7 @@ async def organize_workflow(workflow_id: str) -> dict[str, Any]:
     """THE finishing step: auto-layout into pipeline stage bands, colored groups,
     human titles, green highlights on user-editable knobs, and markdown guidance
     notes (model-family aware, two registers: 'touch this' vs 'leave alone').
-    Run after wiring is done and before save_workflow. Idempotent.
+    Run after wiring, before save_workflow; replaces a hand-made layout. Idempotent.
 
     MUTATES the session workflow in place - the `applied` block in the result
     summarizes the layout/group/note changes; inspect_workflow or
@@ -1871,10 +1895,17 @@ async def validate_workflow(workflow_id: str) -> dict[str, Any]:
     required inputs connected. Fix errors before run_workflow."""
     findings = validate(_wf(workflow_id), await _object_info(refresh=True))
     capped = _cap_findings(findings)
+    errors = [f for f in findings if f["level"] == "error"]
     return {
-        "ok": not any(f["level"] == "error" for f in findings),
+        "ok": not errors,
         "findings": capped,
         **_subgraph_edit_hint(capped),
+        **(
+            {"note": "only headless errors: save_workflow saves as-is (no allow_invalid); "
+             "run_workflow needs the ComfyUI editor"}
+            if errors and all(f.get("headless") for f in errors)
+            else {}
+        ),
     }
 
 
@@ -2908,8 +2939,8 @@ async def save_workflow(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Save the workflow (UI format, with layout/groups/notes) into ComfyUI's
-    workflow browser + the session dir. Run organize_workflow first - this is the
-    deliverable. REFUSES to save with validation errors unless allow_invalid=True.
+    workflow browser + the session dir. Organize a graph you built first (not a
+    hand-arranged one). REFUSES to save with validation errors unless allow_invalid=True.
     Never overwrites by default: a taken name saves as '<name> (draftsman)'
     (result.renamed_from says so); overwrite=True replaces deliberately."""
     if ".." in name or any(sep in name for sep in ("/", "\\")):

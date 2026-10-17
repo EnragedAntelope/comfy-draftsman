@@ -319,7 +319,7 @@ def test_flatten_reports_missing_target_input(oi):
                 "widgets_values": [],
                 # only 2 inputs (slot 0 and 1), but inner link targets slot 5
                 "inputs": [
-                    {"name": "samples", "type": "LATENT", "link": 9},
+                    {"name": "samples", "type": "LATENT", "link": None},  # unclaimed: an input claiming it would win (frontend rule)
                     {"name": "vae", "type": "VAE", "link": None},
                 ],
                 "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [16]}],
@@ -1206,7 +1206,7 @@ def test_validate_warns_on_missing_inner_inputs(oi):
                 "widgets_values": [],
                 # only 2 inputs (slot 0 and 1), but inner link targets slot 5
                 "inputs": [
-                    {"name": "samples", "type": "LATENT", "link": 9},
+                    {"name": "samples", "type": "LATENT", "link": None},  # unclaimed: an input claiming it would win (frontend rule)
                     {"name": "vae", "type": "VAE", "link": None},
                 ],
                 "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [16]}],

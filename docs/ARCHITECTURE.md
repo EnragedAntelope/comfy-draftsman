@@ -765,6 +765,21 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   widget crashes the editor at queue time, so `null-widget-value` stays a save error).
 - **Organize treats a saved node size as a minimum** (`layout._fit_size`). A pack's
   JS-drawn widget can be hundreds of pixels taller than `estimate_size` predicts.
+- **A custom input type nothing outputs is a pack JS widget** (`widgets.is_unfed_custom_input`).
+  `/object_info` can't say which bespoke types a pack's JS renders as widgets
+  (`LORAS`, `AUTOCOMPLETE_TEXT_LORAS`, `RANDOMIZER_CONFIG`), but a type no installed
+  class outputs can't be wired, so `add_node` gives it the frontend's widget-backed
+  slot (`"widget": {"name": ...}`), not a bare socket that blocked save as
+  `unconnected-input`. Its value stays out of `widgets_values` (pack JS state; the
+  editor fills defaults for a short array). Known ceiling: a real socket whose
+  producer pack isn't installed (Impact's `IPADAPTER_PIPE`) gets the marker too.
+  A trimmed test fixture without the producer class trips this as well.
+- **A link belongs to the input that claims it.** The frontend draws and queues a link
+  from `inputs[i].link`; `link.target_slot` can go stale when a hand edit drops an
+  input. `Workflow.from_ui` re-points the slot and `import_workflow` reports each
+  repair under `link_repairs`; an unclaimed out-of-range link is reported, not guessed.
+- **A collapsed node shows only its title pill**, above `pos` (pos.y - 30), so the
+  overlap lint (`lint._visible_box`) ignores its expanded `size`.
 - **`classify(default=...)`.** The public default stays "sampling"; organize passes
   `""` and lets `_restage_by_graph` place undecided nodes by their consumers
   (consumer-first, so config chains like Pool -> Randomizer -> Loader propagate).

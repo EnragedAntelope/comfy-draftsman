@@ -217,6 +217,8 @@ def lint(
                 ):
                     continue
                 slot = node.input_by_name(name)
+                if slot is not None and slot.widget_name:
+                    continue  # validate's js-widget-input already reports it
                 if slot is None or slot.link is None:
                     findings.append(
                         _finding(
@@ -282,6 +284,18 @@ def _output_behind_lazy_input(
     return findings
 
 
+def _visible_box(n: Node) -> tuple[float, float, float, float]:
+    """What the canvas draws: a collapsed node keeps its expanded ``size`` but
+    shows only its title pill, which sits ABOVE ``pos`` (LiteGraph draws the
+    title bar at pos.y - 30) and is about as wide as its title text."""
+    x, y = n.pos[0], n.pos[1]
+    if n.flags.get("collapsed"):
+        # ponytail: ~8px per title character, not a font measurement
+        width = min(n.size[0], 8.0 * len(n.title or n.type) + 40.0)
+        return (x, y - 30.0, x + width, y)
+    return (x, y, x + n.size[0], y + n.size[1])
+
+
 def _overlap_findings(wf: Workflow) -> list[dict[str, Any]]:
     """Overlapping nodes make workflows unreadable - reported as ONE finding.
 
@@ -290,10 +304,7 @@ def _overlap_findings(wf: Workflow) -> list[dict[str, Any]]:
     the default position (i.e. anything built with edit_workflow and not yet
     organized) produced N*(N-1)/2 findings that all said the same thing.
     """
-    boxes = [
-        (n.id, (n.pos[0], n.pos[1], n.pos[0] + n.size[0], n.pos[1] + n.size[1]))
-        for n in wf.nodes.values()
-    ]
+    boxes = [(n.id, _visible_box(n)) for n in wf.nodes.values()]
     involved: set[int] = set()
     pairs = 0
     for i, (id_a, a) in enumerate(boxes):

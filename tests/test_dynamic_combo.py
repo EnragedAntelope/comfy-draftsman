@@ -183,6 +183,9 @@ def test_validate_no_false_unconnected_on_dynamic_combo(oi):
 
 
 def test_validate_flags_genuinely_unconnected_link_input(oi):
+    # the trimmed fixture omits the loader; without a producer DA3_MODEL would
+    # read as a pack JS widget (widgets.is_unfed_custom_input)
+    oi = {**oi, "LoadDA3Model": {"input": {}, "output": ["DA3_MODEL"]}}
     wf = Workflow.new()
     wf.add_node("DA3Inference", object_info=oi)  # da3_model + image unset
     errors = [f for f in validate(wf, oi) if f["code"] == "unconnected-input"]

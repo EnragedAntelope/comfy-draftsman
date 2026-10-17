@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.22.0 - LoRA Manager build feedback
+
+From two live sessions on a hand-arranged Krea2 workflow with LoRA Manager nodes.
+
+### Fixed
+
+- `add_node` gives an input whose custom type no installed node outputs (a pack JS
+  widget such as LoRA Manager's `LORAS` / `AUTOCOMPLETE_TEXT_LORAS`) the widget-backed
+  slot the editor saves, instead of a bare socket. Such nodes no longer need
+  `allow_invalid` to save.
+- `lint` no longer repeats validate's `js-widget-input` as `unconnected-input`.
+- `import_workflow` re-points a link whose `target_slot` disagrees with the input that
+  claims it (left behind when a hand edit removes an input), and lists each repair
+  under `link_repairs`. Before, the link was kept but every reader skipped it.
+- The overlap lint measures a collapsed node by its title pill, not its expanded size.
+
+### Added
+
+- `edit_workflow` ops: `disconnect {node_id, input}`, `set_color {node_id, color,
+  bgcolor?}`, and `bounding` on `set_group`.
+- A STRING -> COMBO type mismatch names the instance's string-to-combo bridge nodes.
+- `organize_workflow` reports the user's own groups it replaced (`groups_replaced`).
+- `validate_workflow` says when its only errors are headless (save needs no
+  `allow_invalid`).
+
+### Changed
+
+- Server instructions and the `save_workflow` / `organize_workflow` descriptions: organize
+  graphs you built; keep a user's hand-arranged layout.
+
+### Not changed
+
+- No "keep my groups" mode in `organize_workflow`: the relayout moves every node, so old
+  group boxes can't survive it. On a hand-arranged graph, skip organize instead.
+- The report that a force-created `lora_stack` socket saved without a type did not
+  reproduce: the saved file has `"type": "LORA_STACK"` (connect types it from the
+  origin output).
+
 ## 0.21.0 - MCP 2.x
 
 The server now runs on the MCP Python SDK 2.x. The 1.x line is maintenance-only, and
