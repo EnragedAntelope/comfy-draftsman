@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.23.0 - Qwen 2.1 poster session feedback
+
+### Fixed
+
+- `upload_image` refreshes object_info so edit-time LoadImage validation sees new
+  files. File-combo errors name `validate_workflow` as the refresh for external additions.
+- Partial `edit_workflow` failures say which earlier ops landed and were kept,
+  instead of claiming the graph was unchanged.
+- `create_workflow(template=...)` reports validation errors (model files or node classes
+  the instance lacks), with installed-alternative and subgraph-edit guidance; it does not
+  repair templates.
+
+### Added
+
+- Sweeps relocate each successful run's outputs into an explicit `save_dir`,
+  returning per-run `saved_paths` and any `save_errors`.
+- Sweep and run responses explain that LoadImage accepts `name.png [output]`
+  directly to reuse a render without uploading it.
+- Advisory `model-sampling-size-mismatch` lint for active ModelSamplingFlux nodes
+  whose literal resolution differs from an unambiguous latent canvas.
+
+### Not changed
+
+- Sweeps already refresh object_info before variant edits; a regression test guards it.
+- Unset `COMFYUI_MOUNT_DIR` is user configuration, correctly reported by `check_setup`.
+- No `upload_image(from_output=...)`: LoadImage already accepts output refs directly.
+- Optional references already use `set_mode` with mode 4 or `disconnect`.
+- No OCR/legibility lint: it needs a heavy new dependency and is model-specific.
+- Qwen 2.1 poster guidance stays in the local learned overlay, not the floor YAML.
+
 ## 0.22.0 - LoRA Manager build feedback
 
 From two live sessions on a hand-arranged Krea2 workflow with LoRA Manager nodes.

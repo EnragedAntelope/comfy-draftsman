@@ -191,6 +191,8 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 ## Gotchas (hard-won; do not relearn)
 
+- object_info is cached per process; file combos go stale when files are added -
+  upload_image refreshes, validate_workflow refreshes.
 - **Dynamic nodes** (text concatenators, switches...) declare dozens of
   optional widgets in `object_info` but the frontend serializes only the ones
   in use — a widgets_values shortfall there is normal. Never pad with `None`.
