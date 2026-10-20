@@ -43,7 +43,13 @@ from .graph.model import NOTE_TYPES, PRIMITIVE_TYPE, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.spend import api_nodes
 from .graph.validate import check_primitive_value, check_widget_value, validate
-from .graph.widgets import SYNTHETIC_SUFFIXES, all_slot_names, widgets_to_named
+from .graph.widgets import (
+    SYNTHETIC_SUFFIXES,
+    _iter_schema_inputs,
+    all_slot_names,
+    combo_choices,
+    widgets_to_named,
+)
 from .imaging import (
     CROP_MAX,
     INLINE_MAX,
@@ -1794,6 +1800,31 @@ def _apply_ops(
             )
 
 
+_MODEL_FILE_RE = re.compile(r"\.(safetensors|ckpt|sft|gguf|pt|pth|bin)$", re.IGNORECASE)
+
+
+def _names_unlisted_file(operations: Any, object_info: dict[str, Any]) -> bool:
+    """True when an op names a model file no cached combo lists. The cache is
+    per process, so a file downloaded mid-session is otherwise rejected."""
+    values: list[Any] = []
+    for op in operations if isinstance(operations, list) else []:
+        if isinstance(op, dict):
+            values.append(op.get("value"))
+            if isinstance(op.get("widgets"), dict):
+                values.extend(op["widgets"].values())
+    wanted = {v for v in values if isinstance(v, str) and _MODEL_FILE_RE.search(v)}
+    if not wanted:
+        return False
+    listed = {
+        choice
+        for schema in object_info.values()
+        for _, spec in _iter_schema_inputs(schema)
+        for choice in combo_choices(spec) or []
+        if isinstance(choice, str)
+    }
+    return not wanted <= listed
+
+
 @mcp.tool(annotations=_EDIT_LOCAL)
 async def edit_workflow(
     workflow_id: str, operations: list[dict[str, Any]], summary: bool = False
@@ -1833,6 +1864,8 @@ async def edit_workflow(
     """
     wf = _wf(workflow_id)
     object_info = await _object_info()
+    if _names_unlisted_file(operations, object_info):
+        object_info = await _object_info(refresh=True)  # a file downloaded since the cache was read
     applied: list[str] = []
     touched: set[int] = set()
     try:
@@ -2021,7 +2054,7 @@ _SWEEP_BUDGET_S = 3600.0  # ponytail: one fixed wall-clock cap for a whole sweep
 
 def _sweep_spec(
     sweep: Any,
-) -> tuple[list[dict[str, Any]], list[Any], list[list[int]], str] | str:
+) -> tuple[list[dict[str, Any]], list[Any], list[list[float]], str] | str:
     """Validated (variants, seeds, crops, reference), or an error string."""
     if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops", "reference"}:
         return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]], reference?: 'file [input]'}"
@@ -2042,13 +2075,27 @@ def _sweep_spec(
     if not isinstance(crops, list) or len(crops) > _SWEEP_MAX_CROPS:
         return f"crops must be a list of at most {_SWEEP_MAX_CROPS} [x0,y0,x1,y1] boxes"
     for box in crops:
-        if not (isinstance(box, list) and len(box) == 4 and all(isinstance(n, int) for n in box)):
-            return f"crop {box!r} is not [x0,y0,x1,y1] integers"
-        if not (0 < box[2] - box[0] <= CROP_MAX and 0 < box[3] - box[1] <= CROP_MAX):
+        if not (
+            isinstance(box, list)
+            and len(box) == 4
+            and all(isinstance(n, int | float) and not isinstance(n, bool) for n in box)
+        ):
+            return f"crop {box!r} is not [x0,y0,x1,y1]: pixel integers, or 0-1 fractions of the image"
+        if any(isinstance(n, float) for n in box):
+            if not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1):
+                return f"crop {box!r}: a fractional box needs 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1"
+        elif not (0 < box[2] - box[0] <= CROP_MAX and 0 < box[3] - box[1] <= CROP_MAX):
             return f"crop {box!r}: each side must be 1-{CROP_MAX}px (crops are shown 1:1, never scaled)"
     if len(variants) * len(seeds) > _SWEEP_MAX_RUNS:
         return f"{len(variants)} variants x {len(seeds)} seeds exceeds {_SWEEP_MAX_RUNS} runs - split it"
     return variants, seeds, crops, reference
+
+
+def _sampling_cached(res: dict[str, Any], api: dict[str, Any]) -> bool:
+    """Pops the client's cached_nodes; True when ComfyUI reused a sampler's
+    cached result, so elapsed_s timed only the nodes after it."""
+    cached = res.pop("cached_nodes", None) or []
+    return any("sampler" in str(api.get(nid, {}).get("class_type", "")).lower() for nid in cached)
 
 
 def _output_ref(item: dict[str, Any]) -> str:
@@ -2140,7 +2187,8 @@ async def _run_sweep(
     extra_data = {"api_key_comfy_org": _config().comfy_api_key} if _config().comfy_api_key else None
     runs: list[dict[str, Any]] = []
     grid: list[list[tuple[PILImage.Image | None, str]]] = []
-    crop_grid: list[list[tuple[PILImage.Image | None, str]]] = []
+    # one list per crop box: each box gets its own sheet comparing every run 1:1
+    crop_cells: list[list[tuple[PILImage.Image | None, str]]] = [[] for _ in crops]
     halt: str | None = None
     started = time.monotonic()
     for label, api, problem in prepared:
@@ -2175,6 +2223,8 @@ async def _run_sweep(
             if res.get("prompt_id"):
                 _record_submission(res["prompt_id"], workflow_id)
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
+            if _sampling_cached(res, run_api):
+                entry["sampling_cached"] = True  # elapsed_s timed only what ran after it
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
                 entry["files"] = files
             if save_dir and res["status"] == "success":
@@ -2196,10 +2246,12 @@ async def _run_sweep(
                 except Exception:
                     image = None
             secs = f" - {entry['elapsed_s']}s" if entry.get("elapsed_s") is not None else ""
+            if entry.get("sampling_cached"):
+                secs = " - cached"
             row.append((image, f"{tag}{secs}" if image else f"{tag}: {res['status']}"))
-            if crops:
-                tiles = crop_tiles(image, crops) if image else [None] * len(crops)
-                crop_grid.append([(t, f"{tag} c{j + 1}") for j, t in enumerate(tiles)])
+            tiles = crop_tiles(image, crops) if image else [None] * len(crops)
+            for j, tile in enumerate(tiles):
+                crop_cells[j].append((tile, tag))
         grid.append(row)
     out: dict[str, Any] = {
         "status": "success" if all(r.get("status") == "success" for r in runs) else "partial",
@@ -2235,20 +2287,27 @@ async def _run_sweep(
         if return_preview:
             data, fmt, _, _ = downscale_image(to_png(sheet), INLINE_MAX)
             content.append(Image(data=data, format=fmt))
-    if crop_grid and any(t is not None for r in crop_grid for t, _ in r):
-        csheet = contact_sheet(crop_grid, None)
-        cpath = root / f"crops-{stamp}.png"
+    oversized: list[str] = []
+    for j, cells in enumerate(crop_cells):
+        if not any(t is not None for t, _ in cells):
+            continue
+        # wrapped square-ish, not one row per run: 24 runs in a column was unviewable
+        ncols = math.ceil(math.sqrt(len(cells)))
+        csheet = contact_sheet([cells[i : i + ncols] for i in range(0, len(cells), ncols)], None)
+        cpath = root / f"crops-{stamp}-c{j + 1}.png"
         cpath.write_bytes(to_png(csheet))
-        out["crop_sheet"] = str(cpath)
+        out.setdefault("crop_sheets", []).append(str(cpath))
         if not return_preview:
-            pass
-        elif max(csheet.size) <= INLINE_MAX:
+            continue
+        if max(csheet.size) <= INLINE_MAX:
             content.append(Image(data=to_png(csheet), format="png"))
         else:
-            out["crop_hint"] = (
-                f"crop sheet is {csheet.width}x{csheet.height}px - too large to show inline at 1:1; "
-                "open the file, or use fewer variants/seeds/crops"
-            )
+            oversized.append(f"c{j + 1} {csheet.width}x{csheet.height}px")
+    if oversized:
+        out["crop_hint"] = (
+            f"crop sheet(s) {', '.join(oversized)} too large to show inline at 1:1; open the "
+            "file, or use fewer variants/seeds or smaller crops"
+        )
     return content if len(content) > 1 else out
 
 
@@ -2271,7 +2330,7 @@ async def run_workflow(
     (data_outputs: generated text, paths a save node wrote), and an inline preview
     thumbnail so you can SEE the result (view_output fetches full size).
     wait=False returns {status: queued, prompt_id} - poll get_run_status. Prove a
-    workflow works before saving/delivering.
+    workflow works before saving.
 
     return_preview=False (text-only caller): no inline images, sweeps included; a
     file path comes back if save_dir/COMFYUI_MOUNT_DIR is set.
@@ -2294,8 +2353,8 @@ async def run_workflow(
 
     sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]],reference?:
     "file [input]"}: each variant (ops on a copy) x seed; returns a contact sheet
-    (reference = first cell), 1:1 crop sheet, per-run elapsed_s/files. <=24 runs,
-    wait=True; crops <=512px.
+    (reference = first cell), 1:1 crop sheets, per-run elapsed_s/files. <=24 runs,
+    wait=True; crops <=512px or 0-1 floats.
 
     LONG RENDERS: a timeout cancels your wait, not the job. wait=False, front=False,
     poll get_run_status(prompt_id) to success/error/partial, then save_output;
@@ -2433,6 +2492,8 @@ async def run_workflow(
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
     _record_submission(result["prompt_id"], workflow_id)
     result.update(warn)
+    if _sampling_cached(result, api) and "elapsed_s" in result:
+        result["elapsed_note"] = "sampling was reused from ComfyUI's cache - elapsed_s excludes it"
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
     # relocating/previewing whatever DID render, but downgrade to "partial" so the
     # dropped outputs aren't mistaken for a clean run.
@@ -3193,6 +3254,11 @@ async def record_learning(family: str, updates: dict[str, Any], source: str) -> 
     each file - it never invents a URL, so this is the only way one appears:
     {"sources": [{"match": ["mymodel_v1.safetensors"], "what": "checkpoint",
     "url": "https://..."}]}. Verify the URL resolves before recording it."""
+    if problems := knowledge.shape_errors(updates):
+        return {
+            "error": "nothing saved - " + "; ".join(msg for _, msg in problems[:10]),
+            "hint": "get_model_guidance shows the shape of an existing family",
+        }
     before = knowledge._load_learned(_config().learned_dir, family) or {}
     replaced = [k for k, _ in knowledge.replaced_leaves(before.get("data", {}), updates)]
     path = knowledge.save_learning(_config().learned_dir, family, updates, source)

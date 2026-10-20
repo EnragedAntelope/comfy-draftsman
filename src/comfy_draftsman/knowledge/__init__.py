@@ -81,6 +81,67 @@ def _load_learned(learned_dir: Path | str | None, family: str) -> dict[str, Any]
     return yaml.safe_load(path.read_text(encoding="utf-8")) or None
 
 
+# Top-level guidance keys code reads, and the type each must have. Unknown keys
+# are free-form (only get_model_guidance shows them).
+_TOP_SHAPES: dict[str, type | tuple[type, ...]] = {
+    "display_name": str, "loader": str, "latent_node": str, "research": str,
+    "multiple_of": int, "notes": dict, "sampling": dict, "techniques": dict,
+    "detect": dict, "hardware": dict, "variants": dict, "loader_nodes": dict,
+    "components": dict, "avoid_nodes": dict, "sources": list, "resolutions": (list, dict),
+}
+# children of these maps must all have one type (sampling has exceptions below)
+_CHILD_SHAPES: dict[str, type] = {
+    "notes": str, "sampling": dict, "techniques": dict, "variants": dict,
+    "loader_nodes": dict, "avoid_nodes": str,
+}
+_SAMPLING_LISTS = {"samplers", "schedulers"}
+_SAMPLING_STRINGS = {"sampler", "scheduler", "notes"}  # no knob is named notes
+
+
+def _type_name(kind: type | tuple[type, ...]) -> str:
+    kinds = kind if isinstance(kind, tuple) else (kind,)
+    return " or ".join({"str": "string", "dict": "mapping"}.get(k.__name__, k.__name__) for k in kinds)
+
+
+def shape_errors(data: Any) -> list[tuple[str, str]]:
+    """(field path, problem) for every field of a guidance block whose type the
+    readers (organize notes, knob tables, port, lint) can't handle - a string
+    ``notes`` or a dict ``sampler`` crashed organize_workflow outright."""
+    if not isinstance(data, dict):
+        return [("", "updates must be a mapping")]
+    errors: list[tuple[str, str]] = []
+    for key, value in data.items():
+        want = _TOP_SHAPES.get(key)
+        if want is None:
+            continue
+        if not isinstance(value, want) or isinstance(value, bool):
+            errors.append((key, f"{key} must be a {_type_name(want)}"))
+            continue
+        child = _CHILD_SHAPES.get(key)
+        if isinstance(value, dict) and child is not None:
+            for name, item in value.items():
+                if key == "sampling" and name in _SAMPLING_LISTS:
+                    ok, shown = isinstance(item, list) and all(isinstance(i, str) for i in item), "list of strings"
+                elif key == "sampling" and name in _SAMPLING_STRINGS:
+                    ok, shown = isinstance(item, str), "string"
+                else:
+                    ok, shown = isinstance(item, child), _type_name(child)
+                if not ok:
+                    hint = ' (e.g. {"default": 3})' if key == "sampling" and shown == "mapping" else ""
+                    errors.append((f"{key}.{name}", f"{key}.{name} must be a {shown}{hint}"))
+                elif key == "techniques" and isinstance(item, dict) and not isinstance(item.get("note", ""), str):
+                    errors.append((f"{key}.{name}", f"techniques.{name}.note must be a string"))
+        if key == "detect":
+            patterns = value.get("checkpoint_patterns", [])
+            if not (isinstance(patterns, list) and all(isinstance(p, str) for p in patterns)):
+                errors.append((key, "detect.checkpoint_patterns must be a list of strings"))
+        if key == "sources" and not all(
+            isinstance(s, dict) and isinstance(s.get("match"), list) for s in value
+        ):
+            errors.append((key, "sources must be a list of {match: [filename], what, url}"))
+    return errors
+
+
 def list_families(learned_dir: Path | str | None = None) -> list[str]:
     names = set(_load_floor())
     if learned_dir is not None:
@@ -113,7 +174,19 @@ def get_guidance(
         raise KeyError(family)
     data = copy.deepcopy(floor.get(family, {"family": family}))
     if learned:
-        deep_merge(data, learned.get("data", {}))
+        overlay = learned.get("data", {}) or {}
+        # a file written before record_learning checked shapes: drop the bad
+        # fields (a whole section, or one child of it) rather than crash every
+        # reader of this family
+        overlay = copy.deepcopy(overlay)
+        for path, _ in shape_errors(overlay):
+            key, _, child = path.partition(".")
+            section = overlay.get(key)
+            if child and isinstance(section, dict):
+                section.pop(child, None)
+            else:
+                overlay.pop(key, None)
+        deep_merge(data, overlay)
         data["learned_sources"] = learned.get("sources", [])
         # before the variant overlay: a variant's own sampler list must still win
         _fold_singular_choices(data.get("sampling"))

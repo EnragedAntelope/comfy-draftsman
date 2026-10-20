@@ -430,6 +430,15 @@ class ComfyClient:
         }
         if (elapsed := self._elapsed_s(history)) is not None:
             result["elapsed_s"] = elapsed
+        cached = [
+            str(node)
+            for message in (history.get("status") or {}).get("messages") or []
+            if isinstance(message, list | tuple) and len(message) == 2
+            and message[0] == "execution_cached" and isinstance(message[1], dict)
+            for node in message[1].get("nodes") or []
+        ]
+        if cached:
+            result["cached_nodes"] = cached  # popped by the server; see _sampling_cached
         if data_outputs:
             # non-file return values (generated text, written paths, counts) -
             # omitted entirely when empty so the common case costs nothing

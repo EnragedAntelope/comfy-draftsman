@@ -1,0 +1,38 @@
+family: moss_image
+display_name: MOSS-Image
+# Native ComfyUI support (comfy/supported_models.py MOSSImage): sampling
+# multiplier 1.0 and shift 5.0, Flux2 latent format. The multiplier is why
+# ModelSamplingSD3 (hardcoded multiplier 1000) breaks it.
+detect:
+  checkpoint_patterns: ["moss_image", "moss-image", "mossimage"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3.5 9B (CLIPLoader, type=moss_image)"]
+  vae: "flux2-vae.safetensors (the small flux2 VAE also works)"
+sampling:
+  cfg: {default: 3}
+  steps: {default: 30}
+  samplers: [dpmpp_2m_sde, er_sde, res_2s]
+  schedulers: [beta, simple]
+avoid_nodes:
+  ModelSamplingSD3: >-
+    sets the sampling multiplier to 1000 on a model whose native multiplier is
+    1.0, so every render is pure noise (the official MOSS repo workflow uses it
+    anyway). Use ModelSamplingAuraFlow (multiplier 1.0) to change shift, or no
+    shift node at all - the default shift is already 5.
+notes:
+  loaders: >-
+    MOSS-Image loads as three parts: the diffusion model (UNETLoader), a qwen3.5
+    9B text encoder (CLIPLoader with type=moss_image) and the flux2 VAE. Never
+    use ModelSamplingSD3 on it (pure noise); ModelSamplingAuraFlow changes shift.
+  sampling: >-
+    Tested 2026-10: dpmpp_2m_sde + beta, CFG 3, 30 steps. Render at 2 MP or more
+    (at 1 MP hands around objects fuse) and 3.5-4 MP for wide or group shots so
+    small faces resolve. The SFT model shows faint stripes in smooth areas;
+    DeBand fine-tunes reduce them.
+  latent: EmptyFlux2LatentImage makes the latent (Flux2 latent format).
+research: >-
+  Floor last reviewed 2026-10. Sources: https://github.com/OpenMOSS/MOSS-Image ;
+  ComfyUI comfy/supported_models.py MOSSImage (multiplier 1.0, shift 5.0);
+  comfy_extras/nodes_model_advanced.py ModelSamplingSD3 (multiplier 1000);
+  local sampler/CFG/resolution sweeps 2026-10-18.

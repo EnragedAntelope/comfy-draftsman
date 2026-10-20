@@ -96,11 +96,28 @@ def contact_sheet(
     return sheet
 
 
-def crop_tiles(img: PILImage.Image, boxes: list[list[int]]) -> list[PILImage.Image | None]:
+def _pixel_box(box: list[float], width: int, height: int) -> tuple[int, int, int, int]:
+    """Pixel box for an int (pixel) or float (fraction of the image) box. A
+    fractional box keeps its centre but is capped at CROP_MAX per side, so the
+    same box tracks the subject across resolutions and still shows 1:1."""
+    if not any(isinstance(n, float) for n in box):
+        return int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    edges = []
+    for lo, hi, size in ((box[0], box[2], width), (box[1], box[3], height)):
+        a, b = round(lo * size), round(hi * size)
+        if b - a > CROP_MAX:
+            a = (a + b - CROP_MAX) // 2
+            b = a + CROP_MAX
+        edges.append((a, b))
+    return edges[0][0], edges[1][0], edges[0][1], edges[1][1]
+
+
+def crop_tiles(img: PILImage.Image, boxes: list[list[float]]) -> list[PILImage.Image | None]:
     """Cut each [x0, y0, x1, y1] out of the full-resolution image, unscaled.
     A box that falls outside the image gives None rather than a bad tile."""
     tiles: list[PILImage.Image | None] = []
-    for x0, y0, x1, y1 in boxes:
+    for raw in boxes:
+        x0, y0, x1, y1 = _pixel_box(raw, img.width, img.height)
         box = (max(x0, 0), max(y0, 0), min(x1, img.width), min(y1, img.height))
         tiles.append(img.crop(box) if box[2] > box[0] and box[3] > box[1] else None)
     return tiles

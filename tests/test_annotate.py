@@ -104,7 +104,7 @@ def test_notes_generated_with_model_aware_guidance(txt2img, object_info):
     assert "CFG" in all_text  # sampling guidance present
     assert "SDXL" in all_text  # family detected from checkpoint name
     # the two registers
-    assert "👇" in all_text or "touch" in all_text.lower()
+    assert "here." in all_text  # the change-this register, now plain text
     # ...and the sampling note quotes the family as a REFERENCE - never the
     # graph's own values as "tuned ... leave these alone"
     assert "Family reference" in all_text or "base reference" in all_text
@@ -173,18 +173,18 @@ def test_lint_flags_orphan_node(txt2img, object_info):
 
 
 def test_models_group_title_no_lora(txt2img, object_info):
-    """Workflow with no LoRA loader gets '🧠 Models' (no 'LoRA' in title)."""
+    """Workflow with no LoRA loader gets 'Models' (no 'LoRA' in title)."""
     wf, _ = txt2img
     annotate(wf, object_info)
     model_groups = [g for g in wf.groups if "model" in g.title.lower()]
     assert model_groups, "no models group found"
     for g in model_groups:
         assert "lora" not in g.title.lower(), f"expected no LoRA in title, got '{g.title}'"
-        assert g.title == "🧠 Models"
+        assert g.title == "Models"
 
 
 def test_models_group_title_with_lora(txt2img, object_info):
-    """Workflow with a LoRA loader gets '🧠 Models & LoRAs' title."""
+    """Workflow with a LoRA loader gets 'Models & LoRAs' title."""
     wf, ids = txt2img
     lora = wf.add_node("LoraLoader", object_info=object_info)
     wf.connect(ids["ckpt"], "MODEL", lora.id, "model")

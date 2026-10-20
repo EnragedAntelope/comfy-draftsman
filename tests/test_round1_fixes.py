@@ -133,8 +133,8 @@ def test_prompt_role_positive_through_zeroout(object_info):
 def test_title_nodes_labels_turbo_pattern(object_info):
     wf, pos, zero = _turbo_graph(object_info)
     _title_nodes(wf, object_info)
-    assert pos.title == "✅ Positive Prompt"
-    assert zero.title == "🚫 Negative (zeroed)"
+    assert pos.title == "Positive Prompt"
+    assert zero.title == "Negative (zeroed)"
 
 
 def test_prompt_role_direct_negative(object_info):

@@ -740,6 +740,11 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   user is looking at. Seeds are applied to the API graph (every INT input literally
   named `seed`/`noise_seed`), not the workflow, for the same reason. Crop tiles are
   capped at 512 px per side and never rescaled: the point of a crop is the 1:1 pixels.
+  A box with any float is a 0-1 fraction of each image (`imaging._pixel_box`), so it
+  tracks the subject across resolutions; it is capped at 512 px around its centre.
+  Each box gets its own square-ish sheet, since one row per run was unviewably tall.
+  A run whose sampler came from ComfyUI's cache (`execution_cached`) is marked
+  `sampling_cached`, because its `elapsed_s` timed only the nodes after the sampler.
 - **The session store writes through.** `server._persist` runs after every mutating
   tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
   because the MCP server is a per-conversation process and an in-memory-only workflow
@@ -760,6 +765,15 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `widget-layout-unmapped` error and no per-slot findings; by-name `set_widget` refuses
   it and points at `index`. Surplus values that map plausibly are pack state and are
   carried through a by-name set (`model.set_widget` appends the old tail).
+- **A saved widget-name list beats position.** LoRA Manager's JS writes
+  `properties.__lm_widget_ids`, the exact name of each `widgets_values` entry (a
+  hidden autocomplete-meta dict comes first). `widgets.saved_widget_names` trusts it
+  only when it is a list of strings as long as the values; then `set_widget` writes
+  by that name, validate skips the positional count/drift checks, and `to_api` takes
+  those values for declared inputs, wrapping a list as `{"__value__": [...]}` the way
+  the frontend does (ComfyUI would read a bare list as a link). A freshly added LM
+  node has no such list, so it still stops loudly: guessing the pack's JS state is
+  worse than the LoRA Text Loader workaround.
 - **`headless: true` findings block runs, not saves.** `js-widget-input` and
   `widget-layout-unmapped` mean the raw API can't carry the node, while the editor can;
   `save_workflow` filters them out of its gate, `run_workflow` and the sweep do not.

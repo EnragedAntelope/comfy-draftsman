@@ -538,8 +538,14 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
 
         socket_names = {slot.name for slot in node.inputs}
         slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
+        saved_names = w.saved_widget_names(node.properties, node.widgets_values) or []
         unmapped = False
-        if isinstance(node.widgets_values, list) and len(node.widgets_values) != len(slots):
+        # the pack recorded every value's name: positions can't drift or misalign
+        if (
+            not saved_names
+            and isinstance(node.widgets_values, list)
+            and len(node.widgets_values) != len(slots)
+        ):
             # dynamic nodes (text concatenators, switches...) declare dozens of
             # optional widgets in their schema but the frontend serializes only
             # the ones in use - a shortfall there is normal, not drift
@@ -616,7 +622,9 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
         # of a dynamic combo's chosen option - so their values get validated too
         specs = w.widget_specs(node.type, object_info, node.widgets_values, socket_names)
         named = w.widgets_to_named(node.type, node.widgets_values, object_info, socket_names)
-        if unmapped:
+        if saved_names:
+            named = {n: v for n, v in zip(saved_names, node.widgets_values, strict=True) if n in specs}
+        elif unmapped:
             named = {}
         for name, value in named.items():
             if value is None and not name.endswith(w.SYNTHETIC_SUFFIXES):
@@ -730,6 +738,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 if finding is not None:
                     findings.append(finding)
                 continue
+            if slot is not None and slot.link is None and name in saved_names:
+                continue  # to_api sends the value the pack recorded by name
             if slot is not None and slot.link is None and slot.widget_name:
                 # a custom-typed input the node exposes as a widget-backed slot
                 # (carries a `widget` marker): its value is pack-specific frontend

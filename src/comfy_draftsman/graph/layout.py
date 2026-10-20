@@ -42,7 +42,9 @@ BAND_WRAP_W = 900.0  # a stage's columns wrap into rows past this width
 PREVIEW_RESERVE_H = 320.0  # image thumbnail on PreviewImage/SaveImage/...
 PREVIEW_MIN_W = 340.0
 TEXT_PREVIEW_RESERVE_H = 150.0  # generated text on Show Text-style nodes
-_TEXT_DISPLAY_RE = re.compile(r"show.?text|display.?text|show.?anything", re.IGNORECASE)
+_TEXT_DISPLAY_RE = re.compile(
+    r"show.?text|display.?text|show.?anything|preview.?any", re.IGNORECASE
+)
 
 # widget names whose nodes want extra width for editing comfort
 _TEXTY_WIDGETS = {"text", "prompt", "wildcard_text", "populated_text", "string"}
