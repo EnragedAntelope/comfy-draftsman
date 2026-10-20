@@ -95,14 +95,14 @@ def test_custom_titles_upstream_of_positive_prompt_survive(object_info):
     _title_nodes(wf, object_info)
     assert dp1.title == "🍔 Cuisine Bank"  # human title, never clobbered
     assert dp2.title is None  # distant fragment, not a prompt source
-    assert enc.title == "✅ Positive Prompt"  # the actual encoder gets the role
+    assert enc.title == "Positive Prompt"  # the actual encoder gets the role
 
 
 def test_draftsman_generic_title_is_still_refreshable(object_info):
     wf, _dp1, _dp2, _concat, enc = _prompt_chain(object_info)
-    enc.title = "✅ Positive Prompt"  # from a previous organize pass
+    enc.title = "✅ Positive Prompt"  # legacy emoji title from an older organize pass
     _title_nodes(wf, object_info)
-    assert enc.title == "✅ Positive Prompt"
+    assert enc.title == "Positive Prompt"
 
 
 def test_custom_title_on_direct_prompt_source_survives(object_info):

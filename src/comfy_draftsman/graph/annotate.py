@@ -41,15 +41,22 @@ STAGES: list[tuple[str, str, str]] = [
     # machinery (loaders, conditioning wiring) most runs never touch. Data
     # still flows strictly left to right: inputs -> prompt_build ->
     # conditioning (models also feeds conditioning + sampling directly).
-    ("inputs", "📥 Inputs", "#88553d"),
-    ("prompt_build", "✍️ Prompt Building", "#3d5c47"),
-    ("models", "🧠 Models & LoRAs", "#3f5159"),
-    ("conditioning", "🔌 Conditioning", "#4a3d59"),
-    ("sampling", "🎛️ Sampling", "#42425c"),
-    ("post", "✨ Post-Processing", "#5c5029"),
-    ("output", "💾 Output", "#653d3d"),
+    ("inputs", "Inputs", "#88553d"),
+    ("prompt_build", "Prompt Building", "#3d5c47"),
+    ("models", "Models & LoRAs", "#3f5159"),
+    ("conditioning", "Conditioning", "#4a3d59"),
+    ("sampling", "Sampling", "#42425c"),
+    ("post", "Post-Processing", "#5c5029"),
+    ("output", "Output", "#653d3d"),
 ]
 _STAGE_INDEX = {key: i for i, (key, _, _) in enumerate(STAGES)}
+# group titles organize writes besides STAGES', and the emoji forms releases
+# before 0.24 wrote - still ours to replace on a re-organize
+_EXTRA_GROUP_TITLES = {"Models", "Image Size", "Prompts"}
+_LEGACY_GROUP_TITLES = {
+    "📥 Inputs", "✍️ Prompt Building", "🧠 Models & LoRAs", "🔌 Conditioning",
+    "🎛️ Sampling", "✨ Post-Processing", "💾 Output", "🧠 Models", "📐 Image Size", "✍️ Prompts",
+}
 
 _INPUT_CLASSES = {"LoadImage", "LoadImageMask", "LoadAudio", "LoadVideo", "VHS_LoadVideo"}
 _POST_HINTS = ("detailer", "upscale", "facerestore", "interpolat", "rife", "segs", "postprocess")
@@ -270,8 +277,11 @@ ZEROOUT_TYPE = "ConditioningZeroOut"
 
 # titles we generate ourselves - safe to rewrite on a later organize pass;
 # anything else is human-authored and must never be clobbered
-INERT_NEGATIVE_TITLE = "🚫 Negative (no effect at CFG 1)"
-ROLE_TITLES = {"✅ Positive Prompt", "🚫 Negative Prompt", INERT_NEGATIVE_TITLE}
+INERT_NEGATIVE_TITLE = "Negative (no effect at CFG 1)"
+ROLE_TITLES = {
+    "Positive Prompt", "Negative Prompt", INERT_NEGATIVE_TITLE,
+    "✅ Positive Prompt", "🚫 Negative Prompt", "🚫 Negative (no effect at CFG 1)",
+}
 
 
 def _outputs_conditioning(node: Node) -> bool:
@@ -346,7 +356,7 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> int:
         if schema is None:
             continue
         if node.type == ZEROOUT_TYPE and node.title is None:
-            node.title = "🚫 Negative (zeroed)"
+            node.title = "Negative (zeroed)"
             titled += 1
             continue
         has_text_widget = any(s == "text" for s in _safe_slots(node, object_info))
@@ -355,13 +365,13 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> int:
         if (node.type == "CLIPTextEncode" or has_text_widget) and retitlable and is_prompt_source:
             role = _prompt_role(wf, node)
             if role == "positive":
-                node.title = "✅ Positive Prompt"
+                node.title = "Positive Prompt"
                 titled += 1
             elif role == "negative":
                 node.title = (
                     INERT_NEGATIVE_TITLE
                     if _negative_is_inert(wf, node, object_info)
-                    else "🚫 Negative Prompt"
+                    else "Negative Prompt"
                 )
                 titled += 1
         if "loaders" in (schema.get("category") or "") and node.title is None:
@@ -629,6 +639,22 @@ def _resolution_text(resolutions: Any) -> str | None:
     return None
 
 
+def _size_sources(wf: Workflow, canvases: list[Node], object_info: dict[str, Any]) -> list[str]:
+    """Names of the nodes wired into the canvases' width/height (a resolution
+    picker, a primitive) - there, not on the canvas, is where the size is set."""
+    names: list[str] = []
+    for canvas in canvases:
+        for dim in ("width", "height"):
+            slot = canvas.input_by_name(dim)
+            link = wf.links.get(slot.link) if slot is not None and slot.link is not None else None
+            source = wf.nodes.get(link.origin_id) if link is not None else None
+            if source is not None:
+                names.append(
+                    source.title or (object_info.get(source.type) or {}).get("display_name") or source.type
+                )
+    return list(dict.fromkeys(names))
+
+
 def _note_text(
     stage: str,
     wf: Workflow,
@@ -644,7 +670,7 @@ def _note_text(
     lines: list[str] = []
     source_lines: list[str] = []
     if stage == "models":
-        lines.append("👇 Swap models here to change the whole look.")
+        lines.append("Swap models here to change the whole look.")
         if notes.get("loaders"):
             lines.append(notes["loaders"])
         # curated download links only - never a synthesized URL. Matched
@@ -657,8 +683,8 @@ def _note_text(
         # a producer node (wildcard bank, concatenator, LLM/VLM prompt step) -
         # the reader edits ITS pieces, not the wired encoder box further along
         lines.append(
-            "🧩 Builds the final prompt automatically (word banks, concatenation, "
-            "or an LLM/VLM step) — edit the pieces here; the wired prompt box "
+            "Builds the final prompt automatically (word banks, concatenation, "
+            "or an LLM/VLM step) - edit the pieces here; the wired prompt box "
             "further along can't be typed into."
         )
         if notes.get("conditioning"):
@@ -667,7 +693,7 @@ def _note_text(
         # pure wiring: an encoder/apply node fed either by a hand-typed prompt
         # box in Inputs or by Prompt Building - nothing here is user-editable
         lines.append(
-            "🔌 Wires the prompt into the model — nothing to edit here; change "
+            "Wires the prompt into the model - nothing to edit here; change "
             "the prompt itself upstream (Inputs or Prompt Building)."
         )
     elif stage == "sampling":
@@ -704,13 +730,13 @@ def _note_text(
             )
             shown = ", ".join(f"{k}={current[k]}" for k in ("steps", "cfg") if k in current)
             lines.append(
-                f"⚠️ This graph runs {shown}, outside {family}'s base reference ({ref}) - "
+                f"Note: this graph runs {shown}, outside {family}'s base reference ({ref}) - "
                 "likely an acceleration LoRA or variant; the base-model sampling numbers are omitted."
             )
         elif notes.get("sampling"):
             lines.append(notes["sampling"])
         if notes.get("latent"):
-            lines.append("👇 " + notes["latent"])
+            lines.append(notes["latent"])
         cfg_block = sampling.get("cfg") or {}
         # a prose statement (H3: "No CFG - guidance-distilled") beats a numeric
         # range when there isn't one - but only when the graph actually has a
@@ -734,7 +760,7 @@ def _note_text(
         for technique, settings in (g.get("techniques") or {}).items():
             hint = technique.replace("_", " ")
             if any(hint.split()[0] in n.type.lower() for n in members) and settings.get("note"):
-                lines.append("⚙️ " + settings["note"])
+                lines.append(settings["note"])
         if not lines:
             # no technique guidance matched: describe what's actually here
             # (never claim tuning or refer to spatial position - layouts vary)
@@ -744,31 +770,37 @@ def _note_text(
                     for n in members
                 )
             )
-            listed = ", ".join(steps[:4]) + (", …" if len(steps) > 4 else "")
-            lines.append(f"⚙️ Extra image steps applied after generation: {listed}.")
+            listed = ", ".join(steps[:4]) + (", ..." if len(steps) > 4 else "")
+            lines.append(f"Extra image steps applied after generation: {listed}.")
     elif stage == "output":
         medium = _output_medium(members, object_info)
         # "video"/"audio" are mass nouns (singular verb); "images"/"files" are
         # plural - confirmed live: "Finished video land here" read wrong
         verb = "lands" if medium in ("video", "audio") else "land"
-        lines.append(f"💾 Finished {medium} {verb} here (check the filename prefix).")
+        lines.append(f"Finished {medium} {verb} here (check the filename prefix).")
     elif stage == "inputs":
         if any(n.type in _INPUT_CLASSES for n in members):
-            lines.append("👇 Load your source image/media here.")
-        if any(_is_canvas_node(n.type) for n in members):
-            lines.append("👇 Set the image size (width / height / batch) here.")
+            lines.append("Load your source image/media here.")
+        canvases = [n for n in members if _is_canvas_node(n.type)]
+        if canvases:
+            sources = _size_sources(wf, canvases, object_info)
+            lines.append(
+                f"The image size comes from {', '.join(sources)} - set it there."
+                if sources
+                else "Set the image size (width / height / batch) here."
+            )
             res_text = _resolution_text(g.get("resolutions"))
             if res_text:
                 lines.append(res_text)
         if any(n.type == PRIMITIVE_TYPE for n in members):
             lines.append(
-                "👇 The green value boxes here feed settings further along the "
-                "graph — change them here, not at the node they connect to."
+                "The green value boxes here feed settings further along the "
+                "graph - change them here, not at the node they connect to."
             )
         # classify() only ever routes an UNWIRED prompt/wildcard box here, so
         # every prompt-widget member in this band is directly hand-editable
         if any(_PROMPT_WIDGETS & set(_safe_slots(n, object_info)) for n in members):
-            lines.append("👇 Type what you want in the green prompt box(es) here.")
+            lines.append("Type what you want in the green prompt box(es) here.")
             if notes.get("conditioning"):
                 lines.append(notes["conditioning"])
     # a knob table and technique tradeoffs apply to ANY stage generically (a
@@ -778,7 +810,7 @@ def _note_text(
     # so this naturally comes back empty for stages with nothing to say
     table_rows = knobs.knob_rows(members, object_info, guidance)
     technique_lines = [
-        f"⚡ **{n.title or n.type}**: {note}"
+        f"**{n.title or n.type}**: {note}"
         for n in members
         if (note := knobs.technique_note(n.type))
     ]
@@ -796,7 +828,7 @@ def _note_text(
     if source_lines:
         # bare URLs are never passed through _wrap - textwrap would break a
         # long link across physical lines and cost it its copy-pastability
-        parts.append("📦 Where to get these files:\n" + "\n".join(source_lines))
+        parts.append("Where to get these files:\n" + "\n".join(source_lines))
     return "\n\n".join(parts)
 
 
@@ -860,7 +892,7 @@ def annotate(
         wf.remove_node(nid)
     # the relayout moves every node, so no old group box still fits - but a
     # human's groups vanishing silently is a surprise, so name them in the report
-    generated = {title for _, title, _ in STAGES} | {"\U0001f9e0 Models", "📐 Image Size", "✍️ Prompts"}
+    generated = {title for _, title, _ in STAGES} | _EXTRA_GROUP_TITLES | _LEGACY_GROUP_TITLES
     own_groups = [g.title for g in wf.groups if g.title not in generated]
     wf.groups = []
 
@@ -921,13 +953,13 @@ def annotate(
                 for n in members
             )
             if not has_lora:
-                title = "\U0001f9e0 Models"
+                title = "Models"
         elif key == "inputs" and all(_is_canvas_node(n.type) for n in members):
-            title = "📐 Image Size"
+            title = "Image Size"
         elif key == "inputs" and all(
             _PROMPT_WIDGETS & set(_safe_slots(n, object_info)) for n in members
         ):
-            title = "✍️ Prompts"
+            title = "Prompts"
         note_w = max(min(max_x - min_x, 380.0), 300.0)
         # wrap to the note's REAL width, not a fixed column count, so the
         # height estimate below matches what actually renders

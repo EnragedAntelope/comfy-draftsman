@@ -584,10 +584,10 @@ async def test_sweep_runs_variants_x_seeds_and_builds_sheets(sweep_env):
     assert [a["1"]["inputs"]["seed"] for a in client.apis] == [7, 8, 7, 8]
     assert [a["1"]["inputs"]["steps"] for a in client.apis] == [10, 10, 4, 4]
     assert 10 in wf.nodes[node.id].widgets_values and 4 not in wf.nodes[node.id].widgets_values  # session wf untouched
-    assert Path(body["contact_sheet"]).is_file() and Path(body["crop_sheet"]).is_file()
+    assert Path(body["contact_sheet"]).is_file() and Path(body["crop_sheets"][0]).is_file()
     # the first crop tile is the source region, pixel for pixel (1:1, never scaled)
     source = Image.open(io.BytesIO(_png(40))).convert("RGB")
-    sheet = Image.open(body["crop_sheet"]).convert("RGB")
+    sheet = Image.open(body["crop_sheets"][0]).convert("RGB")
     assert sheet.crop((0, 0, 100, 100)).tobytes() == source.crop((10, 20, 110, 120)).tobytes()
     assert len(rest) == 1  # the 100px-wide crop sheet is small enough to inline
 
@@ -619,11 +619,40 @@ async def test_oversized_crop_sheet_is_a_file_not_an_inline_image(sweep_env):
     server, _client, _wf, _node, wf_id, out = sweep_env
     box = [0, 0, 512, 512]
     result = await server.run_workflow(
-        wf_id, front=True, save_dir=str(out), sweep={"crops": [box, box, box, box]}
+        wf_id, front=True, save_dir=str(out), sweep={"seeds": list(range(9)), "crops": [box]}
     )
     body, *images = result
-    assert len(images) == 1  # contact sheet only
-    assert "crop_hint" in body and Path(body["crop_sheet"]).is_file()
+    assert len(images) == 1  # contact sheet only: 3x3 tiles of 512 is past INLINE_MAX
+    assert "crop_hint" in body and Path(body["crop_sheets"][0]).is_file()
+
+
+async def test_each_crop_box_gets_its_own_sheet_and_fractions_track_the_image(sweep_env):
+    from PIL import Image
+
+    server, _client, _wf, _node, wf_id, out = sweep_env
+    body, *_ = await server.run_workflow(
+        wf_id, front=True, save_dir=str(out),
+        sweep={"seeds": [1, 2], "crops": [[0, 0, 64, 64], [0.25, 0.25, 0.5, 0.5]]},
+    )
+    assert len(body["crop_sheets"]) == 2
+    # the fraction box is a quarter of 1024x768 -> 256x192, 1:1, two runs side by side
+    frac = Image.open(body["crop_sheets"][1])
+    assert frac.size == (2 * 256, 192 + 18)
+
+
+def test_fractional_crop_box_caps_at_crop_max_around_its_centre():
+    from PIL import Image
+
+    from comfy_draftsman.imaging import CROP_MAX, crop_tiles
+
+    tile = crop_tiles(Image.new("RGB", (2048, 2048)), [[0.0, 0.0, 1.0, 0.5]])[0]
+    assert tile is not None and tile.size == (CROP_MAX, CROP_MAX)
+
+
+async def test_sweep_rejects_a_bad_fraction_box(sweep_env):
+    server, client, _wf, _node, wf_id, _ = sweep_env
+    bad = await server.run_workflow(wf_id, front=True, sweep={"crops": [[0.5, 0.0, 0.2, 1.0]]})
+    assert bad["status"] == "invalid" and client.apis == []
 
 
 def test_crop_tiles_outside_the_image_are_none_not_bad_tiles():
@@ -645,7 +674,7 @@ async def test_sweep_return_preview_false_inlines_nothing(sweep_env):
         sweep={"variants": _variants(), "crops": [[0, 0, 64, 64]]},
     )
     assert isinstance(result, dict)  # no Image items alongside it
-    assert Path(result["contact_sheet"]).is_file() and Path(result["crop_sheet"]).is_file()
+    assert Path(result["contact_sheet"]).is_file() and Path(result["crop_sheets"][0]).is_file()
 
 
 async def test_sweep_runs_list_their_output_files(sweep_env):

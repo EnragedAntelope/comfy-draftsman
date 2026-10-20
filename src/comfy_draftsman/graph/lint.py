@@ -119,8 +119,40 @@ def _missing_prompt_previews(
     return findings
 
 
-def _resolution_alignment_findings(
+def _family_guidance(
     wf: Workflow, object_info: dict[str, Any], learned_dir: Path | str | None
+) -> tuple[str | None, dict[str, Any]]:
+    """(family, guidance) for the family-aware checks below; (None, {}) unless a
+    caller threads learned_dir through (see _resolution_alignment_findings)."""
+    if learned_dir is None:
+        return None, {}
+    from .. import knowledge  # local import: knowledge doesn't import lint
+
+    family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
+    if not family:
+        return None, {}
+    return family, knowledge.get_guidance(family, learned_dir=learned_dir)
+
+
+def _avoid_node_findings(
+    wf: Workflow, family: str | None, guidance: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """A node the detected family's YAML (or a record_learning call) says breaks
+    it - e.g. ModelSamplingSD3 on MOSS-Image renders pure noise."""
+    avoid = guidance.get("avoid_nodes") or {}
+    return [
+        _finding(
+            "family-avoid-node",
+            f"{node.type} #{node.id} on {guidance.get('display_name', family)}: {avoid[node.type]}",
+            node.id,
+        )
+        for node in wf.nodes.values()
+        if node.type in avoid and node.mode not in (MODE_MUTE, MODE_BYPASS)
+    ]
+
+
+def _resolution_alignment_findings(
+    wf: Workflow, object_info: dict[str, Any], family: str | None, guidance: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """A canvas node's width/height must be a multiple of the detected
     family's declared alignment (LTX pads/crops otherwise; DiT patchify
@@ -139,15 +171,8 @@ def _resolution_alignment_findings(
     deliberately use an odd size, and rewriting it or injecting a math node
     to force alignment would silently change the user's graph.
     """
-    if learned_dir is None:
-        return []
-    from .. import knowledge  # local import: knowledge doesn't import lint
     from .annotate import _is_canvas_node  # local import: annotate imports lint
 
-    family = knowledge.detect_family(wf, object_info, learned_dir=learned_dir)
-    if not family:
-        return []
-    guidance = knowledge.get_guidance(family, learned_dir=learned_dir)
     multiple_of = guidance.get("multiple_of")
     if not isinstance(multiple_of, int) or multiple_of <= 1:
         return []
@@ -296,7 +321,9 @@ def lint(
     findings.extend(_missing_prompt_previews(wf, object_info))
     findings.extend(_output_behind_lazy_input(wf, object_info))
     findings.extend(_overlap_findings(wf))
-    findings.extend(_resolution_alignment_findings(wf, object_info, learned_dir))
+    family, guidance = _family_guidance(wf, object_info, learned_dir)
+    findings.extend(_avoid_node_findings(wf, family, guidance))
+    findings.extend(_resolution_alignment_findings(wf, object_info, family, guidance))
     findings.extend(_model_sampling_size_findings(wf, object_info))
     return findings
 

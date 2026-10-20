@@ -312,6 +312,25 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
     return isinstance(kind, str) and kind != "*" and name not in socket_names
 
 
+SAVED_WIDGET_NAMES_PROPERTY = "__lm_widget_ids"
+
+
+def saved_widget_names(properties: Any, widgets_values: Any) -> list[str] | None:
+    """The name of every saved value, in ``widgets_values`` order, when the
+    node's pack JS recorded it - LoRA Manager writes ``__lm_widget_ids`` because
+    its hidden autocomplete-state widgets shift every positional read. An exact
+    map, so it beats the schema walk; None when absent or out of step."""
+    names = properties.get(SAVED_WIDGET_NAMES_PROPERTY) if isinstance(properties, dict) else None
+    if (
+        isinstance(names, list)
+        and isinstance(widgets_values, list)
+        and len(names) == len(widgets_values)
+        and all(isinstance(n, str) for n in names)
+    ):
+        return names
+    return None
+
+
 def is_unfed_custom_input(spec: Any, object_info: dict[str, Any]) -> bool:
     """True for a bespoke io type that no installed node outputs. Nothing can be
     wired into it, so on a freshly added node it can only be a pack's JS widget
@@ -579,7 +598,7 @@ def positional_mapping_plausible(
         elif kind == "BOOLEAN":
             if not isinstance(value, bool):
                 return False
-        elif kind == "STRING" and not isinstance(value, str):
+        elif "STRING" in str(kind).split(",") and not isinstance(value, str):
             return False
     return True
 

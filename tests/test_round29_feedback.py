@@ -335,7 +335,7 @@ def test_negative_with_real_cfg_stays_a_knob(oi):
     wf = _sampler_graph(4.0)
     an._title_nodes(wf, oi)
     an._paint_knobs(wf, oi, {1: "inputs", 2: "sampling"})
-    assert wf.nodes[1].title == "🚫 Negative Prompt"
+    assert wf.nodes[1].title == "Negative Prompt"
     assert (wf.nodes[1].color, wf.nodes[1].bgcolor) == an.GREEN
 
 

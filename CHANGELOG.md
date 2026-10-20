@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.24.0 - MOSS-Image session feedback
+
+### Fixed
+
+- `record_learning` refuses an update whose shape the readers can't handle (a string
+  `notes`, a dict `sampler`) and saves nothing; a bad field already in a learned
+  file is dropped by `get_guidance` instead of crashing `organize_workflow`.
+- Imported LoRA Manager nodes: `set_widget` writes `text`/`loras` by the names in
+  `properties.__lm_widget_ids`, validate no longer reports positional drift for them,
+  and `run_workflow` sends their values (lists wrapped as `{"__value__": ...}`).
+- `no-prompt-preview` accepts core `PreviewAny` as a text display.
+- `edit_workflow` refreshes object_info when an op names a model file no cached combo
+  lists, so a file downloaded mid-session is not rejected as missing.
+- A run or sweep cell whose sampler came from ComfyUI's cache says so
+  (`elapsed_note`, `sampling_cached`, label "- cached") instead of a misleading time.
+
+### Added
+
+- `moss_image` floor family, with `avoid_nodes` and a `family-avoid-node` lint:
+  ModelSamplingSD3 on MOSS-Image renders noise.
+- `set_widget` accepts `control_after_generate` as an alias for the node's single
+  `*__control_after_generate` slot; the error lists the control slots it has.
+- Sweep crops take 0-1 fractions as well as pixels, and each crop box gets its own
+  square-ish sheet (`crop_sheets`, a list, replaces `crop_sheet`).
+
+### Changed
+
+- Organize titles and notes are plain text (no emoji). Older emoji titles are still
+  recognized as generated and refreshed.
+- The inputs note names the node that sets the image size when the canvas's width or
+  height is wired.
+
+### Not changed
+
+- No banding metric: a new image-analysis feature, out of scope for a fix round.
+- A freshly added LoRA Manager node still stops loudly; use LoRA Text Loader fed by a
+  String node.
+- `validate_workflow` already refreshed object_info; the stale list came from
+  `edit_workflow`'s cache.
+
 ## 0.23.0 - Qwen 2.1 poster session feedback
 
 ### Fixed

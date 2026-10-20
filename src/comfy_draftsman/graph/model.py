@@ -953,15 +953,21 @@ class Workflow:
         if node.type == PRIMITIVE_TYPE:
             self._set_primitive_widget(node, input_name, value, object_info)
             return
+        names = w.saved_widget_names(node.properties, node.widgets_values)
+        if names is not None and input_name in names:
+            node.widgets_values[names.index(input_name)] = value
+            return
         # instance context: a custom JS-widget input is only recognizable from
         # the sockets this node actually serialized (widgets._is_custom_widget).
         # Without it the slot walk misses that widget, so the round-trip below
         # would drop its value and shift every later one up a slot.
         socket_names = {slot.name for slot in node.inputs}
         slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
+        controls = [s for s in slots if s.endswith(w.CONTROL_SUFFIX)]
+        if input_name == "control_after_generate" and len(controls) == 1:
+            input_name = controls[0]  # the bare name PrimitiveNode uses
         if input_name not in slots:
             real_widgets = [s for s in slots if not s.endswith(w.SYNTHETIC_SUFFIXES)]
-            control_slots = [s for s in slots if s.endswith(w.CONTROL_SUFFIX)]
             if input_name in w.all_slot_names(node.type, object_info):
                 # a sub-widget of a dynamic combo whose option isn't selected
                 raise ValueError(
@@ -972,8 +978,7 @@ class Workflow:
             raise ValueError(
                 f"{node.type} has no widget '{input_name}'.\n"
                 f"Widgets: {real_widgets}.\n"
-                f"Synthetic control slots: {control_slots}. "
-                f"Use 'seed__control_after_generate' to set randomize/fixed/increment/decrement. "
+                f"Synthetic control slots: {controls} (randomize/fixed/increment/decrement). "
                 f"A pack JS widget has no name here: {_INDEX_HINT.format(node_id=node_id)}"
             )
         if not isinstance(node.widgets_values, list):
@@ -1267,12 +1272,23 @@ class Workflow:
             named_widgets = w.named_for_api(
                 node.type, node.widgets_values, object_info, socket_names
             )
+            schema = object_info[node.type]
+            if names := w.saved_widget_names(node.properties, node.widgets_values):
+                declared = {name for name, _ in w._iter_schema_inputs(schema)}
+                named_widgets = {
+                    **named_widgets,
+                    **{n: v for n, v in zip(names, node.widgets_values, strict=True) if n in declared},
+                }
             inputs: dict[str, Any] = {
-                k: (_substitute_filename_tokens(v, now) if isinstance(v, str) else v)
+                # the frontend wraps array widget values so /prompt can't read
+                # them as a [node_id, slot] link
+                k: (
+                    _substitute_filename_tokens(v, now) if isinstance(v, str)
+                    else {"__value__": v} if isinstance(v, list) else v
+                )
                 for k, v in named_widgets.items()
                 if not k.endswith(w.SYNTHETIC_SUFFIXES)
             }
-            schema = object_info[node.type]
             for in_index, slot in enumerate(node.inputs):
                 if slot.link is None:
                     continue
