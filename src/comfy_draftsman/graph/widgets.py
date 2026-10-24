@@ -314,6 +314,14 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
 
 SAVED_WIDGET_NAMES_PROPERTY = "__lm_widget_ids"
 
+# Display-only widgets the frontend creates with serialize=false, so they take no
+# widgets_values slot (ComfyUI_frontend useResolutionPreviewWidget.ts and
+# useImageCompareWidget.ts). Only source-checked types belong here.
+UNSERIALIZED_WIDGET_TYPES = frozenset({"RESOLUTION_PREVIEW", "IMAGECOMPARE"})
+# ImageCompare still sends its initial value to /prompt (options.serialize stays
+# true), and ComfyUI rejects the prompt without it.
+API_ONLY_WIDGET_VALUES: dict[str, list[str]] = {"IMAGECOMPARE": ["", ""]}
+
 
 def saved_widget_names(properties: Any, widgets_values: Any) -> list[str] | None:
     """The name of every saved value, in ``widgets_values`` order, when the
@@ -329,6 +337,74 @@ def saved_widget_names(properties: Any, widgets_values: Any) -> list[str] | None
     ):
         return names
     return None
+
+
+# LoRA Manager (web/comfyui, vue-widgets/src/main.ts): each AUTOCOMPLETE_TEXT_*
+# widget is preceded by a hidden meta widget; the node RUNS from its `loras`
+# list (the Python side deletes `text`), and the browser rebuilds that list from
+# the text's <lora:...> tags on load - so both must agree.
+LM_META_PREFIX = "__lm_autocomplete_meta_"
+_LM_LORA_RE = re.compile(r"<lora:([^:]+):([-\d.]+)(?::([-\d.]+))?>")
+
+
+def lm_fresh_widgets(class_type: str, object_info: dict[str, Any]) -> tuple[list[str], list[Any]] | None:
+    """(saved names, values) in the layout LoRA Manager saves for a new node, or
+    None when the node has no autocomplete text widget or one we can't lay out."""
+    names: list[str] = []
+    values: list[Any] = []
+    for name, spec in _iter_schema_inputs(_schema(class_type, object_info)):
+        kind = spec[0] if isinstance(spec, list | tuple) and spec else None
+        if isinstance(kind, str) and kind.startswith("AUTOCOMPLETE_TEXT_"):
+            names += [f"{LM_META_PREFIX}{name}", name]
+            values += [{"version": 1, "textWidgetName": name}, ""]
+        elif kind == "LORAS":
+            names.append(name)
+            values.append([])
+        elif is_widget_input(spec):
+            if has_control_slot(name, spec) or is_dynamic_combo(spec):
+                return None
+            names.append(name)
+            values.append(_default_for(spec))
+    return (names, values) if any(n.startswith(LM_META_PREFIX) for n in names) else None
+
+
+def _lm_tags(text: str) -> dict[str, tuple[float, float]]:
+    tags: dict[str, tuple[float, float]] = {}
+    for m in _LM_LORA_RE.finditer(text):
+        try:
+            strength = float(m[2])
+            tags[m[1]] = (strength, float(m[3]) if m[3] else strength)
+        except ValueError:
+            continue  # "<lora:x:->" - LoRA Manager reads NaN; skip it
+    return tags
+
+
+def lm_loras_from_text(text: str, existing: Any) -> list[dict[str, Any]]:
+    """LoRA Manager's mergeLoras: the list keeps its order and per-entry state
+    (active, expanded) for names still in the text, then adds new tags. Unlike
+    the browser, the text's strengths win - an edit to the text is the intent."""
+    tags = _lm_tags(text)
+    old = [e for e in existing if isinstance(e, dict)] if isinstance(existing, list) else []
+    merged = []
+    for entry in old:
+        if entry.get("name") in tags:
+            strength, clip = tags.pop(entry["name"])
+            merged.append({**entry, "strength": strength, "clipStrength": clip})
+    for name, (strength, clip) in tags.items():
+        merged.append({"name": name, "strength": strength, "active": True, "clipStrength": clip, "selected": False})
+    return merged
+
+
+def lm_text_with_loras(text: str, loras: Any) -> str:
+    """Append a <lora:...> tag for each list entry the text lacks, so the browser's
+    load-time merge (text decides which LoRAs exist) doesn't drop it."""
+    tags = _lm_tags(text)
+    extra = [
+        f"<lora:{e['name']}:{e.get('strength', 1)}>"
+        for e in (loras if isinstance(loras, list) else [])
+        if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"] not in tags
+    ]
+    return " ".join([text.strip(), *extra]).strip() if extra else text
 
 
 def is_unfed_custom_input(spec: Any, object_info: dict[str, Any]) -> bool:
@@ -430,6 +506,8 @@ def _entries(
             pos += 1
 
     for name, spec in _iter_schema_inputs(schema):
+        if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str) and spec[0] in UNSERIALIZED_WIDGET_TYPES:
+            continue
         if is_widget_input(spec) or _is_custom_widget(name, spec, socket_names):
             yield from walk(name, spec)
 
@@ -674,9 +752,12 @@ def named_for_api(
     ``socket_names`` lets custom JS-widget inputs (e.g. LoraManager's autocomplete
     box) survive UI->API conversion instead of being dropped."""
     named = widgets_to_named(class_type, widgets_values, object_info, socket_names)
+    schema = _schema(class_type, object_info)
+    for name, spec in _iter_schema_inputs(schema):
+        if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str) and spec[0] in API_ONLY_WIDGET_VALUES:
+            named.setdefault(name, list(API_ONLY_WIDGET_VALUES[spec[0]]))
     if isinstance(widgets_values, dict):
         return named
-    schema = _schema(class_type, object_info)
     for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names):
         if spec is None or name in named:
             continue

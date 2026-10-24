@@ -259,7 +259,8 @@ def test_step_aligned_epsilon_min():
 
 def test_check_widget_value_denoise_epsilon_min():
     assert check_widget_value("MegaSampler", "denoise", 0.36, OI) is None
-    assert "step" in (check_widget_value("MegaSampler", "denoise", 0.457, OI) or "")
+    # off-step values run on ComfyUI (it checks min/max only), so edits accept them
+    assert check_widget_value("MegaSampler", "denoise", 0.457, OI) is None
 
 
 # --- 6. combo severity gate + findings cap -----------------------------------

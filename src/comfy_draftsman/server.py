@@ -51,9 +51,12 @@ from .graph.widgets import (
     widgets_to_named,
 )
 from .imaging import (
+    BANDING_VISIBLE,
     CROP_MAX,
     INLINE_MAX,
+    banding_score,
     contact_sheet,
+    crop_guide,
     crop_tiles,
     downscale_image,
     to_png,
@@ -2190,6 +2193,7 @@ async def _run_sweep(
     # one list per crop box: each box gets its own sheet comparing every run 1:1
     crop_cells: list[list[tuple[PILImage.Image | None, str]]] = [[] for _ in crops]
     halt: str | None = None
+    first_image: PILImage.Image | None = None
     started = time.monotonic()
     for label, api, problem in prepared:
         if api is None:
@@ -2213,6 +2217,13 @@ async def _run_sweep(
                         if isinstance(v, int) and not isinstance(v, bool):
                             node["inputs"][key] = seed
             try:
+                queue = await _client().get_queue()
+                if queue.get("queue_running") or queue.get("queue_pending"):
+                    # their models load between runs, so elapsed_s holds model swaps
+                    entry["shared_queue"] = True
+            except Exception:
+                pass  # timing context only; never block the run on it
+            try:
                 res = await _client().run_and_wait(
                     run_api, timeout=timeout_seconds, extra_data=extra_data, front=bool(front)
                 )
@@ -2223,6 +2234,8 @@ async def _run_sweep(
             if res.get("prompt_id"):
                 _record_submission(res["prompt_id"], workflow_id)
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
+            if res.get("sampling_s") is not None:
+                entry["sampling_s"] = res["sampling_s"]
             if _sampling_cached(res, run_api):
                 entry["sampling_cached"] = True  # elapsed_s timed only what ran after it
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
@@ -2245,7 +2258,14 @@ async def _run_sweep(
                     image.load()
                 except Exception:
                     image = None
+            if image is not None:
+                first_image = first_image or image
+                entry["banding"], stripe = banding_score(image)
+                if entry["banding"] >= BANDING_VISIBLE:
+                    entry["banding_stripe"] = stripe
             secs = f" - {entry['elapsed_s']}s" if entry.get("elapsed_s") is not None else ""
+            if entry.get("sampling_s") is not None:
+                secs = f" - {entry['sampling_s']}s sampling"  # comparable across runs
             if entry.get("sampling_cached"):
                 secs = " - cached"
             row.append((image, f"{tag}{secs}" if image else f"{tag}: {res['status']}"))
@@ -2260,6 +2280,26 @@ async def _run_sweep(
     content: list[Any] = [out]
     if any(r.get("files") for r in runs):
         out["hint"] = "each run's files are LoadImage-ready refs ('name.png [output]'): set_widget a LoadImage image to one to reuse a render - no upload needed"
+    if any("sampling_s" in r for r in runs):
+        out["timing_note"] = (
+            "sampling_s = sampler step time x steps, without model loads; compare runs by it"
+            + (" - other jobs shared the queue, so elapsed_s includes model swaps"
+               if any(r.get("shared_queue") for r in runs) else "")
+        )
+    if any("banding" in r for r in runs):
+        out["banding_note"] = (
+            f"banding = strongest evenly spaced 10-64px stripe (color or brightness) over its "
+            f"spectral neighbours; clean renders 1-6, >= {BANDING_VISIBLE:g} is visible striping "
+            "(banding_stripe says where) - confirm in a crop"
+        )
+    if first_image is not None and not crops:
+        guide = crop_guide(first_image)
+        gpath = root / f"crop-guide-{stamp}.png"
+        gpath.write_bytes(to_png(guide))
+        out["crop_guide"] = str(gpath)
+        out["crop_hint"] = "the 0.1 grid on the first render shows where to aim crops=[[x0,y0,x1,y1]] (0-1 fractions); repeat seeds rerun from cache"
+        if return_preview:
+            content.append(Image(data=to_png(guide), format="png"))
     if any(img is not None for r in grid for img, _ in r):
         ref_cell: tuple[PILImage.Image | None, str] | None = None
         if reference:
@@ -3242,7 +3282,9 @@ def _leaf_keys(data: Any, prefix: str = "") -> list[str]:
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
-async def record_learning(family: str, updates: dict[str, Any], source: str) -> dict[str, Any]:
+async def record_learning(
+    family: str, updates: dict[str, Any] = {}, source: str = ""  # noqa: B006 - never mutated
+) -> dict[str, Any]:
     """Persist researched settings so FUTURE sessions start smarter. updates uses
     the guidance shape, e.g. {"sampling": {"cfg": {"default": 3.5}}} or
     {"techniques": {"face_detailer": {"denoise": 0.4}}}. source = URL/model page.
@@ -3253,7 +3295,20 @@ async def record_learning(family: str, updates: dict[str, Any], source: str) -> 
     A "sources" list teaches organize_workflow's Models note where to download
     each file - it never invents a URL, so this is the only way one appears:
     {"sources": [{"match": ["mymodel_v1.safetensors"], "what": "checkpoint",
-    "url": "https://..."}]}. Verify the URL resolves before recording it."""
+    "url": "https://..."}]}. Verify the URL resolves first."""
+    # optional in the signature only so a guessed argument name gets this answer
+    # instead of the SDK's bare "Field required"
+    if not updates or not source.strip():
+        return {
+            "error": "nothing saved - pass updates= (the guidance shape) and source= (URL or test notes)",
+            "example": {
+                "family": family,
+                "updates": {"sampling": {"cfg": {"default": 3.5}, "samplers": ["euler"]},
+                            "notes": {"sampling": "tested ..."}},
+                "source": "https://... ; local A/B tests YYYY-MM-DD",
+            },
+            "hint": "get_model_guidance shows the shape of an existing family",
+        }
     if problems := knowledge.shape_errors(updates):
         return {
             "error": "nothing saved - " + "; ".join(msg for _, msg in problems[:10]),

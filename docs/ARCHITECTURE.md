@@ -745,6 +745,25 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   Each box gets its own square-ish sheet, since one row per run was unviewably tall.
   A run whose sampler came from ComfyUI's cache (`execution_cached`) is marked
   `sampling_cached`, because its `elapsed_s` timed only the nodes after the sampler.
+  `sampling_s` (`ComfyClient._sampling_s`) is the comparable number: per sampler
+  node, seconds per step between the first and last websocket `progress` tick, times
+  steps. Model loads happen before step 1, so a queue shared with other families'
+  jobs (model swaps) does not skew it; the sweep still marks such cells
+  `shared_queue`.
+- **The banding score is a spectral line test, in color too.** `imaging.banding_score`
+  averages the image down to one column profile and one row profile per RGB channel
+  (linear, so the opponent colors red-green and blue-yellow come from the profiles;
+  convert to `F` before the BOX resize or sub-level color shifts round away). Each
+  profile is high-passed (9-sample mean), FFT'd, and the peak at 10-64 px periods is
+  divided by the median of the bins 3-12 real bins away: a stripe is a sharp line,
+  content a broad bump. Peak over the whole-spectrum median gave busy FIBO renders
+  20-43; 8 px is every VAE's texture and peaks in clean renders. MOSS-Image SFT's
+  banding is vertical COLOR stripes, ~48 per width (16 px at 768), invisible in
+  brightness: the first version (grid-folded brightness in smooth tiles) scored a
+  visibly banded SFT render the same as a clean one, and only seemed to work because
+  it was tested at 2-4 MP, where SFT does not draw them. Thresholds (clean 1-7, banded
+  12-16, `BANDING_VISIBLE` 8) come from the local MOSS and FIBO output folders; reference write-up of the
+  artifact: huggingface.co/MATLOWAI/MOSS-Image-SFT-DeBand.
 - **The session store writes through.** `server._persist` runs after every mutating
   tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
   because the MCP server is a per-conversation process and an in-memory-only workflow
@@ -771,9 +790,15 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   only when it is a list of strings as long as the values; then `set_widget` writes
   by that name, validate skips the positional count/drift checks, and `to_api` takes
   those values for declared inputs, wrapping a list as `{"__value__": [...]}` the way
-  the frontend does (ComfyUI would read a bare list as a link). A freshly added LM
-  node has no such list, so it still stops loudly: guessing the pack's JS state is
-  worse than the LoRA Text Loader workaround.
+  the frontend does (ComfyUI would read a bare list as a link). LM executes from the
+  `loras` list only (its Python drops `text`); the browser rebuilds that list from the
+  text's `<lora:name:strength[:clip]>` tags on load. So a freshly added LM node gets
+  the layout LM itself saves (`widgets.lm_fresh_widgets`: meta dict, text, `[]`), and
+  `set_widget` keeps the two in step the way LM's `mergeLoras` does: setting `text`
+  rebuilds `loras` (existing entries keep their state, text strengths win), setting
+  `loras` appends missing tags to the text. `lastAccepted` in the meta dict is
+  session-only autocomplete state LM strips on export, so it is dropped on every set.
+  Nodes with a control_after_generate or dynamic combo still stop loudly.
 - **`headless: true` findings block runs, not saves.** `js-widget-input` and
   `widget-layout-unmapped` mean the raw API can't carry the node, while the editor can;
   `save_workflow` filters them out of its gate, `run_workflow` and the sweep do not.
@@ -804,8 +829,8 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
-- **[OPEN] VRAM floors for the unsourced families.** chroma, krea2, ltx,
-  qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
+- **[OPEN] VRAM floors for the unsourced families.** anima, chroma, fibo2, krea2, ltx,
+  minimax_h3, moss_image, qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
   nothing. sd15 in particular was left out on purpose: no citable floor was
   found for it, and it runs comfortably on anything ComfyUI itself supports, so
   the verdict would never fire. Add one only from a source that states the
@@ -843,8 +868,9 @@ Open:
   **considered and rejected**: on the live instance the server *rejected* a
   hand-serialized `text` until it was rebuilt from the active entries, so
   emitting a raw value would trade a loud, honest error for a silently-wrong
-  render. A real fix would need per-pack resolution logic (out of scope for a
-  generic tool); until then the honest stop stands. Workaround for a caller that
+  render. A real fix needs per-pack resolution logic; 0.25.0 added it for the LM
+  Lora Loader's `text`/`loras` pair only (see the saved-widget-name gotcha). The
+  Randomizer and Pool configs keep the honest stop. Workaround for a caller that
   must run such a graph headlessly: connect the input to a plain-STRING source,
   swap in the pack's plain-STRING node variant, or run it from the ComfyUI
   frontend. (Code note: `validate` blocks on any widget-backed unconnected

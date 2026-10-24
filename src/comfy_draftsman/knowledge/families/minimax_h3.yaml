@@ -1,0 +1,64 @@
+family: minimax_h3
+display_name: MiniMax H3
+# MiniMax H3: 33B single-stream video+audio model (24 fps video, 32 kHz stereo
+# audio). Two checkpoints: fl2va (text / first frame / last frame) and ref2va
+# (omni reference: images, video, audio). Both are CFG-distilled.
+detect:
+  checkpoint_patterns: ["minimax_h3", "minimax-h3", "minimaxh3"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_32b_minimax_h3 (CLIPLoader, type=minimax)"]
+  vae: "TWO VAEs: minimax_h3_video_vae (fp16 or int8_convrot) AND minimax_h3_audio_vae_fp32"
+sampling:
+  cfg: {min: 1, max: 1, default: 1}
+  steps: {min: 12, max: 50, default: 20}
+  samplers: [res_multistep]
+  schedulers: [simple]
+native_resolution:
+  max_mp: 1.0
+  note: >-
+    H3 is trained at a 768px short edge with the long edge capped at 1344
+    (1344x768 for 16:9, 768x768 for 1:1). Render at native size, then use the
+    Minimax H3 Latent Upscaler (3D) plus a low-denoise refine for more.
+notes:
+  loaders: >-
+    UNETLoader (minimax_h3_{fl2va|ref2va}_pruned_int8_convrot is the template
+    default; prefer pruned builds) + CLIPLoader type=minimax + two VAELoaders
+    (video, audio). Decode with VAEDecode + VAEDecodeAudio, then CreateVideo
+    at 24 fps muxes them. Comfy Kitchen attention cannot run int8_convrot -
+    use a bf16 build with that backend.
+  sampling: >-
+    CFG-distilled: BasicGuider + SamplerCustomAdvanced, no negative prompt.
+    20 steps, res_multistep/simple. Simple shots look done by 12-16; fine
+    detail improves toward 50 (fewer steps show triangular grid artifacts under
+    motion). Speech and timbre need 12+ steps. Shift defaults: video 12, audio
+    3 (MiniMaxH3SigmaShift). Splitting the schedule over two samplers resets
+    res_multistep history.
+  turbo: >-
+    Turbo LoRAs: 8 steps for T2V/I2V/continuation, 4 for R2V; turbo barely
+    applies references, so keep it off (or ~25 steps) for reference shots. LoRAs
+    distilled on full builds lose their adaln tensors on pruned builds; turbo
+    LoRAs work on either.
+  length: >-
+    Frames sit on a 17k+5 grid at 24 fps: 124 = ~5 s, trained range ~124-362
+    (5-15 s). Seconds to frames: max(5, round(s*24)) rounded up to the grid.
+    Long clips at full size run out of VRAM first - lower the size.
+  conditioning: >-
+    MiniMaxH3ImageToVideo / MiniMaxH3ReferenceToVideo build conditioning and
+    the latent (width/height multiple of 32). References are cited in the
+    prompt by connection order: <Picture 1>, <Video 1>, <Audio 1>. Up to 9
+    images, 3 videos and 3 audio clips (2-15 s each, 15 s total); an audio
+    reference clones the voice for scripted dialogue.
+  prompting: >-
+    MiniMax strongly recommends an expanded prompt (their hosted H3-Context-IR
+    or an LLM following their Prompting Guidance): shot-by-shot description
+    with timestamps, then overall_soundscape and non_diegetic_music. Put
+    spoken lines in <d>[English] ...</d>.
+  speed: >-
+    SageAttention is roughly 2x with small quality cost. End-of-clip morphing
+    or garbled text can come from INT8 attention - switch back to default
+    attention or a bf16 build. Prefer a smaller checkpoint over CPU offload.
+research: >-
+  Floor written 2026-10-23. Sources: https://huggingface.co/MiniMaxAI/MiniMax-H3 ;
+  https://docs.comfy.org/tutorials/video/minimax/minimax-h3 ; live object_info
+  (MiniMaxH3* nodes) ; a working local ref2va workflow.

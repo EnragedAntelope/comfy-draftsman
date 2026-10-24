@@ -165,11 +165,8 @@ def check_widget_value(
         low, high = opts.get("min"), opts.get("max")
         if (low is not None and value < low) or (high is not None and value > high):
             return f"'{input_name}' = {value} is outside the allowed range [{low}, {high}]"
-        step = opts.get("step")
-        if step is not None and step > 0:
-            min_val = opts.get("min", 0) or 0
-            if not _step_aligned(value, min_val, step):
-                return f"'{input_name}' = {value} is not aligned to step {step} (min {min_val})"
+        # no step check here: ComfyUI's /prompt checks only min/max, and real
+        # workflows run off-step values (denoise 0.999); validate() notes them
     return None
 
 
@@ -709,10 +706,10 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     if not _step_aligned(value, min_val, step):
                         findings.append(
                             _finding(
-                                "warning",
+                                "info",
                                 "step-misaligned",
-                                f"{node.type} #{node.id}: '{name}' = {value} is not aligned to step "
-                                f"{step} (min {min_val})",
+                                f"{node.type} #{node.id}: '{name}' = {value} is off the widget's step "
+                                f"{step} - it runs, but the editor may show or round it differently",
                                 node.id,
                                 input=name,
                             )

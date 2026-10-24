@@ -537,7 +537,7 @@ def test_data_outputs_surface_text_and_paths():
         "path": "D:/renders",
         "saved_count": 1,
     }
-    assert data["9"] == {"text": ["a generated prompt"]}
+    assert data["9"] == {"text": "a generated prompt"}  # the one-item list is unwrapped
     assert "images" not in data["7"]  # file refs stay in `outputs`
     assert "animated" not in data["7"]  # frontend noise
 
@@ -605,7 +605,7 @@ async def test_get_run_status_reports_data_outputs(monkeypatch, tmp_path):
     monkeypatch.setattr(server._State, "config", server.Config(session_dir=tmp_path))
     result = await server.get_run_status(prompt_id="p1")
     assert result["status"] == "success"
-    assert result["data_outputs"] == {"9": {"text": ["hello"]}}
+    assert result["data_outputs"] == {"9": {"text": "hello"}}
 
 
 # --- the per-session tool-schema budget --------------------------------------

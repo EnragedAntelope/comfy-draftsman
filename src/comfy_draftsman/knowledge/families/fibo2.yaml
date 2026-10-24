@@ -1,0 +1,62 @@
+family: fibo2
+display_name: FIBO 2.0
+# Bria FIBO 2.0 (native ComfyUI, comfy/supported_models.py Fibo2, shift 1.15).
+# TextEncodeFibo2 makes positive, negative AND the latent, so there is no
+# Empty*Latent canvas node; its width/height of 0 means the trained ~1 MP size.
+detect:
+  checkpoint_patterns: ["fibo2", "fibo_2", "fibo-2"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_4b_bf16 (CLIPLoader, type=fibo2)"]
+  vae: "flux2-vae.safetensors"
+sampling:
+  cfg: {default: 5}
+  steps: {min: 20, max: 30, default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {min: 1, max: 1, default: 1}
+      steps: {min: 8, max: 8, default: 8}
+    notes:
+      sampling: >-
+        Edit Turbo: 8 steps, CFG 1, euler/simple. It also does text-to-image and
+        matched Dev at 20 steps CFG 5 (8 vs 40 model passes); 4 steps is visibly
+        softer. It supersedes the turbo LoRA on Dev.
+native_resolution:
+  max_mp: 1.0
+  fix_node: ScaleROPE
+  note: >-
+    above ~1 MP FIBO repeats people and objects. Add ScaleROPE on the model with
+    scale_x = scale_y = sqrt(1 MP / output MP), e.g. 0.5 at 4 MP. A scaled
+    ModelSamplingFlux shift did not fix it and degraded turbo.
+notes:
+  loaders: >-
+    FIBO 2.0 loads as UNETLoader + CLIPLoader (qwen3vl 4B, type=fibo2) + the
+    flux2 VAE. TextEncodeFibo2 builds positive, negative AND the latent; width
+    and height 0 = the trained ~1 MP size, or the first attached image's aspect
+    ratio.
+  sampling: >-
+    Dev: 20-30 steps at CFG 5 look the same. The Edit Turbo model (8 steps,
+    CFG 1) matches it at a fifth of the model passes.
+  resolution: >-
+    Native ~1 MP; tested to 4 MP. Above ~1 MP people repeat - ScaleROPE with
+    scale_x = scale_y = sqrt(1 MP / output MP) fixes it (0.5 at 4 MP). Faces and
+    hands held up at 4 MP, including distant groups; no face detailer needed.
+  speed: >-
+    ModelAttentionBackend 'comfy kitchen attention' was ~20% faster at 4 MP with
+    no visible change.
+  prompting: >-
+    Plain text or a JSON caption; the encoder keeps key order. Trained order:
+    short_description, objects, background_setting, lighting, aesthetics,
+    photographic_characteristics, style_medium, text_render, context,
+    artistic_style, plus edit_instruction when an image is attached. LLM
+    schema-constrained JSON can sort keys alphabetically - use free JSON with
+    the order given in the system prompt.
+research: >-
+  Floor written 2026-10-23 from a learned overlay. Sources:
+  https://huggingface.co/briaai/Fibo-2.0-dev ;
+  https://huggingface.co/Comfy-Org/Fibo-2.0 ; comfy/supported_models.py Fibo2
+  (shift 1.15) ; local A/B tests 2026-10-23 (RTX 5090).

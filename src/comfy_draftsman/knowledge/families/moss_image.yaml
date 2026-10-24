@@ -28,11 +28,20 @@ notes:
   sampling: >-
     Tested 2026-10: dpmpp_2m_sde + beta, CFG 3, 30 steps. Render at 2 MP or more
     (at 1 MP hands around objects fuse) and 3.5-4 MP for wide or group shots so
-    small faces resolve. The SFT model shows faint stripes in smooth areas;
-    DeBand fine-tunes reduce them.
+    small faces resolve.
+  banding: >-
+    The SFT model draws faint vertical COLOR stripes (about 48 per image width)
+    across smooth skies, walls and fog at 768-1024 px wide; around 1280 px wide
+    they fade, and at 1536 px and wider they come back as wide wavy bands. Base
+    does not band. Fix: the MATLOWAI banding_fix_L37-41 LoRA at 1.0 on
+    LoraLoaderModelOnly after the SFT model, plus banding_fix_L32-36_extra at 1.0
+    for wide images or big skies, or the merged DeBand int8 models. A sweep's
+    banding score reads these stripes (SFT at 768x1024 scored 12-16, DeBand 4-7).
   latent: EmptyFlux2LatentImage makes the latent (Flux2 latent format).
 research: >-
   Floor last reviewed 2026-10. Sources: https://github.com/OpenMOSS/MOSS-Image ;
   ComfyUI comfy/supported_models.py MOSSImage (multiplier 1.0, shift 5.0);
   comfy_extras/nodes_model_advanced.py ModelSamplingSD3 (multiplier 1000);
-  local sampler/CFG/resolution sweeps 2026-10-18.
+  local sampler/CFG/resolution sweeps 2026-10-18; banding:
+  https://huggingface.co/MATLOWAI/MOSS-Image-SFT-DeBand plus a local
+  SFT/Base/DeBand sweep at 768x1024 2026-10-23.

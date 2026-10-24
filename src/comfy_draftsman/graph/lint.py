@@ -85,7 +85,7 @@ def _missing_prompt_previews(
     to the user unless a Show Text-style node displays the final string."""
     from .annotate import _outputs_conditioning, _prompt_role
 
-    findings = []
+    findings: list[dict[str, Any]] = []
     for node in wf.nodes.values():
         if not _outputs_conditioning(node):
             continue  # an LLM/text node with a `prompt` input is not an encoder
@@ -105,6 +105,7 @@ def _missing_prompt_previews(
         if not wired or _prompt_role(wf, node) != "positive":
             continue
         chain = _upstream_nodes(wf, node, wired[0])
+        findings.extend(f for f in _hidden_troubleshooting(wf, chain) if f not in findings)
         if not _has_text_display(wf, chain):
             findings.append(
                 _finding(
@@ -117,6 +118,27 @@ def _missing_prompt_previews(
                 )
             )
     return findings
+
+
+_DIAGNOSTIC_OUTPUTS = {"troubleshooting", "status"}  # LLM/API node report outputs, by exact name
+
+
+def _hidden_troubleshooting(wf: Workflow, chain: list[Node]) -> list[dict[str, Any]]:
+    """A prompt generator's own report output (EA_LMStudio, Groq, OpenRouter...)
+    left unwired: when the LLM fails or returns junk, the reason is never shown."""
+    linked = {(link.origin_id, link.origin_slot) for link in wf.links.values()}
+    return [
+        _finding(
+            "hidden-troubleshooting",
+            f"{node.type} #{node.id} writes the positive prompt but its '{out.name}' output "
+            "is not shown - wire it to a Show Text node so a failed or odd LLM answer explains itself",
+            node.id,
+        )
+        for node in chain
+        if node.mode not in (MODE_MUTE, MODE_BYPASS)
+        for idx, out in enumerate(node.outputs)
+        if out.name.lower() in _DIAGNOSTIC_OUTPUTS and out.type == "STRING" and (node.id, idx) not in linked
+    ]
 
 
 def _family_guidance(
@@ -171,14 +193,12 @@ def _resolution_alignment_findings(
     deliberately use an odd size, and rewriting it or injecting a math node
     to force alignment would silently change the user's graph.
     """
-    from .annotate import _is_canvas_node  # local import: annotate imports lint
-
     multiple_of = guidance.get("multiple_of")
     if not isinstance(multiple_of, int) or multiple_of <= 1:
         return []
     findings: list[dict[str, Any]] = []
     for node in wf.nodes.values():
-        if not _is_canvas_node(node.type):
+        if not _is_size_node(node, object_info):
             continue
         try:
             named = w.widgets_to_named(node.type, node.widgets_values, object_info)
@@ -204,29 +224,16 @@ def _resolution_alignment_findings(
 def _model_sampling_size_findings(
     wf: Workflow, object_info: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    from .annotate import _is_canvas_node
-
     canvases: set[tuple[int, int]] = set()
     samplers: list[tuple[Node, tuple[int, int]]] = []
     unknown_canvas = False  # a wired/unreadable latent size makes the latent ambiguous
     for node in wf.nodes.values():
         if node.mode in (MODE_MUTE, MODE_BYPASS):
             continue
-        is_canvas = _is_canvas_node(node.type)
+        is_canvas = _is_size_node(node, object_info)
         if not is_canvas and node.type != "ModelSamplingFlux":
             continue
-        size: tuple[int, int] | None = None
-        if not any(
-            (slot := node.input_by_name(dim)) is not None and slot.link is not None
-            for dim in ("width", "height")
-        ):
-            try:
-                named = w.widgets_to_named(node.type, node.widgets_values, object_info)
-            except (ValueError, KeyError):
-                named = {}
-            width, height = named.get("width"), named.get("height")
-            if type(width) is int and type(height) is int:
-                size = (width, height)
+        size = _set_size(node, object_info)
         if is_canvas:
             if size is None:
                 unknown_canvas = True
@@ -324,7 +331,87 @@ def lint(
     family, guidance = _family_guidance(wf, object_info, learned_dir)
     findings.extend(_avoid_node_findings(wf, family, guidance))
     findings.extend(_resolution_alignment_findings(wf, object_info, family, guidance))
+    findings.extend(_native_resolution_findings(wf, object_info, family, guidance))
     findings.extend(_model_sampling_size_findings(wf, object_info))
+    return findings
+
+
+def _is_size_node(node: Node, object_info: dict[str, Any]) -> bool:
+    """A node that sets the render size: an Empty*Latent canvas, or any node that
+    outputs a LATENT from its own width/height widgets (TextEncodeFibo2)."""
+    from .annotate import _is_canvas_node  # local import: annotate imports lint
+
+    if _is_canvas_node(node.type):
+        return True
+    schema = object_info.get(node.type) or {}
+    if "LATENT" not in (schema.get("output") or []):
+        return False
+    required = (schema.get("input") or {}).get("required") or {}
+    return all(w.is_widget_input(required.get(dim)) for dim in ("width", "height"))
+
+
+def _set_size(node: Node, object_info: dict[str, Any]) -> tuple[int, int] | None:
+    """(width, height) typed on the node; None when wired, unreadable, or 0
+    (0 means "the model's own size" on nodes like TextEncodeFibo2)."""
+    if any((slot := node.input_by_name(dim)) is not None and slot.link is not None for dim in ("width", "height")):
+        return None
+    try:
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+    except (ValueError, KeyError):
+        return None
+    width, height = named.get("width"), named.get("height")
+    if type(width) is int and type(height) is int and width > 0 and height > 0:
+        return width, height
+    return None
+
+
+def _differs_from_defaults(node: Node, object_info: dict[str, Any]) -> bool:
+    """A node doing something: a wired widget input, or a value off its schema
+    default (ScaleROPE at scale 1.0 is a no-op). True when unreadable - unknown
+    is not a finding."""
+    if any(slot.link is not None and slot.widget_name is not None for slot in node.inputs):
+        return True
+    try:
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+    except (ValueError, KeyError):
+        return True
+    spec = (object_info.get(node.type) or {}).get("input") or {}
+    defaults = {k: v[1].get("default") for part in spec.values() for k, v in part.items()
+                if isinstance(v, list | tuple) and len(v) > 1 and isinstance(v[1], dict)}
+    return not defaults or any(k in defaults and defaults[k] != v for k, v in named.items())
+
+
+def _native_resolution_findings(
+    wf: Workflow, object_info: dict[str, Any], family: str | None, guidance: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Rendering above the size a family was trained at, when its YAML (or a
+    record_learning call) says that breaks it - FIBO repeats subjects above
+    ~1 MP - and the graph lacks the declared fix node. Silent with no data."""
+    spec = guidance.get("native_resolution") or {}
+    max_mp = spec.get("max_mp")
+    if not isinstance(max_mp, int | float) or isinstance(max_mp, bool) or max_mp <= 0:
+        return []
+    active = [n for n in wf.nodes.values() if n.mode not in (MODE_MUTE, MODE_BYPASS)]
+    fix = spec.get("fix_node")
+    if fix and any(n.type == fix and _differs_from_defaults(n, object_info) for n in active):
+        return []
+    findings = []
+    for node in active:
+        if not _is_size_node(node, object_info) or (size := _set_size(node, object_info)) is None:
+            continue
+        mp = size[0] * size[1] / 2**20
+        if mp <= max_mp * 1.15:  # trained sizes sit around max_mp, not exactly on it
+            continue
+        findings.append(
+            _finding(
+                "above-native-resolution",
+                f"{node.type} #{node.id}: {size[0]}x{size[1]} is {mp:.1f} MP on "
+                f"{guidance.get('display_name', family)} - {spec.get('note', '').strip()}"
+                # the scale factor only means something when there is a fix node to set
+                + (f" Here sqrt({max_mp:g}/{mp:.1f}) = {(max_mp / mp) ** 0.5:.2f}." if fix else ""),
+                node.id,
+            )
+        )
     return findings
 
 

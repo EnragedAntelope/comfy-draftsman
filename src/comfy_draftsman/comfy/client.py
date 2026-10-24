@@ -14,7 +14,9 @@ Endpoint shapes verified against ComfyUI 0.27.0 (July 2026):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 import uuid
 from typing import Any
 from urllib.parse import quote
@@ -288,6 +290,21 @@ class ComfyClient:
         return round((end - start) / 1000, 1)
 
     @staticmethod
+    def _sampling_s(ticks: dict[str, list[tuple[float, int, int]]], api_prompt: dict[str, Any]) -> float | None:
+        """Sampler time per run: seconds per step between the first and last
+        progress tick, times the step count. Models load before step 1, so this
+        leaves out loads and swaps that elapsed_s includes (a front-queued run
+        between someone else's jobs reloads its models every time)."""
+        total = None
+        for node, seq in ticks.items():
+            if "sampler" not in str(api_prompt.get(node, {}).get("class_type", "")).lower():
+                continue
+            (t0, v0, _), (t1, v1, steps) = seq[0], seq[-1]
+            if v1 > v0 and steps:
+                total = (total or 0.0) + (t1 - t0) / (v1 - v0) * steps
+        return None if total is None else round(total, 1)
+
+    @staticmethod
     def _collect_outputs(history: dict[str, Any]) -> list[dict[str, Any]]:
         """FILE outputs only, flattened to relocatable {filename, subfolder, type}
         refs. Non-file return values go through _collect_data_outputs."""
@@ -328,6 +345,14 @@ class ComfyClient:
             for key, value in node_output.items():
                 if key in cls.FILE_OUTPUT_KEYS or key in cls._DATA_KEYS_IGNORED:
                     continue
+                # ShowText/PreviewAny {"text": [s]}: the list only wraps it. Other keys
+                # keep their lists - a one-item `filenames` is still a list of files
+                if key == "text" and isinstance(value, list) and len(value) == 1 and isinstance(value[0], str):
+                    value = value[0]
+                    if len(value) <= value_chars and value.lstrip()[:1] in ("{", "["):
+                        # an LLM's JSON answer reads as JSON, not as an escaped string
+                        with contextlib.suppress(ValueError):
+                            value = json.loads(value)
                 rendered = value if isinstance(value, str) else json.dumps(value, default=str)
                 # over-long values degrade to a clipped STRING; anything within
                 # budget keeps its original shape (list/dict/number)
@@ -374,6 +399,7 @@ class ComfyClient:
             partial_node_errors = queued.get("node_errors") or {}
             error: dict[str, Any] | None = None
             timed_out = False
+            ticks: dict[str, list[tuple[float, int, int]]] = {}  # node -> (time, step, steps)
             try:
                 async with asyncio.timeout(timeout):
                     while True:
@@ -385,6 +411,10 @@ class ComfyClient:
                         if data.get("prompt_id") not in (None, prompt_id):
                             continue
                         kind = event.get("type")
+                        if kind == "progress" and isinstance(data.get("value"), int):
+                            ticks.setdefault(str(data.get("node")), []).append(
+                                (time.monotonic(), data["value"], data.get("max") or 0)
+                            )
                         if kind == "execution_error":
                             error = data
                             break
@@ -430,6 +460,8 @@ class ComfyClient:
         }
         if (elapsed := self._elapsed_s(history)) is not None:
             result["elapsed_s"] = elapsed
+        if (sampling := self._sampling_s(ticks, api_prompt)) is not None:
+            result["sampling_s"] = sampling
         cached = [
             str(node)
             for message in (history.get("status") or {}).get("messages") or []

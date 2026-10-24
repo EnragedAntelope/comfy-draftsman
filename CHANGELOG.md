@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.25.0 - FIBO sweep feedback, new model families
+
+### Fixed
+
+- A freshly added LoRA Manager loader runs headlessly: `add_node` writes the pack's
+  saved widget layout, and setting `text` rebuilds the `loras` list it executes from
+  (setting `loras` adds the missing `<lora:...>` tags back to the text). Stale
+  `lastAccepted` autocomplete state is dropped.
+- Off-step values (ScaleROPE 0.85, denoise 0.999) are accepted at edit time, as
+  ComfyUI's `/prompt` only checks min/max; `step-misaligned` is now info, not a warning.
+- Show Text style outputs come back as a string, and a JSON answer as JSON with its
+  key order kept, instead of a one-item list of escaped text.
+- `record_learning` with no `updates` (or no `source`) returns the expected shape and
+  an example instead of saving an empty entry. Unknown `detect` keys are named and
+  dropped without losing the patterns; sampling-shape errors give a full example.
+- Display-only widgets the frontend never saves (ResolutionSelector's `preview`,
+  ImageCompare's `compare_view`) no longer count as widget slots, which raised a
+  false `widget-count-drift` warning on every saved ResolutionSelector.
+- ImageCompare now runs headlessly: its `compare_view` value is sent to `/prompt`
+  the way the frontend sends it. ComfyUI rejected the prompt without it.
+
+### Added
+
+- `fibo2` (FIBO 2.0), `flux3_klein` (FLUX 3 Image Klein, Base as a variant),
+  `minimax_h3` (MiniMax H3) and `anima` (Anima, Turbo as a variant; the 512-1536 px
+  range as its native size) floor families. The `moss_image` floor explains SFT's
+  color banding, the sizes it shows at, and the DeBand LoRA fix.
+- `above-native-resolution` lint: a family can declare its trained size and a fix
+  node (FIBO 2.0: ScaleROPE above ~1 MP, with the scale to use). A fix node left at
+  its schema defaults (ScaleROPE at scale 1.0 does nothing) does not count.
+- `hidden-troubleshooting` lint: an LLM node writing the positive prompt whose
+  `troubleshooting`/`status` output is not shown anywhere.
+- Runs and sweep cells report `sampling_s`: step time from websocket progress, without
+  model loads. Sweeps flag cells that shared the queue with other jobs (model swaps).
+- Sweep cells get a `banding` score: the strongest evenly spaced 10-64 px stripe, in
+  color or brightness, against its spectral neighbours. Checked on real renders: plain
+  MOSS-Image SFT at 768x1024 scores 12-16 (its vertical color bands), while Base,
+  DeBand, LoRA'd SFT and FIBO renders score 1-7. At 8 and up the cell also names the stripe
+  (`banding_stripe`, e.g. `vertical 16px`). A sweep without crops returns a
+  `crop_guide` image with a 0.1 grid for aiming fractional crops.
+
+### Not changed
+
+- `banding` ignores stripes 8 px apart and closer (every VAE's normal texture peaks
+  there), and stripes that wander: MOSS SFT's wide wavy bands at 1536 px and wider
+  are judged by eye in a crop.
+- FLUX 3 Klein gets no native-resolution lint: its sources state no trained size.
+- LLM structured-output key sorting comes from LM Studio, not draftsman; the FIBO
+  floor note says to use free JSON with the order given in the system prompt.
+
 ## 0.24.0 - MOSS-Image session feedback
 
 ### Fixed
