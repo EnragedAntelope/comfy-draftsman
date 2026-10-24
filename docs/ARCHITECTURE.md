@@ -745,6 +745,19 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   Each box gets its own square-ish sheet, since one row per run was unviewably tall.
   A run whose sampler came from ComfyUI's cache (`execution_cached`) is marked
   `sampling_cached`, because its `elapsed_s` timed only the nodes after the sampler.
+  `sampling_s` (`ComfyClient._sampling_s`) is the comparable number: per sampler
+  node, seconds per step between the first and last websocket `progress` tick, times
+  steps. Model loads happen before step 1, so a queue shared with other families'
+  jobs (model swaps) does not skew it; the sweep still marks such cells
+  `shared_queue`.
+- **The banding score folds, it does not threshold.** `imaging.banding_score` keeps
+  only smooth 64 px tiles (3 px high-pass stddev <= 3), averages each tile along rows
+  and columns, sums across tiles and folds the profile by 8/16/32 px. Stripes locked
+  to the latent grid add up in phase; content lands at random phases and cancels. A
+  per-tile median (v1) tracked bokeh edges and fabric on real renders. A wider blur to
+  catch 32 px stripes let content through, so wide stripes read lower. Comparative
+  only: rank one sweep's runs; real clean renders scored 0.03-0.21 and a visibly
+  grid-artifacted one 0.45.
 - **The session store writes through.** `server._persist` runs after every mutating
   tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
   because the MCP server is a per-conversation process and an in-memory-only workflow
@@ -771,9 +784,15 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   only when it is a list of strings as long as the values; then `set_widget` writes
   by that name, validate skips the positional count/drift checks, and `to_api` takes
   those values for declared inputs, wrapping a list as `{"__value__": [...]}` the way
-  the frontend does (ComfyUI would read a bare list as a link). A freshly added LM
-  node has no such list, so it still stops loudly: guessing the pack's JS state is
-  worse than the LoRA Text Loader workaround.
+  the frontend does (ComfyUI would read a bare list as a link). LM executes from the
+  `loras` list only (its Python drops `text`); the browser rebuilds that list from the
+  text's `<lora:name:strength[:clip]>` tags on load. So a freshly added LM node gets
+  the layout LM itself saves (`widgets.lm_fresh_widgets`: meta dict, text, `[]`), and
+  `set_widget` keeps the two in step the way LM's `mergeLoras` does: setting `text`
+  rebuilds `loras` (existing entries keep their state, text strengths win), setting
+  `loras` appends missing tags to the text. `lastAccepted` in the meta dict is
+  session-only autocomplete state LM strips on export, so it is dropped on every set.
+  Nodes with a control_after_generate or dynamic combo still stop loudly.
 - **`headless: true` findings block runs, not saves.** `js-widget-input` and
   `widget-layout-unmapped` mean the raw API can't carry the node, while the editor can;
   `save_workflow` filters them out of its gate, `run_workflow` and the sweep do not.
@@ -804,8 +823,8 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
-- **[OPEN] VRAM floors for the unsourced families.** chroma, krea2, ltx,
-  qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
+- **[OPEN] VRAM floors for the unsourced families.** chroma, fibo2, krea2, ltx,
+  minimax_h3, moss_image, qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
   nothing. sd15 in particular was left out on purpose: no citable floor was
   found for it, and it runs comfortably on anything ComfyUI itself supports, so
   the verdict would never fire. Add one only from a source that states the
@@ -843,8 +862,9 @@ Open:
   **considered and rejected**: on the live instance the server *rejected* a
   hand-serialized `text` until it was rebuilt from the active entries, so
   emitting a raw value would trade a loud, honest error for a silently-wrong
-  render. A real fix would need per-pack resolution logic (out of scope for a
-  generic tool); until then the honest stop stands. Workaround for a caller that
+  render. A real fix needs per-pack resolution logic; 0.25.0 added it for the LM
+  Lora Loader's `text`/`loras` pair only (see the saved-widget-name gotcha). The
+  Randomizer and Pool configs keep the honest stop. Workaround for a caller that
   must run such a graph headlessly: connect the input to a plain-STRING source,
   swap in the pack's plain-STRING node variant, or run it from the ComfyUI
   frontend. (Code note: `validate` blocks on any widget-backed unconnected

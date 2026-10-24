@@ -28,15 +28,13 @@ def object_info():
 
 def test_lora_filename_does_not_hijack_family_detection(object_info, tmp_path):
     """The exact reported incident: a placeholder LTX LoRA on an H3-named UNet
-    must not detect as 'ltx'. Without the H3 learned overlay, no family in the
-    floor claims this UNet name, so detection must return None - not 'ltx'."""
+    must not detect as 'ltx'. The UNet decides: the floor's minimax_h3 family."""
     wf = Workflow.new()
     unet = wf.add_node("UNETLoader", object_info=object_info)
     wf.set_widget(unet.id, "unet_name", "minimax_h3_ref2va_pruned_int8.safetensors", object_info)
     lora = wf.add_node("LoraLoader", object_info=object_info)
     wf.set_widget(lora.id, "lora_name", "LTX23_The_Cook_Watermark_Remover_v1.safetensors", object_info)
-    assert knowledge.detect_family(wf, object_info) != "ltx"
-    assert knowledge.detect_family(wf, object_info) is None
+    assert knowledge.detect_family(wf, object_info) == "minimax_h3"
 
 
 def test_learned_overlay_detects_family_from_primary_ref_only(object_info, tmp_path):

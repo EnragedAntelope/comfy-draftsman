@@ -370,7 +370,7 @@ def test_full_output_returns_one_node_unclipped():
     clipped = ComfyClient._collect_data_outputs(history)
     assert len(clipped["12"]["text"]) < 3000 and "note" in clipped
     full = ComfyClient._collect_data_outputs(history, node_id="12", budget=50_000)
-    assert full == {"12": {"text": [long]}}
+    assert full == {"12": {"text": long}}
     capped = ComfyClient._collect_data_outputs(
         {"outputs": {"12": {"text": "y" * 60_000}}}, node_id="12", budget=50_000
     )

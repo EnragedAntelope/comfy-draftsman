@@ -9,6 +9,7 @@ full-resolution file.
 from __future__ import annotations
 
 import io
+from array import array
 
 from PIL import Image as PILImage
 
@@ -121,6 +122,78 @@ def crop_tiles(img: PILImage.Image, boxes: list[list[float]]) -> list[PILImage.I
         box = (max(x0, 0), max(y0, 0), min(x1, img.width), min(y1, img.height))
         tiles.append(img.crop(box) if box[2] > box[0] and box[3] > box[1] else None)
     return tiles
+
+
+_BAND_TILE = 64
+_SMOOTH_HP_STD = 3.0  # gray levels of fine detail above which a tile is texture, not smooth
+
+
+_BAND_PERIODS = (8, 16, 32)  # latent/patch grid spacings in pixels; all divide the tile
+
+
+def banding_score(img: PILImage.Image) -> float | None:
+    """Grid-locked stripe strength in the SMOOTH areas (sky, walls, skin), in gray
+    levels (RMS). Fine detail of every smooth 64px tile is averaged along rows and
+    columns, summed across tiles and folded by 8/16/32 px: stripes tied to the
+    model's latent grid add up in phase, while content (edges, texture, bokeh)
+    lands at random phases and cancels. Comparative - rank one sweep's runs by
+    it; None when under 5% of the image is smooth enough to judge."""
+    from PIL import ImageChops, ImageFilter, ImageStat
+
+    gray = img.convert("L")
+    # signed high-pass centred on 128. A 3px blur keeps all of an 8px stripe, half
+    # of a 16px one and a sixth of a 32px one; a wider blur let content through
+    # (clean real renders rose to the level of a striped one), so wide stripes
+    # simply read lower
+    hp = ImageChops.subtract(gray, gray.filter(ImageFilter.GaussianBlur(3)), 1.0, 128)
+    t = _BAND_TILE
+    sums = {(1, t): [0.0] * t, (t, 1): [0.0] * t}  # row profile, column profile
+    tiles = total = 0
+    var = 0.0
+    for y in range(0, gray.height - t + 1, t):
+        for x in range(0, gray.width - t + 1, t):
+            total += 1
+            tile = hp.crop((x, y, x + t, y + t))
+            sigma = ImageStat.Stat(tile).stddev[0]
+            if sigma > _SMOOTH_HP_STD:
+                continue
+            tiles += 1
+            var += sigma**2
+            tile = tile.convert("F")  # so row means keep their fractions
+            for size, acc in sums.items():
+                means = array("f", tile.resize(size, PILImage.Resampling.BOX).tobytes())
+                for i, v in enumerate(means):
+                    acc[i] += v - 128
+    if not total or tiles < max(4, total // 20):
+        return None
+    best = 0.0
+    for acc in sums.values():
+        profile = [v / tiles for v in acc]
+        for period in _BAND_PERIODS:
+            bins = [sum(profile[j::period]) / (t // period) for j in range(period)]
+            mean = sum(bins) / period
+            spread = sum((b - mean) ** 2 for b in bins) / period
+            # what pure noise leaves in a bin: per-pixel variance over the pixels it averages
+            noise = (var / tiles) / (t * (t // period) * tiles)
+            best = max(best, spread - noise)
+    return round(best**0.5, 2)
+
+
+def crop_guide(img: PILImage.Image, size: int = 384) -> PILImage.Image:
+    """Thumbnail with a labelled 0.1 grid, for aiming fractional sweep crops."""
+    from PIL import ImageDraw
+
+    guide = img.convert("RGB")
+    guide.thumbnail((size, size), PILImage.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(guide)
+    for i in range(1, 10):
+        x, y = round(guide.width * i / 10), round(guide.height * i / 10)
+        color = (255, 220, 0) if i == 5 else (0, 230, 255)
+        draw.line([(x, 0), (x, guide.height)], fill=color)
+        draw.line([(0, y), (guide.width, y)], fill=color)
+        draw.text((x + 2, 2), f".{i}", fill=color)
+        draw.text((2, y + 2), f".{i}", fill=color)
+    return guide
 
 
 def to_png(img: PILImage.Image) -> bytes:

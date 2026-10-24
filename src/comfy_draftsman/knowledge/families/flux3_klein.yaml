@@ -1,0 +1,69 @@
+family: flux3_klein
+display_name: FLUX 3 Image Klein
+# BFL FLUX 3 Image Klein: 5.6B image transformer for text-to-image and editing
+# with up to 10 reference images. Patterns are specific to FLUX 3 so the
+# generic "flux" (FLUX.1) floor never claims these files; FLUX.2 Klein files
+# ("flux-2-klein") are a different model and do not match.
+detect:
+  checkpoint_patterns: ["flux3", "flux_3", "flux-3"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_4b_bf16 or qwen3vl_4b_int8_convrot (CLIPLoader, type=flux3)"]
+  vae: "flux2-vae.safetensors"
+  prompt_upsampler: "qwen3.5_9b_flux3_prompt_upsampler (bf16 / int8_convrot / w4a8; CLIPLoader type=flux3 into TextGenerate)"
+latent_node: EmptyFlux2LatentImage
+hardware:
+  vram_gb: {minimum: 8}
+  notes: >-
+    The int8_convrot transformer and text encoder are the 8 GB path and also
+    suit GPUs without FP8 (RTX 30 and older). NVFP4 needs a Blackwell GPU. The
+    reference code measured BF16 at 31 GB on a B200 at 1024x1024, upsampler off.
+  source: >-
+    https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy - "The int8
+    files run on 8 GB GPUs such as the RTX 3070"
+# The distilled checkpoint is the default; the undistilled Base is the variant.
+sampling:
+  cfg: {default: 1}  # no min/max: the Base variant's 3.5 would merge into a 1-1 range
+  steps: {default: 16}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  base:
+    patterns: ["klein-base", "klein_base", "kleinbase"]
+    sampling:
+      cfg: {default: 3.5}
+      steps: {default: 50}
+    notes:
+      sampling: >-
+        Klein Base (undistilled): 50 steps, CFG 3.5, euler/simple. Meant for
+        fine-tuning, LoRA training and research; use the distilled model to
+        generate.
+notes:
+  loaders: >-
+    UNETLoader (flux3-image-klein-*.safetensors) + CLIPLoader qwen3vl 4B with
+    type=flux3 + VAELoader flux2-vae. Canvas is EmptyFlux2LatentImage
+    (templates open at 1024x1024). Files: diffusion_models/, text_encoders/,
+    vae/ from black-forest-labs/flux-3-image-klein-comfy.
+  sampling: >-
+    Distilled Klein: 16 steps, no guidance (CFG 1), euler/simple. Base: 50
+    steps, CFG 3.5. The negative prompt stays empty.
+  prompting: >-
+    BFL: do not use the model without the prompt upsampler - a short prompt
+    sent as typed gives generic output. The templates run the 9B upsampler
+    through TextGenerate (max 3584 tokens, thinking off) behind a switch, then
+    CLIPTextEncode. Any LLM can stand in using the upsampler's published
+    system prompts (t2i, i2i, t2i_bbox, i2i_bbox). Output is English; text to
+    render goes in quotes.
+  editing: >-
+    Up to 10 references through ReferenceMultiLatent; cite them as
+    <ref_image_0>, <ref_image_1>... Add every reference to BOTH positive and
+    negative. Write a full caption of the result with the edit folded in.
+  layout: >-
+    CreateBoundingBoxes -> Flux3LayoutPrompt places elements; cite box N as
+    <obj_N> in the prompt. Describe colours in words (palettes are ignored).
+research: >-
+  Floor written 2026-10-23 from public sources; not yet run locally. Sources:
+  https://huggingface.co/black-forest-labs/flux-3-image-klein ;
+  https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy ;
+  https://huggingface.co/black-forest-labs/flux-3-image-klein-pup ;
+  Comfy-Org/workflow_templates image_flux3_klein_*.json (sampler settings).

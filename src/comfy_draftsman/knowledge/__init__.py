@@ -88,6 +88,7 @@ _TOP_SHAPES: dict[str, type | tuple[type, ...]] = {
     "multiple_of": int, "notes": dict, "sampling": dict, "techniques": dict,
     "detect": dict, "hardware": dict, "variants": dict, "loader_nodes": dict,
     "components": dict, "avoid_nodes": dict, "sources": list, "resolutions": (list, dict),
+    "native_resolution": dict,
 }
 # children of these maps must all have one type (sampling has exceptions below)
 _CHILD_SHAPES: dict[str, type] = {
@@ -127,11 +128,18 @@ def shape_errors(data: Any) -> list[tuple[str, str]]:
                 else:
                     ok, shown = isinstance(item, child), _type_name(child)
                 if not ok:
-                    hint = ' (e.g. {"default": 3})' if key == "sampling" and shown == "mapping" else ""
+                    hint = (
+                        f' (e.g. {{"sampling": {{"cfg": {{"default": 3}}}}}} - keys are knob names like cfg/steps/shift, not "{name}")'
+                        if key == "sampling" and shown == "mapping" else ""
+                    )
                     errors.append((f"{key}.{name}", f"{key}.{name} must be a {shown}{hint}"))
                 elif key == "techniques" and isinstance(item, dict) and not isinstance(item.get("note", ""), str):
                     errors.append((f"{key}.{name}", f"techniques.{name}.note must be a string"))
         if key == "detect":
+            for extra in sorted(set(value) - {"checkpoint_patterns"}):
+                # per-child path: a loaded file loses only this key, not its patterns
+                errors.append((f"detect.{extra}", f"detect.{extra} is never read - detect takes only "
+                               "checkpoint_patterns, substrings matched against checkpoint AND unet filenames"))
             patterns = value.get("checkpoint_patterns", [])
             if not (isinstance(patterns, list) and all(isinstance(p, str) for p in patterns)):
                 errors.append((key, "detect.checkpoint_patterns must be a list of strings"))

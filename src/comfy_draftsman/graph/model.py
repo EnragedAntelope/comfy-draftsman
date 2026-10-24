@@ -564,6 +564,9 @@ class Workflow:
                 )
             node.widgets_values = w.widget_defaults(class_type, object_info)
             node.properties = {"Node name for S&R": class_type}
+            if lm := w.lm_fresh_widgets(class_type, object_info):
+                # LoRA Manager's saved shape: names make it settable and runnable
+                node.properties[w.SAVED_WIDGET_NAMES_PROPERTY], node.widgets_values = lm
         elif class_type in NOTE_TYPES:
             node.widgets_values = [""]
             node.size = [380.0, 180.0]
@@ -955,7 +958,22 @@ class Workflow:
             return
         names = w.saved_widget_names(node.properties, node.widgets_values)
         if names is not None and input_name in names:
-            node.widgets_values[names.index(input_name)] = value
+            values = node.widgets_values
+            values[names.index(input_name)] = value
+            kinds = {n: s[0] for n, s in w._iter_schema_inputs(object_info.get(node.type, {}))
+                     if isinstance(s, list | tuple) and s}
+            text_names = [n for n in names if kinds.get(n) == "AUTOCOMPLETE_TEXT_LORAS"]
+            if "loras" in names and len(text_names) == 1:
+                text_i, loras_i = names.index(text_names[0]), names.index("loras")
+                if input_name == text_names[0] and isinstance(value, str):
+                    values[loras_i] = w.lm_loras_from_text(value, values[loras_i])
+                elif input_name == "loras" and isinstance(values[text_i], str):
+                    values[text_i] = w.lm_text_with_loras(values[text_i], value)
+            for i, n in enumerate(names):
+                # session-only cursor state that quotes the OLD text; LoRA Manager
+                # strips it on export too
+                if n.startswith(w.LM_META_PREFIX) and isinstance(values[i], dict):
+                    values[i] = {k: v for k, v in values[i].items() if k != "lastAccepted"}
             return
         # instance context: a custom JS-widget input is only recognizable from
         # the sockets this node actually serialized (widgets._is_custom_widget).

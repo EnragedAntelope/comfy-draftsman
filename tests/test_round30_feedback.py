@@ -55,7 +55,9 @@ def test_unfed_custom_types_become_widget_backed_slots():
     wf = Workflow()
     node = wf.add_node("Lora Stacker (LoraManager)", object_info=OI)
     assert [(s.name, s.widget_name) for s in node.inputs] == [("text", "text"), ("loras", "loras")]
-    assert node.widgets_values == []  # pack JS state, never guessed
+    # LoRA Manager's own saved layout (meta, text, loras), named so it runs headlessly
+    assert node.properties["__lm_widget_ids"] == ["__lm_autocomplete_meta_text", "text", "loras"]
+    assert node.widgets_values == [{"version": 1, "textWidgetName": "text"}, "", []]
     ui = wf.to_ui()["nodes"][0]["inputs"][0]
     assert ui["widget"] == {"name": "text"}
     findings = validate(wf, OI)
