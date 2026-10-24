@@ -314,6 +314,14 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
 
 SAVED_WIDGET_NAMES_PROPERTY = "__lm_widget_ids"
 
+# Display-only widgets the frontend creates with serialize=false, so they take no
+# widgets_values slot (ComfyUI_frontend useResolutionPreviewWidget.ts and
+# useImageCompareWidget.ts). Only source-checked types belong here.
+UNSERIALIZED_WIDGET_TYPES = frozenset({"RESOLUTION_PREVIEW", "IMAGECOMPARE"})
+# ImageCompare still sends its initial value to /prompt (options.serialize stays
+# true), and ComfyUI rejects the prompt without it.
+API_ONLY_WIDGET_VALUES: dict[str, list[str]] = {"IMAGECOMPARE": ["", ""]}
+
 
 def saved_widget_names(properties: Any, widgets_values: Any) -> list[str] | None:
     """The name of every saved value, in ``widgets_values`` order, when the
@@ -498,6 +506,8 @@ def _entries(
             pos += 1
 
     for name, spec in _iter_schema_inputs(schema):
+        if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str) and spec[0] in UNSERIALIZED_WIDGET_TYPES:
+            continue
         if is_widget_input(spec) or _is_custom_widget(name, spec, socket_names):
             yield from walk(name, spec)
 
@@ -742,9 +752,12 @@ def named_for_api(
     ``socket_names`` lets custom JS-widget inputs (e.g. LoraManager's autocomplete
     box) survive UI->API conversion instead of being dropped."""
     named = widgets_to_named(class_type, widgets_values, object_info, socket_names)
+    schema = _schema(class_type, object_info)
+    for name, spec in _iter_schema_inputs(schema):
+        if isinstance(spec, list | tuple) and spec and isinstance(spec[0], str) and spec[0] in API_ONLY_WIDGET_VALUES:
+            named.setdefault(name, list(API_ONLY_WIDGET_VALUES[spec[0]]))
     if isinstance(widgets_values, dict):
         return named
-    schema = _schema(class_type, object_info)
     for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names):
         if spec is None or name in named:
             continue

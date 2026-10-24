@@ -750,14 +750,20 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   steps. Model loads happen before step 1, so a queue shared with other families'
   jobs (model swaps) does not skew it; the sweep still marks such cells
   `shared_queue`.
-- **The banding score folds, it does not threshold.** `imaging.banding_score` keeps
-  only smooth 64 px tiles (3 px high-pass stddev <= 3), averages each tile along rows
-  and columns, sums across tiles and folds the profile by 8/16/32 px. Stripes locked
-  to the latent grid add up in phase; content lands at random phases and cancels. A
-  per-tile median (v1) tracked bokeh edges and fabric on real renders. A wider blur to
-  catch 32 px stripes let content through, so wide stripes read lower. Comparative
-  only: rank one sweep's runs; real clean renders scored 0.03-0.21 and a visibly
-  grid-artifacted one 0.45.
+- **The banding score is a spectral line test, in color too.** `imaging.banding_score`
+  averages the image down to one column profile and one row profile per RGB channel
+  (linear, so the opponent colors red-green and blue-yellow come from the profiles;
+  convert to `F` before the BOX resize or sub-level color shifts round away). Each
+  profile is high-passed (9-sample mean), FFT'd, and the peak at 10-64 px periods is
+  divided by the median of the bins 3-12 real bins away: a stripe is a sharp line,
+  content a broad bump. Peak over the whole-spectrum median gave busy FIBO renders
+  20-43; 8 px is every VAE's texture and peaks in clean renders. MOSS-Image SFT's
+  banding is vertical COLOR stripes, ~48 per width (16 px at 768), invisible in
+  brightness: the first version (grid-folded brightness in smooth tiles) scored a
+  visibly banded SFT render the same as a clean one, and only seemed to work because
+  it was tested at 2-4 MP, where SFT does not draw them. Thresholds (clean 1-7, banded
+  12-16, `BANDING_VISIBLE` 8) come from the local MOSS and FIBO output folders; reference write-up of the
+  artifact: huggingface.co/MATLOWAI/MOSS-Image-SFT-DeBand.
 - **The session store writes through.** `server._persist` runs after every mutating
   tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
   because the MCP server is a per-conversation process and an in-memory-only workflow
@@ -823,7 +829,7 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
-- **[OPEN] VRAM floors for the unsourced families.** chroma, fibo2, krea2, ltx,
+- **[OPEN] VRAM floors for the unsourced families.** anima, chroma, fibo2, krea2, ltx,
   minimax_h3, moss_image, qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
   nothing. sd15 in particular was left out on purpose: no citable floor was
   found for it, and it runs comfortably on anything ComfyUI itself supports, so

@@ -365,6 +365,22 @@ def _set_size(node: Node, object_info: dict[str, Any]) -> tuple[int, int] | None
     return None
 
 
+def _differs_from_defaults(node: Node, object_info: dict[str, Any]) -> bool:
+    """A node doing something: a wired widget input, or a value off its schema
+    default (ScaleROPE at scale 1.0 is a no-op). True when unreadable - unknown
+    is not a finding."""
+    if any(slot.link is not None and slot.widget_name is not None for slot in node.inputs):
+        return True
+    try:
+        named = w.widgets_to_named(node.type, node.widgets_values, object_info)
+    except (ValueError, KeyError):
+        return True
+    spec = (object_info.get(node.type) or {}).get("input") or {}
+    defaults = {k: v[1].get("default") for part in spec.values() for k, v in part.items()
+                if isinstance(v, list | tuple) and len(v) > 1 and isinstance(v[1], dict)}
+    return not defaults or any(k in defaults and defaults[k] != v for k, v in named.items())
+
+
 def _native_resolution_findings(
     wf: Workflow, object_info: dict[str, Any], family: str | None, guidance: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -377,7 +393,7 @@ def _native_resolution_findings(
         return []
     active = [n for n in wf.nodes.values() if n.mode not in (MODE_MUTE, MODE_BYPASS)]
     fix = spec.get("fix_node")
-    if fix and any(n.type == fix for n in active):
+    if fix and any(n.type == fix and _differs_from_defaults(n, object_info) for n in active):
         return []
     findings = []
     for node in active:

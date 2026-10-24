@@ -3,6 +3,7 @@ text outputs, record_learning shape errors, sampler timing, banding score,
 crop guide, FIBO family and the above-native-resolution lint."""
 
 import math
+import random
 
 from PIL import Image
 
@@ -11,7 +12,7 @@ from comfy_draftsman.comfy.client import ComfyClient
 from comfy_draftsman.graph import validate as v
 from comfy_draftsman.graph.lint import lint
 from comfy_draftsman.graph.model import MODE_BYPASS, Workflow
-from comfy_draftsman.imaging import banding_score, crop_guide
+from comfy_draftsman.imaging import BANDING_VISIBLE, banding_score, crop_guide
 
 # --- LoRA Manager: a fresh loader runs headlessly, text and loras stay in sync -------
 
@@ -86,6 +87,33 @@ def test_off_step_value_is_accepted_and_noted_as_info():
 
 
 # --- text outputs read as text, JSON answers as JSON ---------------------------------
+
+
+def test_display_only_preview_widget_takes_no_saved_value():
+    oi = {"ResolutionSelector": {"input": {
+        "required": {"aspect_ratio": ["COMBO", {"options": ["1:1 (Square)", "2:3 (Portrait Photo)"]}],
+                     "megapixels": ["FLOAT", {"default": 1.0, "min": 0.1, "max": 16.0}],
+                     "multiple": ["INT", {"default": 8, "min": 8, "max": 128}]},
+        "optional": {"preview": ["RESOLUTION_PREVIEW", {"socketless": True}]}},
+        "output": ["INT", "INT"]}}
+    wf = Workflow.new()
+    node = wf.add_node("ResolutionSelector", object_info=oi)
+    assert len(node.widgets_values) == 3  # what the frontend saves
+    node.widgets_values = ["2:3 (Portrait Photo)", 2, 16]
+    assert not [f for f in v.validate(wf, oi) if f["code"] == "widget-count-drift"]
+    assert "preview" not in wf.to_api(oi)[str(node.id)]["inputs"]
+
+
+def test_image_compare_view_is_not_saved_but_is_sent_to_the_api():
+    # ComfyUI rejects an ImageCompare prompt without compare_view (checked live)
+    oi = {"ImageCompare": {"input": {
+        "required": {"compare_view": ["IMAGECOMPARE", {"socketless": True}]},
+        "optional": {"image_a": ["IMAGE"], "image_b": ["IMAGE"]}},
+        "output": [], "output_node": True}}
+    wf = Workflow.new()
+    node = wf.add_node("ImageCompare", object_info=oi)
+    assert node.widgets_values == []  # what the frontend saves
+    assert wf.to_api(oi)[str(node.id)]["inputs"] == {"compare_view": {"__value__": ["", ""]}}
 
 
 def test_show_text_output_is_unwrapped_and_json_parsed():
@@ -164,19 +192,31 @@ def test_sampling_seconds_come_from_step_ticks_only():
 # --- banding score -----------------------------------------------------------------
 
 
-def _image(fn, size=512):
-    img = Image.new("L", (size, size))
-    img.putdata([max(0, min(255, round(fn(x, y)))) for y in range(size) for x in range(size)])
+def _render(stripe=lambda x, y: (0, 0, 0), size=512):
+    """A grainy sky gradient, plus a per-pixel (r, g, b) offset."""
+    rnd = random.Random(0)
+    img = Image.new("RGB", (size, size))
+    px = []
+    for y in range(size):
+        for x in range(size):
+            base, grain, (dr, dg, db) = 90 + 120 * y / size, rnd.gauss(0, 4), stripe(x, y)
+            px.append(tuple(max(0, min(255, round(c))) for c in (base + grain + dr, base + 30 + grain + dg, 220 + grain + db)))
+    img.putdata(px)
     return img
 
 
-def test_banding_score_sees_grid_stripes_not_gradients_or_texture():
-    clean = banding_score(_image(lambda x, y: 60 + 120 * y / 512))
-    striped = banding_score(_image(lambda x, y: 128 + 2 * math.sin(y * 2 * math.pi / 8)))
-    assert clean == 0.0
-    assert striped is not None and striped > 1.0  # RMS of a 2-level sine is 1.41
-    # texture everywhere: nothing smooth to judge
-    assert banding_score(_image(lambda x, y: 128 + 60 * ((x * 7919 + y * 104729) % 13 - 6) / 6)) is None
+def test_banding_score_finds_color_and_brightness_stripes_not_grain():
+    clean, _ = banding_score(_render())
+    assert clean < BANDING_VISIBLE
+    # MOSS-Image SFT style: faint vertical color bands, brightness untouched
+    wave = lambda x: 1.5 * math.sin(x * 2 * math.pi / 16)  # noqa: E731
+    color, where = banding_score(_render(lambda x, y: (wave(x), -wave(x), wave(x))))
+    assert color >= BANDING_VISIBLE and where == "vertical 16px"
+    luma, where = banding_score(_render(lambda x, y: (wave(y * 16 / 24),) * 3))
+    assert luma >= BANDING_VISIBLE and where == "horizontal 24px"
+    # 8px is every VAE's normal texture, out of range on purpose
+    vae, _ = banding_score(_render(lambda x, y: (wave(x * 2),) * 3))
+    assert vae < BANDING_VISIBLE
 
 
 def test_crop_guide_is_a_small_thumbnail():
@@ -194,7 +234,11 @@ FIBO_OI = {
         "width": ["INT", {"default": 0, "min": 0, "max": 16384, "step": 16}],
         "height": ["INT", {"default": 0, "min": 0, "max": 16384, "step": 16}]}},
         "output": ["CONDITIONING", "CONDITIONING", "LATENT"]},
-    "ScaleROPE": {"input": {"required": {"model": ["MODEL"]}}, "output": ["MODEL"]},
+    "ScaleROPE": {"input": {"required": {
+        "model": ["MODEL"],
+        **{k: ["FLOAT", {"default": d, "min": -100.0, "max": 100.0, "step": 0.1}]
+           for k, d in (("scale_x", 1.0), ("shift_x", 0.0), ("scale_y", 1.0), ("shift_y", 0.0))}}},
+        "output": ["MODEL"]},
 }
 
 
@@ -217,6 +261,8 @@ def test_fibo_above_1mp_without_scale_rope_is_flagged(tmp_path):
     found = _native(wf, tmp_path)
     assert [f["node_id"] for f in found] == [enc.id] and "0.50" in found[0]["message"]
     rope = wf.add_node("ScaleROPE", object_info=FIBO_OI)
+    assert _native(wf, tmp_path)  # at its defaults (scale 1.0) ScaleROPE does nothing
+    rope.widgets_values = [0.5, 0.0, 0.5, 0.0]
     assert not _native(wf, tmp_path)
     rope.mode = MODE_BYPASS  # a bypassed fix is no fix
     assert _native(wf, tmp_path)
@@ -240,6 +286,21 @@ def test_flux3_klein_and_minimax_h3_floors(tmp_path):
     base = knowledge.get_guidance("flux3_klein", "flux3-image-klein-base-bf16.safetensors", learned_dir=tmp_path)
     assert (klein["sampling"]["cfg"], klein["sampling"]["steps"]["default"]) == ({"default": 1}, 16)
     assert (base["sampling"]["cfg"], base["sampling"]["steps"]["default"]) == ({"default": 3.5}, 50)
+
+
+def test_anima_floor_and_turbo_variant_without_claiming_sdxl_anime(tmp_path):
+    oi = {"UNETLoader": FIBO_OI["UNETLoader"]}
+    for name, family in (("anima-turbo-v1.1.safetensors", "anima"),
+                         ("anima-aesthetic-v1.0b.safetensors", "anima"),
+                         ("animagine-xl-4.0.safetensors", None),
+                         ("anima_pencil-XL-v5.safetensors", None)):
+        wf = Workflow.new()
+        wf.add_node("UNETLoader", object_info=oi).widgets_values = [name, "default"]
+        assert knowledge.detect_family(wf, oi, learned_dir=tmp_path) == family, name
+    turbo = knowledge.get_guidance("anima", "anima-turbo-v1.1.safetensors", learned_dir=tmp_path)
+    base = knowledge.get_guidance("anima", "anima-base-v1.0.safetensors", learned_dir=tmp_path)
+    assert (turbo["sampling"]["cfg"], turbo["sampling"]["steps"]) == ({"default": 1}, {"default": 8})
+    assert (base["sampling"]["cfg"], base["sampling"]["steps"]) == ({"default": 4}, {"default": 30})
 
 
 def test_native_resolution_without_fix_node_gives_no_scale_factor(tmp_path):

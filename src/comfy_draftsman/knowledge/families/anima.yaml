@@ -1,0 +1,65 @@
+family: anima
+display_name: Anima
+# CircleStone Labs + Comfy Org: 2B anime/illustration text-to-image model built
+# on Cosmos-Predict2-2B, native in ComfyUI. Patterns name the release files
+# (anima-base / -aesthetic / -turbo / -preview*), so SDXL anime checkpoints like
+# Animagine or "anima_pencil-XL" never match.
+detect:
+  checkpoint_patterns: ["anima-base", "anima-aesthetic", "anima-turbo", "anima-preview",
+                        "anima_base", "anima_aesthetic", "anima_turbo", "anima_preview"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen_3_06b_base.safetensors (CLIPLoader, type=stable_diffusion)"]
+  vae: "qwen_image_vae.safetensors (the Qwen-Image VAE)"
+latent_node: EmptyLatentImage
+# Base and Aesthetic share these; Turbo is the variant. No min/max on purpose:
+# a variant's default outside them would merge into a broken range.
+sampling:
+  cfg: {default: 4}
+  steps: {default: 30}
+  samplers: [er_sde, euler_ancestral, dpmpp_2m_sde_gpu, euler]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["anima-turbo", "anima_turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 8}
+      samplers: [euler, er_sde]
+    notes:
+      sampling: >-
+        Anima-Turbo (distilled): CFG 1 and 8-12 steps. Steadier, with a strong
+        default style but less variety; the author's suggested starting point.
+native_resolution:
+  max_mp: 2.25
+  note: >-
+    Anima works between 512x512 and 1536x1536; render inside that range and
+    upscale afterwards.
+notes:
+  loaders: >-
+    UNETLoader (anima-*.safetensors, diffusion_models/) + CLIPLoader
+    qwen_3_06b_base with type=stable_diffusion + VAELoader qwen_image_vae.
+    The official workflow puts ModelSamplingAuraFlow at shift 3 after the
+    UNet and starts from EmptyLatentImage (896x1152).
+  sampling: >-
+    Base and Aesthetic: 30-50 steps, CFG 4-5. er_sde is the neutral default
+    (flat colors, sharp lines); euler_ancestral is softer and takes a little
+    more CFG; dpmpp_2m_sde_gpu is more varied; euler suits Turbo and
+    Aesthetic. Turbo: CFG 1, 8-12 steps.
+  prompting: >-
+    Danbooru-style tags, natural language, or both. Tags lowercase with spaces
+    (only score_N keeps its underscore); order: quality/meta/year/safety, then
+    1girl/1boy, character, series, @artist, general tags. Artists need the @
+    prefix. Positive prefix: "masterpiece, best quality, score_7, safe, ".
+    Negative: "worst quality, low quality, score_1, score_2, score_3, artist
+    name, blurry, jpeg artifacts, chromatic aberration". Weights need to be
+    higher than SDXL, e.g. (chibi:2). Natural language: at least two
+    sentences, and describe each named character. On Aesthetic, skip score_
+    tags in both prompts.
+  limits: >-
+    Illustration and art only - realism is out of scope by design. Short text
+    renders; long text does not. Base has a plain default style, so give it
+    artist or quality tags. Non-commercial model license (outputs may be sold).
+research: >-
+  Floor from https://huggingface.co/circlestone-labs/Anima (model card and its
+  anima_comparison.json workflow), 2026-10-23. Not rendered locally.

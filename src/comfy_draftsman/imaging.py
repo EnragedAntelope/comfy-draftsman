@@ -8,7 +8,10 @@ full-resolution file.
 
 from __future__ import annotations
 
+import cmath
 import io
+import math
+import statistics
 from array import array
 
 from PIL import Image as PILImage
@@ -124,59 +127,65 @@ def crop_tiles(img: PILImage.Image, boxes: list[list[float]]) -> list[PILImage.I
     return tiles
 
 
-_BAND_TILE = 64
-_SMOOTH_HP_STD = 3.0  # gray levels of fine detail above which a tile is texture, not smooth
+# Stripe periods searched, in pixels. 8 px and under is every VAE's normal texture
+# (a peak there in clean renders too); MOSS-Image SFT draws ~48 stripes per width.
+_STRIPE_PERIODS = (10, 64)
+BANDING_VISIBLE = 8.0  # clean real renders score 1-6; visibly striped MOSS SFT 11-16
 
 
-_BAND_PERIODS = (8, 16, 32)  # latent/patch grid spacings in pixels; all divide the tile
+def _fft(x: list[complex]) -> list[complex]:
+    n = len(x)
+    if n == 1:
+        return x
+    even, odd = _fft(x[0::2]), _fft(x[1::2])
+    tw = [cmath.exp(-2j * math.pi * k / n) * odd[k] for k in range(n // 2)]
+    return [e + t for e, t in zip(even, tw, strict=True)] + [e - t for e, t in zip(even, tw, strict=True)]
 
 
-def banding_score(img: PILImage.Image) -> float | None:
-    """Grid-locked stripe strength in the SMOOTH areas (sky, walls, skin), in gray
-    levels (RMS). Fine detail of every smooth 64px tile is averaged along rows and
-    columns, summed across tiles and folded by 8/16/32 px: stripes tied to the
-    model's latent grid add up in phase, while content (edges, texture, bokeh)
-    lands at random phases and cancels. Comparative - rank one sweep's runs by
-    it; None when under 5% of the image is smooth enough to judge."""
-    from PIL import ImageChops, ImageFilter, ImageStat
+def _stripe_peak(profiles: list[list[float]]) -> tuple[float, float]:
+    """(peak / median of its spectral neighbours, period px) for the strongest
+    repeating stripe in these same-length profiles, their spectra summed."""
+    n = len(profiles[0]) - 8
+    size = 1 << (n - 1).bit_length()
+    total = [0.0] * (size // 2)
+    for p in profiles:
+        hp = [p[i] - sum(p[i - 4 : i + 5]) / 9 for i in range(4, len(p) - 4)]  # drop the ramp
+        mean = sum(hp) / n
+        spec = _fft([complex(v - mean) for v in hp] + [0j] * (size - n))
+        total = [t + abs(c) for t, c in zip(total, spec[: size // 2], strict=True)]
+    pad = size / n  # zero padding spreads one real bin over this many
+    best = (0.0, 0.0)
+    lo, hi = _STRIPE_PERIODS
+    for k in range(max(1, math.ceil(size / hi)), min(size // 2, math.floor(size / lo) + 1)):
+        # a stripe is a sharp line; image content is a broad bump, so compare with
+        # the bins 3-12 real bins away rather than the whole spectrum
+        ring = [total[j] for d in range(round(3 * pad), round(13 * pad)) for j in (k - d, k + d) if 0 < j < size // 2]
+        if ring and (base := statistics.median(ring)) > 1e-6:
+            best = max(best, (total[k] / base, size / k))
+    return best
 
-    gray = img.convert("L")
-    # signed high-pass centred on 128. A 3px blur keeps all of an 8px stripe, half
-    # of a 16px one and a sixth of a 32px one; a wider blur let content through
-    # (clean real renders rose to the level of a striped one), so wide stripes
-    # simply read lower
-    hp = ImageChops.subtract(gray, gray.filter(ImageFilter.GaussianBlur(3)), 1.0, 128)
-    t = _BAND_TILE
-    sums = {(1, t): [0.0] * t, (t, 1): [0.0] * t}  # row profile, column profile
-    tiles = total = 0
-    var = 0.0
-    for y in range(0, gray.height - t + 1, t):
-        for x in range(0, gray.width - t + 1, t):
-            total += 1
-            tile = hp.crop((x, y, x + t, y + t))
-            sigma = ImageStat.Stat(tile).stddev[0]
-            if sigma > _SMOOTH_HP_STD:
-                continue
-            tiles += 1
-            var += sigma**2
-            tile = tile.convert("F")  # so row means keep their fractions
-            for size, acc in sums.items():
-                means = array("f", tile.resize(size, PILImage.Resampling.BOX).tobytes())
-                for i, v in enumerate(means):
-                    acc[i] += v - 128
-    if not total or tiles < max(4, total // 20):
-        return None
-    best = 0.0
-    for acc in sums.values():
-        profile = [v / tiles for v in acc]
-        for period in _BAND_PERIODS:
-            bins = [sum(profile[j::period]) / (t // period) for j in range(period)]
-            mean = sum(bins) / period
-            spread = sum((b - mean) ** 2 for b in bins) / period
-            # what pure noise leaves in a bin: per-pixel variance over the pixels it averages
-            noise = (var / tiles) / (t * (t // period) * tiles)
-            best = max(best, spread - noise)
-    return round(best**0.5, 2)
+
+def banding_score(img: PILImage.Image) -> tuple[float, str]:
+    """(score, stripe) for the strongest evenly spaced stripe running the full
+    height or width, 10-64 px apart, in color (red-green + blue-yellow) or
+    brightness. The image is averaged down to one column profile and one row
+    profile - linear, so opponent colors come from the RGB profiles - and each
+    profile's spectrum peak is compared with its neighbours: about 1-6 for clean
+    renders, BANDING_VISIBLE and up for visible stripes (MOSS-Image SFT's
+    vertical color bands score 11-16)."""
+    rgb = img.convert("RGB")
+    best = (0.0, 0.0, "")
+    for size, axis in (((rgb.width, 1), "vertical"), ((1, rgb.height), "horizontal")):
+        r, g, b = (list(array("f", ch.convert("F").resize(size, PILImage.Resampling.BOX).tobytes())) for ch in rgb.split())
+        if len(r) < 2 * _STRIPE_PERIODS[1]:
+            continue
+        chroma = [[x - y for x, y in zip(r, g, strict=True)], [z - (x + y) / 2 for x, y, z in zip(r, g, b, strict=True)]]
+        luma = [[0.299 * x + 0.587 * y + 0.114 * z for x, y, z in zip(r, g, b, strict=True)]]
+        for profiles in (chroma, luma):
+            score, period = _stripe_peak(profiles)
+            best = max(best, (score, period, axis))
+    score, period, axis = best
+    return round(score, 1), (f"{axis} {period:.0f}px" if axis else "")
 
 
 def crop_guide(img: PILImage.Image, size: int = 384) -> PILImage.Image:

@@ -51,6 +51,7 @@ from .graph.widgets import (
     widgets_to_named,
 )
 from .imaging import (
+    BANDING_VISIBLE,
     CROP_MAX,
     INLINE_MAX,
     banding_score,
@@ -2259,8 +2260,9 @@ async def _run_sweep(
                     image = None
             if image is not None:
                 first_image = first_image or image
-                if (band := banding_score(image)) is not None:
-                    entry["banding"] = band
+                entry["banding"], stripe = banding_score(image)
+                if entry["banding"] >= BANDING_VISIBLE:
+                    entry["banding_stripe"] = stripe
             secs = f" - {entry['elapsed_s']}s" if entry.get("elapsed_s") is not None else ""
             if entry.get("sampling_s") is not None:
                 secs = f" - {entry['sampling_s']}s sampling"  # comparable across runs
@@ -2286,8 +2288,9 @@ async def _run_sweep(
         )
     if any("banding" in r for r in runs):
         out["banding_note"] = (
-            "banding = RMS gray levels of stripes locked to an 8/16/32px grid in smooth areas; "
-            "near 0 is clean, compare runs - check the high ones in a crop"
+            f"banding = strongest evenly spaced 10-64px stripe (color or brightness) over its "
+            f"spectral neighbours; clean renders 1-6, >= {BANDING_VISIBLE:g} is visible striping "
+            "(banding_stripe says where) - confirm in a crop"
         )
     if first_image is not None and not crops:
         guide = crop_guide(first_image)
