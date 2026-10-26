@@ -38,16 +38,25 @@ from .comfy.progress import ProgressTracker
 from .comfy.registry import RegistryClient, RegistryUnavailableError
 from .config import Config, load_config
 from .graph.annotate import annotate
-from .graph.lint import lint
+from .graph.lint import lint, resolution_nodes
 from .graph.model import NOTE_TYPES, PRIMITIVE_TYPE, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.spend import api_nodes
-from .graph.validate import check_primitive_value, check_widget_value, validate
+from .graph.validate import (
+    check_primitive_value,
+    check_widget_value,
+    validate,
+    widget_type_problem,
+)
 from .graph.widgets import (
     SYNTHETIC_SUFFIXES,
     _iter_schema_inputs,
     all_slot_names,
     combo_choices,
+    positional_mapping_plausible,
+    saved_widget_names,
+    widget_slot_names,
+    widget_specs,
     widgets_to_named,
 )
 from .imaging import (
@@ -1279,6 +1288,16 @@ async def import_workflow(
     summary = _summary(workflow_id, wf)
     if wf.import_notes:
         summary["link_repairs"] = wf.import_notes[:_FINDINGS_CAP]
+    # values are read by position, so a node whose schema changed since the save
+    # maps them silently wrong - say so now, not at the first failed run
+    with contextlib.suppress(ComfyConnectionError):
+        drift = [
+            f for f in validate(wf, await _object_info())
+            if f["code"] in ("widget-count-drift", "widget-type-mismatch", "widget-layout-unmapped")
+            and f["level"] != "info"
+        ]
+        if drift:
+            summary["widget_drift"] = _cap_findings(drift)
     return summary
 
 
@@ -1317,6 +1336,7 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "disconnect": ({"node_id", "input"}, set()),
     # exactly one of input/index - checked in _apply_ops
     "set_widget": ({"node_id", "value"}, {"input", "index", "force"}),
+    "set_resolution": ({"width", "height"}, set()),
     "replace_in_widget": ({"node_id", "input", "old", "new"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
     "set_mode": ({"node_id", "mode"}, set()),
@@ -1374,6 +1394,85 @@ def _replace_as_set_widget(
         "value": current.replace(op["old"], op["new"], 1),
         **({"force": True} if op.get("force") else {}),
     }
+
+
+def _dims_readable(node: Any, object_info: dict[str, Any], sockets: set[str]) -> bool:
+    """Whether width/height can be written by name: the values are named, their
+    count matches the schema, or every value up to width/height fits its slot."""
+    values = node.widgets_values
+    if not isinstance(values, list) or saved_widget_names(node.properties, values):
+        return True
+    if not positional_mapping_plausible(node.type, values, object_info, sockets):
+        return False
+    slots = widget_slot_names(node.type, object_info, values, sockets)
+    if len(values) == len(slots):
+        return True
+    specs = widget_specs(node.type, object_info, values, sockets)
+    last = max((slots.index(d) for d in ("width", "height") if d in slots), default=-1)
+    for name, value in zip(slots[: last + 1], values, strict=False):
+        spec = specs.get(name)
+        choices = combo_choices(spec) if spec is not None else None
+        if spec is not None and ((value not in choices) if choices else widget_type_problem(name, spec, value)):
+            return False
+    return True
+
+
+def _set_resolution(
+    wf: Workflow, op: dict[str, Any], object_info: dict[str, Any], touched: set[int]
+) -> str:
+    """Set width/height on every active canvas and size-tuned model patch
+    (ModelSamplingFlux, JigsawHiRes) at once. A dimension fed by a PrimitiveNode
+    sets the primitive; one fed by anything else is disconnected first. Every
+    value is checked before anything changes."""
+    size = {"width": op["width"], "height": op["height"]}
+    nodes = resolution_nodes(wf, object_info)
+    if not nodes:
+        raise ValueError(
+            "set_resolution found no Empty Latent/size node or size-tuned model patch "
+            "with width/height widgets; set_widget the node that computes the size "
+            "(megapixels, aspect ratio)"
+        )
+    plan: list[tuple[Any, str, Any, Any, bool]] = []  # node, dim, value, primitive, linked
+    primitive_values: dict[int, Any] = {}
+    for node in nodes:
+        sockets = {s.name for s in node.inputs}
+        if not _dims_readable(node, object_info, sockets):
+            raise ValueError(
+                f"set_resolution: {node.type} #{node.id}'s saved widgets don't line up with "
+                "its schema, so width/height can't be set by name; use set_widget index="
+            )
+        for dim, value in size.items():
+            slot = node.input_by_name(dim)
+            link = wf.links.get(slot.link) if slot is not None and slot.link is not None else None
+            prim = wf.nodes.get(link.origin_id) if link is not None else None
+            if prim is not None and prim.type != PRIMITIVE_TYPE and any(
+                o.type == "LATENT" and o.links for o in prim.outputs
+            ):
+                # disconnecting its INT would leave the latent it also supplies at the old size
+                raise ValueError(
+                    f"set_resolution: {prim.type} #{prim.id} computes the size and also supplies "
+                    "the latent; set its own widgets instead, or replace it with an EmptyLatentImage"
+                )
+            if prim is not None and (prim.type != PRIMITIVE_TYPE or primitive_values.get(prim.id, value) != value):
+                prim = None  # computed upstream, or one primitive feeding both sides of a non-square size
+            if prim is not None:
+                primitive_values[prim.id] = value
+                problem = check_primitive_value(wf, prim, value, object_info)
+            else:
+                problem = check_widget_value(node.type, dim, value, object_info, node.widgets_values, sockets)
+            if problem:
+                raise ValueError(f"set_resolution: {node.type} #{node.id}: {problem}")
+            plan.append((node, dim, value, prim, link is not None))
+    for node, dim, value, prim, linked in plan:
+        if prim is not None:
+            wf.set_widget(prim.id, "value", value, object_info)
+            touched.add(prim.id)
+            continue
+        if linked:
+            wf.disconnect(node.id, dim)
+        wf.set_widget(node.id, dim, value, object_info)
+        touched.add(node.id)
+    return f"resolution {size['width']}x{size['height']} on " + ", ".join(f"{n.type} #{n.id}" for n in nodes)
 
 
 def _check_op(index: int, op: dict[str, Any]) -> str:
@@ -1596,6 +1695,8 @@ def _apply_ops(
             wf.set_widget(node_id, op["input"], op["value"], object_info)
             touched.add(node_id)
             applied.append(f"set #{op['node_id']}.{op['input']} = {_clip(op['value'])!r}")
+        elif kind == "set_resolution":
+            applied.append(_set_resolution(wf, op, object_info, touched))
         elif kind == "set_title":
             wf.nodes[int(op["node_id"])].title = op["title"]
             touched.add(int(op["node_id"]))
@@ -1842,11 +1943,11 @@ async def edit_workflow(
     - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' must match once
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
+    - {"op": "set_resolution", "width": int, "height": int}  # all latents + size patches
 
-    All but replace_in_widget/disconnect have a definition-scoped twin taking an extra "definition_id" for
-    subgraph edits: add_node_to_definition, remove_node_from_definition, and
-    connect/set_widget/set_title/set_mode_in_definition. A malformed op lists
-    its keys.
+    Subgraph twins add "definition_id": add_node_to_definition,
+    remove_node_from_definition, connect/set_widget/set_title/set_mode_in_definition.
+    A malformed op lists its keys.
 
     Layout ops (no twin): set_pos {node_id, pos:[x,y], size?:[w,h]}; set_color
     {node_id, color, bgcolor?}; add_group {title, node_ids, color?}; set_group

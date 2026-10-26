@@ -266,13 +266,16 @@ def test_check_widget_value_denoise_epsilon_min():
 # --- 6. combo severity gate + findings cap -----------------------------------
 
 
-def _single_node_wf(node_type, widgets):
-    ui = {"nodes": [{"id": 1, "type": node_type, "inputs": [], "outputs": [], "widgets_values": widgets}], "links": []}
+def _single_node_wf(node_type, widgets, inputs=()):
+    ui = {"nodes": [{"id": 1, "type": node_type, "inputs": list(inputs), "outputs": [], "widgets_values": widgets}], "links": []}
     return Workflow.from_ui(ui)
 
 
 def test_core_combo_bad_value_is_error():
-    wf = _single_node_wf("MegaSampler", [0, "fixed", "fake_sampler", 1.0])
+    wf = _single_node_wf(
+        "MegaSampler", [0, "fixed", "fake_sampler", 1.0],
+        [{"name": "model", "type": "MODEL", "link": None}],
+    )
     codes = {(f["code"], f["level"]) for f in validate(wf, OI) if f.get("input") == "sampler_name"}
     assert ("invalid-combo-value", "error") in codes
 
