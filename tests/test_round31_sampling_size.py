@@ -61,7 +61,8 @@ def test_any_size_tuned_model_patch_is_checked_and_latent_units_named(size_graph
 @pytest.mark.parametrize(
     "edge",
     ["matching", "linked_sampling", "linked_canvas", "bypass", "mute",
-     "disabled_canvas", "nonliteral", "missing_schema", "hires_pass", "unrelated_canvas"],
+     "disabled_canvas", "nonliteral", "missing_schema", "hires_pass", "unrelated_canvas",
+     "patch_sized_by_latent"],
 )
 def test_sampling_size_uncertain_or_disabled_stays_silent(size_graph, edge):
     wf, info, canvas, sampling, sampler = size_graph
@@ -86,6 +87,9 @@ def test_sampling_size_uncertain_or_disabled_stays_silent(size_graph, edge):
         up = wf.add_node("LatentUpscale", object_info=info)
         wf.connect(canvas.id, 0, up.id, "samples", info)
         wf.connect(up.id, 0, sampler.id, "latent_image", info)
+    elif edge == "patch_sized_by_latent":
+        # JigsawHiRes ignores width/height when its own latent input is connected
+        sampling.inputs.append(InputSlot(name="latent", type="LATENT", link=999))
     elif edge == "unrelated_canvas":
         sampling.widgets_values = [1024, 1024]
         other = wf.add_node("EmptyLatentImage", object_info=info)

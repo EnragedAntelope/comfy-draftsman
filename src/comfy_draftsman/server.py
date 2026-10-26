@@ -1428,8 +1428,9 @@ def _set_resolution(
     nodes = resolution_nodes(wf, object_info)
     if not nodes:
         raise ValueError(
-            "set_resolution found no Empty Latent/size node or size-tuned model patch; "
-            "set_widget the node that sets the size"
+            "set_resolution found no Empty Latent/size node or size-tuned model patch "
+            "with width/height widgets; set_widget the node that computes the size "
+            "(megapixels, aspect ratio)"
         )
     plan: list[tuple[Any, str, Any, Any, bool]] = []  # node, dim, value, primitive, linked
     primitive_values: dict[int, Any] = {}

@@ -802,7 +802,8 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   after the save: it is reported unconnected instead of eating a widget value.
 - **Resolution lives on more than the latent.** Size-tuned model patches (MODEL in,
   only MODEL out, own width/height: ModelSamplingFlux, JigsawHiRes, Krea2ModelSampling)
-  take pixels. `model-sampling-size-mismatch` traces each sampler whose `latent_image`
+  take pixels; one fed a LATENT (JigsawHiRes's optional input) sizes itself from it and
+  is skipped. `model-sampling-size-mismatch` traces each sampler whose `latent_image`
   comes straight from a canvas and compares the patches upstream of it, so a hi-res
   pass on an upscaled latent is never compared with the first pass; a patch at
   canvas/8 or /16 is named as latent units. `set_resolution` sets every active canvas

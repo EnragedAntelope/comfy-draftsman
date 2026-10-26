@@ -223,11 +223,13 @@ def _resolution_alignment_findings(
 
 def is_model_patch_size_node(node: Node, object_info: dict[str, Any]) -> bool:
     """MODEL in, MODEL out, with its own width/height widgets: the patch is
-    tuned for a render size in pixels (ModelSamplingFlux, JigsawHiRes)."""
+    tuned for a render size in pixels (ModelSamplingFlux, JigsawHiRes). One fed
+    a LATENT (JigsawHiRes's optional input) sizes itself from it instead."""
     schema = object_info.get(node.type) or {}
     required = (schema.get("input") or {}).get("required") or {}
     return (
-        list(schema.get("output") or []) == ["MODEL"]
+        not any(s.type == "LATENT" and s.link is not None for s in node.inputs)
+        and list(schema.get("output") or []) == ["MODEL"]
         and any(isinstance(s, list | tuple) and s and s[0] == "MODEL" for s in required.values())
         and all(w.is_widget_input(required.get(dim)) for dim in ("width", "height"))
     )
