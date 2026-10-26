@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.25.2 - dependency updates
+
+### Changed
+
+- Locked dependency versions updated: Pillow 13.0.0, cryptography 50.0.2, PyJWT
+  2.15.1, certifi 2026.10.23 (replaces Dependabot PR #12, which was based on 0.25.0).
+  No code changes; the `pillow>=10.0` requirement is unchanged.
+
 ## 0.25.1 - widget drift and resolution sweeps
 
 ### Fixed
