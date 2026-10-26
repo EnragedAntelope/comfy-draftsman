@@ -90,6 +90,35 @@ def _finding(
 _combo_choices = w.combo_choices
 
 
+_TYPE_WORDS = {"INT": "an integer", "FLOAT": "a number", "STRING": "a string", "BOOLEAN": "true/false"}
+
+
+def widget_type_problem(input_name: str, spec: Any, value: Any) -> str | None:
+    """'expects X, got Y' when ``value`` is the wrong Python type for the widget."""
+    # widgetType, not the io type: a union like "FLOAT,INT" names no single
+    # checkable kind, but its widgetType ("FLOAT") does
+    kind = w.widget_kind(spec)
+    ok = {
+        "INT": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "FLOAT": lambda v: isinstance(v, int | float) and not isinstance(v, bool),
+        "STRING": lambda v: isinstance(v, str),
+        "BOOLEAN": lambda v: isinstance(v, bool),
+    }.get(kind) if isinstance(kind, str) else None
+    if ok is None or ok(value):
+        return None
+    return f"'{input_name}' expects {_TYPE_WORDS[kind]}, got {type(value).__name__} {value!r}"
+
+
+def _coerces(kind: Any, value: Any) -> bool:
+    """Whether ComfyUI's queue-time cast (int()/float()/str()/bool() in
+    execution.validate_inputs) accepts the value - then it runs, just not as meant."""
+    try:
+        {"INT": int, "FLOAT": float}.get(kind, str)(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def check_widget_value(
     class_type: str,
     input_name: str,
@@ -149,17 +178,8 @@ def check_widget_value(
                 if _looks_like_file_combo(choices) else ""
             )
         )
-    # widgetType, not the io type: a union like "FLOAT,INT" names no single
-    # checkable kind, but its widgetType ("FLOAT") does
-    kind = w.widget_kind(spec)
-    if kind == "INT" and (isinstance(value, bool) or not isinstance(value, int)):
-        return f"'{input_name}' expects an integer, got {type(value).__name__} {value!r}"
-    if kind == "FLOAT" and (isinstance(value, bool) or not isinstance(value, int | float)):
-        return f"'{input_name}' expects a number, got {type(value).__name__} {value!r}"
-    if kind == "STRING" and not isinstance(value, str):
-        return f"'{input_name}' expects a string, got {type(value).__name__} {value!r}"
-    if kind == "BOOLEAN" and not isinstance(value, bool):
-        return f"'{input_name}' expects true/false, got {type(value).__name__} {value!r}"
+    if problem := widget_type_problem(input_name, spec, value):
+        return problem
     opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
     if isinstance(value, int | float) and not isinstance(value, bool):
         low, high = opts.get("min"), opts.get("max")
@@ -482,6 +502,27 @@ def validate(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
     return findings
 
 
+def _merge_mismatches(node: Node, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A node whose values all moved one slot yields a mismatch per widget; past
+    two, one finding naming them reads better than a wall of near-duplicates."""
+    if len(found) <= 2:
+        return found
+    errors = [f for f in found if f["level"] == "error"]
+    names = [f["input"] for f in found]
+    return [
+        _finding(
+            "error" if errors else "warning",
+            "widget-type-mismatch",
+            f"{node.type} #{node.id}: {len(found)} widgets hold a value of the wrong type "
+            f"({', '.join(names[:6])}{', ...' if len(names) > 6 else ''}) - its saved values "
+            "no longer line up with its current parameters; re-set each with set_widget",
+            node.id,
+            inputs=names,
+            **({"headless": True} if errors and all(f.get("headless") for f in errors) else {}),
+        )
+    ]
+
+
 def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     disabled: list[int] = []
@@ -537,6 +578,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
         slots = w.widget_slot_names(node.type, object_info, node.widgets_values, socket_names)
         saved_names = w.saved_widget_names(node.properties, node.widgets_values) or []
         unmapped = False
+        shifted = False  # the schema's widget count changed: positional values may have moved
         # the pack recorded every value's name: positions can't drift or misalign
         if (
             not saved_names
@@ -591,6 +633,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     )
                 )
             elif dynamic_short:
+                shifted = True  # usually fine, unless a value's type says otherwise
                 findings.append(
                     _finding(
                         "info",
@@ -603,13 +646,16 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                     )
                 )
             else:
+                shifted = True
                 findings.append(
                     _finding(
                         "warning",
                         "widget-count-drift",
                         f"{node.type} #{node.id}: has {len(node.widgets_values)} widget values "
                         f"but current schema expects {len(slots)} ({slots}) - the node's "
-                        "parameters changed since this workflow was made; re-check each value",
+                        "parameters changed since this workflow was made. Values are read "
+                        "by position, so those after the changed parameter may sit in the "
+                        "wrong widget; check each with inspect_workflow and set_widget",
                         node.id,
                         expected=slots,
                     )
@@ -623,6 +669,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             named = {n: v for n, v in zip(saved_names, node.widgets_values, strict=True) if n in specs}
         elif unmapped:
             named = {}
+        mismatches: list[dict[str, Any]] = []
         for name, value in named.items():
             if value is None and not name.endswith(w.SYNTHETIC_SUFFIXES):
                 # the frontend runs string replacement over every widget value
@@ -646,6 +693,10 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
             slot = node.input_by_name(name)
             if slot is not None and slot.link is not None:
                 continue  # connected: widget value is overridden
+            shift_hint = (
+                " - this node's widget count changed, so values have likely shifted position"
+                if shifted else ""
+            )
             choices = _combo_choices(spec)
             if (
                 choices is not None
@@ -654,7 +705,22 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 and not _annotated_upload(spec, value)
             ):
                 close = difflib.get_close_matches(str(value), [str(c) for c in choices], n=1, cutoff=0.4)
-                if _authoritative_combo(node.type, choices, object_info):
+                if not any(type(c) is type(value) for c in choices):
+                    # a number/boolean in a list of names is never a client-filled
+                    # option: it is a value that belongs to another widget
+                    mismatches.append(
+                        _finding(
+                            # ComfyUI rejects a value outside a list it owns
+                            "error" if _authoritative_combo(node.type, choices, object_info) else "warning",
+                            "widget-type-mismatch",
+                            f"{node.type} #{node.id}: combo '{name}' holds "
+                            f"{type(value).__name__} {value!r}, not one of its options"
+                            f"{shift_hint}",
+                            node.id,
+                            input=name,
+                        )
+                    )
+                elif _authoritative_combo(node.type, choices, object_info):
                     # on-disk listing or a core node's baked enum: genuinely wrong
                     findings.append(
                         _finding(
@@ -686,6 +752,24 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         )
                     )
                 continue
+            if problem := widget_type_problem(name, spec, value):
+                coerces = _coerces(w.widget_kind(spec), value)
+                mismatches.append(
+                    _finding(
+                        # ComfyUI casts what it can: that runs, but not as meant
+                        "warning" if coerces else "error",
+                        "widget-type-mismatch",
+                        f"{node.type} #{node.id}: {problem}"
+                        + (shift_hint or (" - ComfyUI would cast it" if coerces else
+                                          " - ComfyUI rejects it at queue time")),
+                        node.id,
+                        input=name,
+                        # the run would fail, but a pack whose JS reorders widgets loads
+                        # fine in the editor - so it blocks a headless run, not a save
+                        **({} if coerces else {"headless": True}),
+                    )
+                )
+                continue
             opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
             if isinstance(value, int | float) and not isinstance(value, bool):
                 low, high = opts.get("min"), opts.get("max")
@@ -714,6 +798,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                                 input=name,
                             )
                         )
+        findings.extend(_merge_mismatches(node, mismatches))
 
         for name, spec in schema.get("input", {}).get("required", {}).items():
             # base widgets, and custom JS-widget inputs the node didn't serialize

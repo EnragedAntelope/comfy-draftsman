@@ -114,7 +114,10 @@ async def test_import_workflow_reads_local_file(monkeypatch, tmp_path):
             return "new-id"
 
     monkeypatch.setattr(server, "_session", lambda: _Sess())
-    monkeypatch.setattr(server, "_object_info", lambda: {})
+    async def _info(refresh=False):
+        return {}
+
+    monkeypatch.setattr(server, "_object_info", _info)
     monkeypatch.setattr(server, "_summary", lambda wid, wf: {"workflow_id": wid})
 
     result = await server.import_workflow(file_path=str(p))

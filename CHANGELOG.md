@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.25.1 - widget drift and resolution sweeps
+
+### Fixed
+
+- validate flags `widget-type-mismatch` when a saved value is the wrong type for its
+  widget (an integer in a boolean, text in a float, a number in a combo), naming a
+  likely position shift when the node's widget count also changed. Castable values
+  warn; values ComfyUI can't cast block a headless run, not a save.
+- A core-typed socket (MODEL, LATENT, ...) that a pack added after the workflow was
+  saved is reported as unconnected instead of being read as a JS widget, which shifted
+  every value after it by one.
+- `model-sampling-size-mismatch` covers every size-tuned model patch (JigsawHiRes,
+  Krea2ModelSampling, not only ModelSamplingFlux), compares each patch with the latent
+  its own sampler renders (a hi-res pass no longer compares against the first canvas),
+  and names a size typed in latent units.
+
+### Added
+
+- `import_workflow` returns `widget_drift`: nodes whose saved values no longer line up
+  with the installed schema.
+- `set_resolution` edit op (also usable in sweep variants): sets width/height on every
+  latent and size-tuned model patch at once, setting a feeding primitive or
+  disconnecting a computed size.
+
 ## 0.25.0 - FIBO sweep feedback, new model families
 
 ### Fixed

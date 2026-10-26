@@ -784,6 +784,34 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `widget-layout-unmapped` error and no per-slot findings; by-name `set_widget` refuses
   it and points at `index`. Surplus values that map plausibly are pack state and are
   carried through a by-name set (`model.set_widget` appends the old tail).
+- **A value of the wrong type is the evidence that values shifted.** When a pack
+  update adds, drops or reorders parameters, the count check alone misses a same-count
+  reorder (Flux2KleinEnhancer renamed its five floats) and only says "re-check" on a
+  changed count. validate checks each mapped value's Python type against its widget
+  (`validate.widget_type_problem`; a number or boolean in a combo of names counts too)
+  and reports `widget-type-mismatch`, merged to one finding past two per node. Level
+  follows ComfyUI's queue-time cast (`execution.validate_inputs` runs
+  `int()`/`float()`/`str()`/`bool()`): castable is a warning (it runs, not as meant),
+  uncastable is a headless error, since a JS-reordering pack still loads in the editor.
+  `import_workflow` returns these and the drift warnings as `widget_drift`. Saved
+  `inputs[].widget` names were surveyed as a realignment source and rejected: they also
+  list JS-only widgets (LoadImage's `upload`, LoRA Manager's `text`).
+- **Core link types are never JS widgets.** `widgets._is_custom_widget` treats a
+  custom-typed input missing from a saved node as a pack JS widget, but a `MODEL`,
+  `LATENT` or other `CORE_SOCKET_TYPES` input missing there is a socket the pack added
+  after the save: it is reported unconnected instead of eating a widget value.
+- **Resolution lives on more than the latent.** Size-tuned model patches (MODEL in,
+  only MODEL out, own width/height: ModelSamplingFlux, JigsawHiRes, Krea2ModelSampling)
+  take pixels. `model-sampling-size-mismatch` traces each sampler whose `latent_image`
+  comes straight from a canvas and compares the patches upstream of it, so a hi-res
+  pass on an upscaled latent is never compared with the first pass; a patch at
+  canvas/8 or /16 is named as latent units. `set_resolution` sets every active canvas
+  and patch in one op (sweep variants included): a primitive-fed dimension sets the
+  primitive, a computed one is disconnected, and a computed size node that also
+  supplies the latent (Krea2's `Resolution`) is refused, since disconnecting its INTs
+  would leave the latent at the old size. Every value is checked before anything
+  changes, and a drifted node is written by name only when every value up to
+  width/height fits its slot.
 - **A saved widget-name list beats position.** LoRA Manager's JS writes
   `properties.__lm_widget_ids`, the exact name of each `widgets_values` entry (a
   hidden autocomplete-meta dict comes first). `widgets.saved_widget_names` trusts it

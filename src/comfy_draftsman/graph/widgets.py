@@ -307,9 +307,18 @@ def _is_custom_widget(name: str, spec: Any, socket_names: set[str] | None) -> bo
     if not isinstance(spec, list | tuple) or not spec:
         return False
     kind = spec[0]
-    if _opts(spec).get("forceInput") or is_v3_meta_type(kind):
+    if _opts(spec).get("forceInput") or is_v3_meta_type(kind) or kind in CORE_SOCKET_TYPES:
         return False
     return isinstance(kind, str) and kind != "*" and name not in socket_names
+
+
+# ComfyUI's own link types are always sockets: one absent from a saved node is a
+# socket the pack added after the save, never a JS widget
+CORE_SOCKET_TYPES = frozenset({
+    "MODEL", "CLIP", "VAE", "CONDITIONING", "LATENT", "IMAGE", "MASK", "CONTROL_NET",
+    "CLIP_VISION", "CLIP_VISION_OUTPUT", "STYLE_MODEL", "UPSCALE_MODEL", "GLIGEN",
+    "AUDIO", "VIDEO", "NOISE", "GUIDER", "SAMPLER", "SIGMAS", "MODEL_PATCH",
+})
 
 
 SAVED_WIDGET_NAMES_PROPERTY = "__lm_widget_ids"

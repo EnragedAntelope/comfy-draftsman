@@ -221,40 +221,75 @@ def _resolution_alignment_findings(
     return findings
 
 
+def is_model_patch_size_node(node: Node, object_info: dict[str, Any]) -> bool:
+    """MODEL in, MODEL out, with its own width/height widgets: the patch is
+    tuned for a render size in pixels (ModelSamplingFlux, JigsawHiRes)."""
+    schema = object_info.get(node.type) or {}
+    required = (schema.get("input") or {}).get("required") or {}
+    return (
+        list(schema.get("output") or []) == ["MODEL"]
+        and any(isinstance(s, list | tuple) and s and s[0] == "MODEL" for s in required.values())
+        and all(w.is_widget_input(required.get(dim)) for dim in ("width", "height"))
+    )
+
+
+def resolution_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[Node]:
+    """Active nodes whose width/height set, or are tuned for, the render size."""
+    return [
+        n for n in wf.nodes.values()
+        if n.mode not in (MODE_MUTE, MODE_BYPASS)
+        and (_is_size_node(n, object_info) or is_model_patch_size_node(n, object_info))
+    ]
+
+
 def _model_sampling_size_findings(
     wf: Workflow, object_info: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    canvases: set[tuple[int, int]] = set()
-    samplers: list[tuple[Node, tuple[int, int]]] = []
-    unknown_canvas = False  # a wired/unreadable latent size makes the latent ambiguous
-    for node in wf.nodes.values():
-        if node.mode in (MODE_MUTE, MODE_BYPASS):
+    """A size-tuned model patch upstream of a sampler whose latent comes straight
+    from a canvas of another size. Traced per sampler, so a hi-res pass (latent
+    from an upscale, not a canvas) is never compared to the first pass's canvas."""
+    findings: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for sampler in wf.nodes.values():
+        slot = sampler.input_by_name("latent_image")
+        if sampler.mode in (MODE_MUTE, MODE_BYPASS) or slot is None or slot.link not in wf.links:
             continue
-        is_canvas = _is_size_node(node, object_info)
-        if not is_canvas and node.type != "ModelSamplingFlux":
+        canvas = wf.nodes.get(wf.links[slot.link].origin_id)
+        if (
+            canvas is None
+            or canvas.mode in (MODE_MUTE, MODE_BYPASS)
+            or not _is_size_node(canvas, object_info)
+            or (size := _set_size(canvas, object_info)) is None
+        ):
             continue
-        size = _set_size(node, object_info)
-        if is_canvas:
-            if size is None:
-                unknown_canvas = True
-            else:
-                canvases.add(size)
-        elif size is not None:
-            samplers.append((node, size))
-    if unknown_canvas or len(canvases) != 1:
-        return []
-    canvas_width, canvas_height = next(iter(canvases))
-    return [
-        _finding(
-            "model-sampling-size-mismatch",
-            f"ModelSamplingFlux #{node.id}: {width}x{height} but the latent is "
-            f"{canvas_width}x{canvas_height} - the shift schedule is computed "
-            "for the wrong resolution",
-            node.id,
-        )
-        for node, (width, height) in samplers
-        if (width, height) != (canvas_width, canvas_height)
-    ]
+        for inp in sampler.inputs:
+            for patch in _upstream_nodes(wf, sampler, inp.name, depth=8):
+                if (
+                    patch.id in seen
+                    or patch.mode in (MODE_MUTE, MODE_BYPASS)
+                    or not is_model_patch_size_node(patch, object_info)
+                    or (patch_size := _set_size(patch, object_info)) is None
+                    or patch_size == size
+                ):
+                    continue
+                seen.add(patch.id)
+                units = next(
+                    (f" ({patch_size[0]}x{patch_size[1]} is that size in latent units /{f}; "
+                     "these widgets take pixels)"
+                     for f in (8, 16) if (patch_size[0] * f, patch_size[1] * f) == size),
+                    "",
+                )
+                findings.append(
+                    _finding(
+                        "model-sampling-size-mismatch",
+                        f"{patch.type} #{patch.id}: width/height {patch_size[0]}x{patch_size[1]} "
+                        f"but {sampler.type} #{sampler.id} renders a {size[0]}x{size[1]} latent"
+                        f"{units} - the model patch is tuned for the wrong resolution; set it "
+                        "to the image size in pixels",
+                        patch.id,
+                    )
+                )
+    return findings
 
 
 def lint(
