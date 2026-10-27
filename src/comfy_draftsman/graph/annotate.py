@@ -364,15 +364,17 @@ def _title_nodes(wf: Workflow, object_info: dict[str, Any]) -> int:
         is_prompt_source = _outputs_conditioning(node) or _feeds_encoder_text(wf, node)
         if (node.type == "CLIPTextEncode" or has_text_widget) and retitlable and is_prompt_source:
             role = _prompt_role(wf, node)
+            new = None
             if role == "positive":
-                node.title = "Positive Prompt"
-                titled += 1
+                new = "Positive Prompt"
             elif role == "negative":
-                node.title = (
+                new = (
                     INERT_NEGATIVE_TITLE
                     if _negative_is_inert(wf, node, object_info)
                     else "Negative Prompt"
                 )
+            if new is not None and new != node.title:  # a re-run counts nothing
+                node.title = new
                 titled += 1
         if "loaders" in (schema.get("category") or "") and node.title is None:
             filenames = [

@@ -29,6 +29,31 @@ _MAX_ENTRIES = 20
 _RECONNECT_DELAY = 2.0
 
 
+def execution_error(data: dict[str, Any]) -> dict[str, Any]:
+    """A run's execution_error payload, plus a hint for the one failure shape
+    that usually means a pack built for a single model family."""
+    error = {
+        "node_id": data.get("node_id"),
+        "node_type": data.get("node_type"),
+        "message": data.get("exception_message"),
+        "type": data.get("exception_type"),
+    }
+    message = str(error["message"] or "")
+    # 'NoneType' has no attribute is a missing input, not a model mismatch
+    if (
+        str(error["type"] or "").endswith("AttributeError")
+        and "object has no attribute" in message
+        and "'NoneType'" not in message
+    ):
+        error["hint"] = (
+            f"{error['node_type'] or 'this node'} may only support certain model "
+            "families - check its pack's supported models. If it does not support "
+            "this one, record_learning(family, updates={'avoid_nodes': {node_type: why}}) "
+            "makes lint flag it next time."
+        )
+    return error
+
+
 class ProgressTracker:
     """Listens on /ws and keeps the latest execution state per prompt_id.
 
@@ -115,12 +140,7 @@ class ProgressTracker:
             state["status"] = "finished"
         elif kind == "execution_error":
             state["status"] = "error"
-            state["error"] = {
-                "node_id": data.get("node_id"),
-                "node_type": data.get("node_type"),
-                "message": data.get("exception_message"),
-                "type": data.get("exception_type"),
-            }
+            state["error"] = execution_error(data)
         elif kind == "execution_interrupted":
             state["status"] = "error"
             state["error"] = {"message": "interrupted"}

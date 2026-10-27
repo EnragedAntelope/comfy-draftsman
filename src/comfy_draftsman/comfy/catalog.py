@@ -182,8 +182,13 @@ def node_summary(
     known = {
         n for sec in ("required", "optional") for n in (schema.get("input", {}).get(sec) or {})
     }
-    if ":" in choices_filter and choices_filter.split(":", 1)[0] in known:
+    prefix = choices_filter.split(":", 1)[0]
+    if ":" in choices_filter and prefix in known:
         only_input, choices_filter = choices_filter.split(":", 1)
+    elif ":" in choices_filter and prefix.isidentifier():
+        # scoped to an input another node in a batch has: leave this node's
+        # combos unfiltered rather than blank ("16:9" isn't an identifier)
+        choices_filter = ""
     full_filter = choices_filter
     for section in ("required", "optional"):
         for name, spec in schema.get("input", {}).get(section, {}).items():

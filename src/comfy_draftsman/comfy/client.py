@@ -25,6 +25,7 @@ import httpx
 import websockets
 
 from ..config import Config
+from .progress import execution_error
 
 
 class ComfyValidationError(Exception):
@@ -476,12 +477,7 @@ class ComfyClient:
             # omitted entirely when empty so the common case costs nothing
             result["data_outputs"] = data_outputs
         if error:
-            result["error"] = {
-                "node_id": error.get("node_id"),
-                "node_type": error.get("node_type"),
-                "message": error.get("exception_message"),
-                "type": error.get("exception_type"),
-            }
+            result["error"] = execution_error(error)
         if partial_node_errors:
             result["node_errors"] = partial_node_errors
         return result
