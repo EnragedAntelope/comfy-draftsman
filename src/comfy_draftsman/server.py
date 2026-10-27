@@ -808,6 +808,15 @@ async def get_node_info(
         return {"error": "pass class_type=... or class_types=[...]"}
     object_info = await _object_info()
     results: dict[str, Any] = {}
+
+    def _inputs(cls: str) -> set[str]:
+        spec = object_info.get(cls, {}).get("input", {})
+        return {n for sec in ("required", "optional") for n in (spec.get(sec) or {})}
+
+    # an 'input:substr' filter aimed at one batched node must not blank the
+    # combos of the others ('D:\...' or 'Franchise: X' still filter everywhere)
+    prefix = choices_filter.split(":", 1)[0] if ":" in choices_filter else None
+    scoped = prefix is not None and any(prefix in _inputs(n) for n in names)
     for name in names:
         if name in VIRTUAL_TYPES:
             results[name] = {
@@ -817,8 +826,9 @@ async def get_node_info(
             }
             continue
         try:
+            own = choices_filter if not scoped or prefix in _inputs(name) else ""
             results[name] = node_summary(
-                object_info, name, choices_filter=choices_filter, max_choices=max_choices
+                object_info, name, choices_filter=own, max_choices=max_choices
             )
         except KeyError:
             results[name] = {

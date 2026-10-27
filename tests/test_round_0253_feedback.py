@@ -32,18 +32,27 @@ async def test_add_node_accepts_bare_control_after_generate(wired):
     assert node.widgets_values[:2] == [7, "fixed"]
 
 
-def test_filter_scoped_to_other_nodes_input_keeps_combos(object_info):
-    summary = node_summary(object_info, "KSampler", choices_filter="ckpt_name:xl")
-    combos = {i["name"]: i for i in summary["inputs"] if i.get("type") == "COMBO"}
-    assert combos["sampler_name"]["choices"]
-    assert "choices_matched" not in combos["sampler_name"]
+def _combos(summary):
+    return {i["name"]: i for i in summary["inputs"] if i.get("type") == "COMBO"}
 
 
-def test_filter_scoped_to_own_input_still_filters(object_info):
-    summary = node_summary(object_info, "KSampler", choices_filter="sampler_name:euler")
-    combos = {i["name"]: i for i in summary["inputs"] if i.get("type") == "COMBO"}
-    assert all("euler" in c for c in combos["sampler_name"]["choices"])
-    assert combos["scheduler"]["choices"]
+async def test_batched_scoped_filter_leaves_other_nodes_whole(wired):
+    info = await server.get_node_info(
+        class_types=["CheckpointLoaderSimple", "KSampler"],
+        choices_filter="sampler_name:euler",
+    )
+    sampler = _combos(info["KSampler"])
+    assert sampler["sampler_name"]["choices"]
+    assert all("euler" in c for c in sampler["sampler_name"]["choices"])
+    assert sampler["scheduler"]["choices"]  # unfiltered on the same node
+    ckpt = _combos(info["CheckpointLoaderSimple"])["ckpt_name"]
+    assert ckpt["choices"] and "choices_matched" not in ckpt
+
+
+def test_colon_value_that_names_no_input_still_filters(object_info):
+    # 'D:\models' / 'Franchise: X' style values must keep filtering
+    combos = _combos(node_summary(object_info, "KSampler", choices_filter="nomatch:zz"))
+    assert combos["sampler_name"]["choices"] == []
 
 
 def test_title_pass_is_idempotent(object_info):
