@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.25.3 - session feedback
+
+### Fixed
+
+- `add_node` accepts the bare `control_after_generate` (the PrimitiveNode name) for a
+  node with one seed control, as `set_widget` already did, instead of failing the batch.
+- `get_node_info` with an `input:substr` filter no longer blanks the dropdowns of a
+  batched node that lacks that input; they show their normal capped list.
+- `organize_workflow` no longer counts an unchanged prompt title as retitled, so a
+  second run reports `nodes_retitled: 0`.
+- Integration tests skip when the test instance has no checkpoint, and fall back to
+  any checkpoint when none is SDXL (the MCP flow test still needs SDXL and skips).
+
+### Added
+
+- A run that fails with an `AttributeError` on a model object returns a hint to check
+  the node pack's supported models and record an `avoid_nodes` entry.
+
+### Not changed
+
+- The `mcp>=2.3,<3` floor is already the newest release, which is past every
+  published advisory for the Python SDK.
+
 ## 0.25.2 - dependency updates
 
 ### Changed

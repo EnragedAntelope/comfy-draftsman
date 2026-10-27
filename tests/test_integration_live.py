@@ -66,9 +66,11 @@ def _build_txt2img(object_info, checkpoint: str, prefix: str = "draftsman_e2e") 
 
 async def _pick_checkpoint(client) -> str:
     checkpoints = await client.list_models("checkpoints")
-    sdxl = [c for c in checkpoints if "sdxl" in c.lower() or "xl" in c.lower()]
-    assert sdxl, f"no SDXL-ish checkpoint available in {checkpoints}"
-    return sdxl[0]
+    if not checkpoints:
+        pytest.skip("no checkpoint installed on the test instance")
+    # prefer SDXL (the graph renders at 1024), but any CheckpointLoaderSimple model runs it
+    sdxl = [c for c in checkpoints if "xl" in c.lower()]
+    return (sdxl or checkpoints)[0]
 
 
 async def test_build_validate_run_real_render(live_client):

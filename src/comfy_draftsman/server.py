@@ -34,7 +34,7 @@ from . import __version__, knowledge
 from .comfy.catalog import metadata_digest, node_summary
 from .comfy.catalog import search_nodes as catalog_search
 from .comfy.client import ComfyClient, ComfyConnectionError, ComfyValidationError
-from .comfy.progress import ProgressTracker
+from .comfy.progress import ProgressTracker, execution_error
 from .comfy.registry import RegistryClient, RegistryUnavailableError
 from .config import Config, load_config
 from .graph.annotate import annotate
@@ -359,6 +359,15 @@ def _find_group(wf: Workflow, group_id: int):
     # ValueError, not KeyError: the batch's KeyError handler says "unknown
     # node id", which would misname a missing GROUP id
     raise ValueError(f"no group #{group_id}; available: {[g.id for g in wf.groups]}")
+
+
+def _alias_control(widgets: dict[str, Any], slots: list[str]) -> dict[str, Any]:
+    """Accept the bare PrimitiveNode name 'control_after_generate' for a node
+    with exactly one seed control slot, as set_widget already does."""
+    controls = [s for s in slots if s.endswith("__control_after_generate")]
+    if "control_after_generate" not in widgets or len(controls) != 1:
+        return widgets
+    return {controls[0] if k == "control_after_generate" else k: v for k, v in widgets.items()}
 
 
 def _clip(v: Any) -> Any:
@@ -799,6 +808,15 @@ async def get_node_info(
         return {"error": "pass class_type=... or class_types=[...]"}
     object_info = await _object_info()
     results: dict[str, Any] = {}
+
+    def _inputs(cls: str) -> set[str]:
+        spec = object_info.get(cls, {}).get("input", {})
+        return {n for sec in ("required", "optional") for n in (spec.get(sec) or {})}
+
+    # an 'input:substr' filter aimed at one batched node must not blank the
+    # combos of the others ('D:\...' or 'Franchise: X' still filter everywhere)
+    prefix = choices_filter.split(":", 1)[0] if ":" in choices_filter else None
+    scoped = prefix is not None and any(prefix in _inputs(n) for n in names)
     for name in names:
         if name in VIRTUAL_TYPES:
             results[name] = {
@@ -808,8 +826,9 @@ async def get_node_info(
             }
             continue
         try:
+            own = choices_filter if not scoped or prefix in _inputs(name) else ""
             results[name] = node_summary(
-                object_info, name, choices_filter=choices_filter, max_choices=max_choices
+                object_info, name, choices_filter=own, max_choices=max_choices
             )
         except KeyError:
             results[name] = {
@@ -1573,6 +1592,7 @@ def _apply_ops(
                 # accept any widget that exists under some dynamic-combo
                 # selection; set_widget enforces option ordering at apply time
                 slots = all_slot_names(class_type, object_info)
+                widgets = _alias_control(widgets, slots)
                 if bad := sorted(set(widgets) - set(slots)):
                     raise ValueError(
                         f"{class_type} has no widget(s) {bad}; widgets: {slots}"
@@ -1768,6 +1788,7 @@ def _apply_ops(
                 )
             else:
                 slots = all_slot_names(class_type, object_info)
+                widgets = _alias_control(widgets, slots)
                 if bad := sorted(set(widgets) - set(slots)):
                     raise ValueError(
                         f"{class_type} has no widget(s) {bad}; widgets: {slots}; "
@@ -2914,12 +2935,7 @@ async def save_output(
 def _history_error(history: dict[str, Any]) -> dict[str, Any] | None:
     for name, data in history.get("status", {}).get("messages", []) or []:
         if name == "execution_error":
-            return {
-                "node_id": data.get("node_id"),
-                "node_type": data.get("node_type"),
-                "message": data.get("exception_message"),
-                "type": data.get("exception_type"),
-            }
+            return execution_error(data)
     return None
 
 
