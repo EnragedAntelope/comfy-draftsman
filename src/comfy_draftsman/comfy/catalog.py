@@ -255,7 +255,19 @@ def node_summary(
         for i, t in enumerate(schema.get("output") or [])
     ]
     widget_count = sum(1 for e in inputs if e.get("widget"))
+    note = {}
+    target = next((e for e in inputs if e["name"] == only_input), None)
+    if target is not None and "choices" not in target:
+        # say so: a silent no-op reads as "the filter matched, the rest is capped"
+        note["choices_filter_note"] = (
+            f"'{only_input}' is a {target['type']} "
+            f"{'widget' if target['widget'] else 'connection'}, not a dropdown, so the "
+            f"filter matched nothing; other dropdowns keep the default cap of "
+            f"{max_choices if max_choices > 0 else MAX_COMBO_CHOICES} (pass max_choices "
+            "or a bare substring filter to see more)"
+        )
     return {
+        **note,
         "class_type": class_type,
         "display_name": schema.get("display_name", class_type),
         "description": (schema.get("description") or "")[:300],
