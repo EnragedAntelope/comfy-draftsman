@@ -89,20 +89,18 @@ async def test_upload_refresh_failure_keeps_success(env, monkeypatch):
     {"op": "add_node", "class_type": "Missing"},
     {"op": "set_widget", "node_id": 999, "input": "image", "value": "old.png"},
 ])
-async def test_partial_batch_is_honest_and_persists(env, failure):
+async def test_failing_batch_is_all_or_nothing(env, failure):
     _, wf, node, wf_id = env
+    before = wf.get_widget(node.id, "image", OI)
     result = await server.edit_workflow(wf_id, [
         {"op": "set_widget", "node_id": node.id, "input": "image", "value": "render.png [output]"},
         failure,
         {"op": "remove_node", "node_id": node.id},
     ])
-    assert len(result["applied"]) == 1
-    assert result["note"]
-    assert "graph unchanged" not in str(result)
+    assert result["applied"] == []
+    assert "1 op(s) before it were fine" in result["note"]
     assert node.id in wf.nodes
-    restored = Session(server._config().session_dir)
-    assert node.id in restored.get(wf_id).nodes
-    assert restored.get(wf_id).get_widget(node.id, "image", OI) == "render.png [output]"
+    assert wf.get_widget(node.id, "image", OI) == before
 
 
 @pytest.mark.parametrize("missing", [False, True])

@@ -1376,6 +1376,7 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "add_group": ({"title", "node_ids"}, {"color"}),
     "set_group": ({"group_id"}, {"title", "node_ids", "color", "bounding"}),
     "remove_group": ({"group_id"}, set()),
+    "copy_nodes": ({"from_workflow", "node_ids"}, {"ref"}),
     "add_node_to_definition": (
         {"definition_id", "class_type"},
         {"title", "widgets", "force"},
@@ -1506,6 +1507,60 @@ def _set_resolution(
     return f"resolution {size['width']}x{size['height']} on " + ", ".join(f"{n.type} #{n.id}" for n in nodes)
 
 
+def _copy_nodes(wf: Workflow, op: dict[str, Any], refs: dict[str, int], touched: set[int]) -> str:
+    """copy_nodes: clone nodes from another session workflow with their widgets
+    and the links between them, placed right of this graph. Links from nodes
+    outside the copied set are left unwired and named in the result."""
+    source = _wf(str(op["from_workflow"]))
+    ids = op["node_ids"]
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("copy_nodes: node_ids must be a non-empty list of node ids")
+    picked = [int(i) for i in ids]
+    if missing := [i for i in picked if i not in source.nodes]:
+        raise ValueError(f"copy_nodes: no node(s) {missing} in workflow {op['from_workflow']!r}")
+    if wrapped := [i for i in picked if source.nodes[i].type in source.subgraph_defs()]:
+        raise ValueError(f"copy_nodes: #{wrapped} are subgraph instances; copy the flattened nodes instead")
+    ref = op.get("ref")
+    if ref is not None and (not isinstance(ref, str) or ref.isdigit()):
+        raise ValueError(f"copy_nodes: ref {ref!r} must be a non-numeric string")
+    left = min(source.nodes[i].pos[0] for i in picked)
+    top = min(source.nodes[i].pos[1] for i in picked)
+    x0 = max((n.pos[0] + n.size[0] for n in wf.nodes.values()), default=0.0) + 200.0
+    new_id: dict[int, int] = {}
+    for sid in picked:
+        node = copy.deepcopy(source.nodes[sid])
+        node.id = wf._next_node_id
+        wf._next_node_id += 1
+        node.pos = [x0 + node.pos[0] - left, node.pos[1] - top]
+        for slot in node.inputs:
+            slot.link = None
+        for out in node.outputs:
+            out.links = []
+        wf.nodes[node.id] = node
+        new_id[sid] = node.id
+        touched.add(node.id)
+        if ref is not None:
+            key = f"{ref}{sid}"
+            if key in refs:
+                raise ValueError(f"copy_nodes: ref {key!r} already used in this batch")
+            refs[key] = node.id
+    unwired: list[str] = []
+    for link in sorted(source.links.values(), key=lambda lk: lk.id):
+        if link.target_id not in new_id:
+            continue
+        name = source.nodes[link.target_id].inputs[link.target_slot].name
+        if link.origin_id in new_id:
+            wf._add_link(new_id[link.origin_id], link.origin_slot, new_id[link.target_id], name)
+        else:
+            unwired.append(f"#{new_id[link.target_id]}.{name}")
+    mapping = ", ".join(f"#{s}->#{d}" for s, d in list(new_id.items())[:30])
+    return (
+        f"copied {len(new_id)} node(s) from {op['from_workflow']}: {mapping}"
+        + (f" (refs {ref}<source id>)" if ref is not None else "")
+        + (f"; fed from outside the copy, now unwired: {', '.join(unwired[:20])}" if unwired else "")
+    )
+
+
 def _check_op(index: int, op: dict[str, Any]) -> str:
     """Validate one op against _OP_SPECS; returns the op kind or raises with
     the exact schema of the failing op."""
@@ -1625,6 +1680,8 @@ def _apply_ops(
             if ref is not None:
                 refs[ref] = node.id
             applied.append(f"added {node.type} as #{node.id}" + (f" (ref {ref})" if ref is not None else ""))
+        elif kind == "copy_nodes":
+            applied.append(_copy_nodes(wf, op, refs, touched))
         elif kind == "remove_node":
             wf.remove_node(int(op["node_id"]))
             applied.append(f"removed #{op['node_id']}")
@@ -1977,10 +2034,10 @@ async def edit_workflow(
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
     - {"op": "set_resolution", "width": int, "height": int}  # all latents + size patches
+    - {"op": "copy_nodes", "from_workflow": id, "node_ids": [int], "ref"?: str}  # + links among them
 
     Subgraph twins add "definition_id": add_node_to_definition,
     remove_node_from_definition, connect/set_widget/set_title/set_mode_in_definition.
-    A malformed op lists its keys.
 
     Layout ops (no twin): set_pos {node_id, pos:[x,y], size?:[w,h]}; set_color
     {node_id, color, bgcolor?}; add_group {title, node_ids, color?}; set_group
@@ -1992,8 +2049,7 @@ async def edit_workflow(
     PrimitiveNode to a widget input to mirror its type, then set_widget 'value'
     (+ 'control_after_generate' for number/combo, to advance each run).
 
-    Ops apply in order; a failing op stops the batch (graph unchanged past that
-    point). Widget values and link types are checked live - "force": true on
+    Ops apply in order, all or nothing (a failing op changes nothing). Widget values and link types are checked live - "force": true on
     set_widget/add_node/connect overrides; on connect it also creates a
     frontend-only input (rgthree switches, dynamic collectors).
 
@@ -2006,23 +2062,24 @@ async def edit_workflow(
     applied: list[str] = []
     touched: set[int] = set()
     try:
+        # dry run on a copy: a bad op anywhere rejects the whole batch, so refs
+        # from earlier ops never land half-applied and stale on the retry
+        _apply_ops(copy.deepcopy(wf), operations, object_info, applied, touched)
+    except (KeyError, ValueError) as e:
+        unknown_id = isinstance(e, KeyError)
+        return {
+            "applied": [],
+            "error": f"operation {len(applied)}: unknown node id {e}" if unknown_id else str(e),
+            "note": "nothing was changed - fix that op and resend the whole batch"
+            + (f" ({len(applied)} op(s) before it were fine)" if applied else ""),
+            "hint": "inspect_workflow lists current node ids" if unknown_id
+            else "get_node_info gives slot/widget names; the op schemas are in this tool's description",
+        }
+    applied, touched = [], set()
+    try:
         _apply_ops(wf, operations, object_info, applied, touched)
-    except KeyError as e:
-        return {
-            "applied": applied,
-            **({"note": f"the {len(applied)} op(s) in 'applied' landed and were kept; the failing op and everything after it did not run"} if applied else {}),
-            "error": f"unknown node id {e}",
-            "hint": "inspect_workflow lists current node ids",
-        }
-    except ValueError as e:
-        return {
-            "applied": applied,
-            **({"note": f"the {len(applied)} op(s) in 'applied' landed and were kept; the failing op and everything after it did not run"} if applied else {}),
-            "error": str(e),
-            "hint": "get_node_info gives slot/widget names; the op schemas are in this tool's description",
-        }
     finally:
-        _persist(workflow_id)  # ops that landed before a failure are real too
+        _persist(workflow_id)
     if summary:
         return {"applied": applied, "summary": _summary(workflow_id, wf)}
     # compact delta: re-sending the whole graph after every edit batch was the
@@ -2045,19 +2102,17 @@ async def edit_workflow(
 
 
 @mcp.tool(annotations=_EDIT_LOCAL)
-async def organize_workflow(workflow_id: str) -> dict[str, Any]:
+async def organize_workflow(workflow_id: str, layout: Literal["pipeline", "panel"] = "pipeline") -> dict[str, Any]:
     """THE finishing step: auto-layout into pipeline stage bands, colored groups,
     human titles, green highlights on user-editable knobs, and markdown guidance
     notes (model-family aware, two registers: 'touch this' vs 'leave alone').
     Run after wiring, before save_workflow; replaces a hand-made layout. Idempotent.
-
-    MUTATES the session workflow in place - the `applied` block in the result
-    summarizes the layout/group/note changes; inspect_workflow or
-    export_workflow_json shows the full reorganized graph."""
+    layout="panel" groups Controls (what you edit) | Pipeline | Unconnected.
+    MUTATES the session workflow in place; `applied` summarizes the changes."""
     wf = _wf(workflow_id)
     object_info = await _object_info()
     learned_dir = _config().learned_dir
-    report = annotate(wf, object_info, learned_dir=learned_dir)
+    report = annotate(wf, object_info, learned_dir=learned_dir, layout=layout)
     report["lint"] = _cap_lint(lint(wf, object_info, learned_dir=learned_dir))
     _persist(workflow_id)
     return report
@@ -2191,10 +2246,13 @@ _SWEEP_BUDGET_S = 3600.0  # ponytail: one fixed wall-clock cap for a whole sweep
 
 def _sweep_spec(
     sweep: Any,
-) -> tuple[list[dict[str, Any]], list[Any], list[list[float]], str] | str:
-    """Validated (variants, seeds, crops, reference), or an error string."""
-    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops", "reference"}:
-        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]], reference?: 'file [input]'}"
+) -> tuple[list[dict[str, Any]], list[Any], list[list[float]], str, int | None] | str:
+    """Validated (variants, seeds, crops, reference, freeze), or an error string."""
+    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops", "reference", "freeze"}:
+        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]], reference?: 'file [input]', freeze?: node_id}"
+    freeze = sweep.get("freeze")
+    if freeze is not None and (isinstance(freeze, bool) or not isinstance(freeze, int)):
+        return "freeze must be the integer id of a node with an IMAGE output"
     reference = sweep.get("reference") or ""
     if not isinstance(reference, str):
         return "reference must be a string like 'photo.png [input]'"
@@ -2225,7 +2283,60 @@ def _sweep_spec(
             return f"crop {box!r}: each side must be 1-{CROP_MAX}px (crops are shown 1:1, never scaled)"
     if len(variants) * len(seeds) > _SWEEP_MAX_RUNS:
         return f"{len(variants)} variants x {len(seeds)} seeds exceeds {_SWEEP_MAX_RUNS} runs - split it"
-    return variants, seeds, crops, reference
+    return variants, seeds, crops, reference, freeze
+
+
+async def _freeze_stage(
+    wf: Workflow,
+    freeze: int,
+    object_info: dict[str, Any],
+    prepared: list[tuple[str, dict[str, Any] | None, str | None]],
+    timeout: float,
+    extra_data: dict[str, Any] | None,
+    front: bool,
+) -> str:
+    """sweep freeze=<node id>: run only that node's upstream once with a
+    PreviewImage on its IMAGE output, then rewire every prepared cell to a
+    LoadImage of the result, so random/LLM nodes above it can't vary per cell.
+    Returns a description; raises ValueError when it can't."""
+    node = wf.nodes.get(freeze)
+    slot = next((i for i, o in enumerate(node.outputs) if str(o.type).upper() == "IMAGE"), None) if node else None
+    if node is None or slot is None:
+        raise ValueError(f"#{freeze} is not a node with an IMAGE output")
+    base = wf.to_api(object_info)
+    key = str(freeze)
+    if key not in base:
+        raise ValueError(f"#{freeze} is muted, bypassed or virtual - nothing to freeze")
+    keep, todo = set(), [key]
+    while todo:  # only the frozen node's ancestors run
+        nid = todo.pop()
+        if nid in keep or nid not in base:
+            continue
+        keep.add(nid)
+        todo += [str(v[0]) for v in base[nid]["inputs"].values() if isinstance(v, list) and len(v) == 2]
+    probe = {nid: base[nid] for nid in keep}
+    probe["freeze_preview"] = {"class_type": "PreviewImage", "inputs": {"images": [key, slot]}}
+    res = await _client().run_and_wait(probe, timeout=timeout, extra_data=extra_data, front=front)
+    images = [o for o in res.get("outputs") or [] if o.get("node_id") == "freeze_preview" and o.get("filename")]
+    if res["status"] == "timeout":
+        # ComfyUI runs front-queued jobs newest first, so later front jobs can starve this one
+        raise ValueError(
+            f"the freeze run (prompt {res.get('prompt_id')}) is still queued or running after {timeout:.0f}s; "
+            "newer front-queued jobs run before it. No cells were queued"
+        )
+    if res["status"] != "success" or not images:
+        raise ValueError(f"the freeze run ended {res['status']}: {str(res.get('error') or 'no image')[:200]}")
+    ref = _output_ref(images[0])
+    for _, api, _ in prepared:
+        if api is None:
+            continue
+        for item in api.values():
+            for name, value in item["inputs"].items():
+                if isinstance(value, list) and len(value) == 2 and str(value[0]) == key and value[1] == slot:
+                    item["inputs"][name] = ["freeze_load", 0]
+        api["freeze_load"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+    batch = f" (first of {len(images)} batch images)" if len(images) > 1 else ""
+    return f"#{freeze} {node.type} output held fixed from one run: {ref}{batch}; ops upstream of it have no effect"
 
 
 def _sampling_cached(res: dict[str, Any], api: dict[str, Any]) -> bool:
@@ -2235,12 +2346,16 @@ def _sampling_cached(res: dict[str, Any], api: dict[str, Any]) -> bool:
     return any("sampler" in str(api.get(nid, {}).get("class_type", "")).lower() for nid in cached)
 
 
-def _always_rerun(history: list[tuple[dict[str, Any], set[str]]]) -> list[str]:
+def _always_rerun(history: list[tuple[dict[str, Any], set[str], bool]], shared: bool = False) -> list[str]:
     """Nodes that ran again with the same inputs while every node feeding them was
     cached - their IS_CHANGED forces a re-run (LLM/API nodes, random pickers), so
-    their output can differ per run even when nothing in the sweep changed it."""
+    their output can differ per run even when nothing in the sweep changed it.
+    shared=True instead checks only runs that followed other jobs in the queue,
+    whose cache those jobs may have evicted (a re-run proves nothing there)."""
     found: dict[str, str] = {}
-    for (prev, _), (cur, cached) in itertools.pairwise(history):
+    for (prev, _, _), (cur, cached, after_others) in itertools.pairwise(history):
+        if after_others != shared:
+            continue
         for nid, node in cur.items():
             old = prev.get(nid)
             if nid in cached or old is None or old != node:
@@ -2287,7 +2402,7 @@ async def _run_sweep(
     spec = _sweep_spec(sweep)
     if isinstance(spec, str):
         return {"status": "invalid", "error": spec}
-    variants, seeds, crops, reference = spec
+    variants, seeds, crops, reference, freeze = spec
     object_info = await _object_info(refresh=True)
     base_ui = wf.to_ui()
     prepared: list[tuple[str, dict[str, Any] | None, str | None]] = []
@@ -2338,13 +2453,20 @@ async def _run_sweep(
         except OSError as e:
             return {"status": "invalid", "error": f"cannot create {root}: {e}"}
     extra_data = {"api_key_comfy_org": _config().comfy_api_key} if _config().comfy_api_key else None
+    frozen: str | None = None
+    if freeze is not None:
+        # render the frozen stage once, then feed every cell a LoadImage of it
+        try:
+            frozen = await _freeze_stage(wf, freeze, object_info, prepared, timeout_seconds, extra_data, bool(front))
+        except (ValueError, ComfyValidationError) as e:
+            return {"status": "invalid", "error": f"freeze: {str(e)[:300]}"}
     runs: list[dict[str, Any]] = []
     grid: list[list[tuple[PILImage.Image | None, str]]] = []
     # one list per crop box: each box gets its own sheet comparing every run 1:1
     crop_cells: list[list[tuple[PILImage.Image | None, str]]] = [[] for _ in crops]
     halt: str | None = None
     first_image: PILImage.Image | None = None
-    history: list[tuple[dict[str, Any], set[str]]] = []  # (api, cached ids) per finished run
+    history: list[tuple[dict[str, Any], set[str], bool]] = []  # (api, cached ids, shared queue) per run
     started = time.monotonic()
     for label, api, problem in prepared:
         if api is None:
@@ -2387,8 +2509,10 @@ async def _run_sweep(
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
             if res.get("sampling_s") is not None:
                 entry["sampling_s"] = res["sampling_s"]
+            if res.get("node_s"):
+                entry["node_s"] = dict(list(res["node_s"].items())[:3])
             if res["status"] == "success":
-                history.append((run_api, set(res.get("cached_nodes") or [])))
+                history.append((run_api, set(res.get("cached_nodes") or []), bool(entry.get("shared_queue"))))
             if _sampling_cached(res, run_api):
                 entry["sampling_cached"] = True  # elapsed_s timed only what ran after it
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
@@ -2431,11 +2555,14 @@ async def _run_sweep(
         "runs": runs,
     }
     content: list[Any] = [out]
+    if frozen:
+        out["frozen"] = frozen
     if any(r.get("files") for r in runs):
         out["hint"] = "each run's files are LoadImage-ready refs ('name.png [output]'): set_widget a LoadImage image to one to reuse a render - no upload needed"
-    if any("sampling_s" in r for r in runs):
+    if any("sampling_s" in r or "node_s" in r for r in runs):
         out["timing_note"] = (
-            "sampling_s = sampler step time x steps, without model loads; compare runs by it"
+            "sampling_s = sampler/detailer step time x steps, without model loads; compare "
+            "runs by it. node_s = each slow node's own run time (loads land on the node that loads)"
             + (" - other jobs shared the queue, so elapsed_s includes model swaps"
                if any(r.get("shared_queue") for r in runs) else "")
         )
@@ -2444,8 +2571,20 @@ async def _run_sweep(
         out["always_rerun_hint"] = (
             "these re-ran with unchanged inputs (the node forces it: LLM, API, random "
             "picks), so their output can differ per run and the comparison isn't held "
-            "fixed. To freeze one: copy its text from a run into its consumer with "
-            "set_widget, disconnect the node, and sweep again"
+            "fixed. Freeze an image stage with sweep freeze=<node id>; for text, copy "
+            "it from a run into its consumer with set_widget and disconnect the node"
+        )
+    if evicted := [n for n in _always_rerun(history, shared=True) if n not in rerun]:
+        out["rerun_after_other_jobs"] = evicted[:8]
+        out["rerun_after_other_jobs_hint"] = (
+            "these re-ran with unchanged inputs after other jobs in the shared queue, "
+            "which likely cleared ComfyUI's cache - not the nodes themselves"
+        )
+    if reference and rerun and not freeze:
+        out["reference_warning"] = (
+            f"{len(rerun)} node(s) re-ran with new output each run (always_rerun), so the "
+            "reference likely came from a different upstream pass than the cells; "
+            "freeze=<node id> holds that stage fixed"
         )
     if any("banding" in r for r in runs):
         out["banding_note"] = (
@@ -2561,7 +2700,7 @@ async def run_workflow(
     graph containing one is gated - pass True only after they agree.
 
     sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]],reference?:
-    "file [input]"}: each variant (ops on a copy) x seed; returns a contact sheet
+    "file [input]",freeze?:node_id}: each variant (ops on a copy) x seed; returns a contact sheet
     (reference = first cell), 1:1 crop sheets, per-run elapsed_s/files. <=24 runs,
     wait=True; crops <=512px or 0-1 floats.
 

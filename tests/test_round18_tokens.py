@@ -238,6 +238,10 @@ async def test_search_nodes_detail_folds_everything_when_it_fits(
 # it the surface is ~650 chars larger on 3.11/3.12 than on 3.13, which strips
 # docstring indentation at compile time - so the same assertion passed locally
 # and failed in CI. If that ever returns, fix the cause, not the ceiling.
+#
+# 0.25.5 raised it 18,800 -> 18,900 for three capabilities with no cheaper home
+# (edit op copy_nodes, sweep freeze, organize layout="panel"), after trimming
+# organize_workflow's and edit_workflow's existing text to pay for most of it.
 
 
 async def _surface():
@@ -250,7 +254,7 @@ async def _surface():
 @pytest.mark.asyncio
 async def test_total_tool_surface_stays_under_the_ceiling():
     tools, total = await _surface()
-    assert total <= 18_800, (
+    assert total <= 18_900, (
         f"tool descriptions + schemas grew to {total} chars. Pay for new text by "
         "trimming existing text, or teach it in a response instead."
     )

@@ -1419,7 +1419,7 @@ class Workflow:
             high = opts.get("max")
             if mode == "randomize":
                 lo = float(low if low is not None else 0)
-                hi = float(high if high is not None else w.MAX_SEED)
+                hi = float(min(high if high is not None else w.MAX_SEED, w.FRONTEND_SEED_MAX))
                 # the frontend randomizes on the step grid: floor(rand * span/step) * step + min
                 span = max(int((hi - lo) / step), 0) if step else 0
                 new = lo + roller.randrange(span + 1) * step

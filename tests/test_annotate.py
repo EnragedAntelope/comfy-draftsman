@@ -189,6 +189,7 @@ def test_models_group_title_with_lora(txt2img, object_info):
     lora = wf.add_node("LoraLoader", object_info=object_info)
     wf.connect(ids["ckpt"], "MODEL", lora.id, "model")
     wf.connect(ids["ckpt"], "CLIP", lora.id, "clip")
+    wf.connect(lora.id, "MODEL", ids["sampler"], "model")  # a dangling LoRA goes to Unconnected
     wf.set_widget(lora.id, "lora_name", "SDXL\\dmd2_sdxl_4step_lora_fp16.safetensors", object_info)
     annotate(wf, object_info)
     model_groups = [g for g in wf.groups if "model" in g.title.lower()]

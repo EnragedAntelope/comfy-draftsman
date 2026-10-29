@@ -722,9 +722,22 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   moves routing nodes (`utilities/logic`) to their leftmost consumer's stage and
   pulls an IMAGE→IMAGE "post" node that is *not downstream of any sampling-stage
   node* back to its source's stage. It does nothing when the graph has no sampling
-  stage (a pure image-processing graph is all post). `layout.apply_staged_layout`
-  flows a stage's columns into rows at `BAND_WRAP_W`; the Qwen 2.1 fixture is the
-  acceptance case (canvas ≤ 2.5× its height).
+  stage (a pure image-processing graph is all post). A Prompt Building (STRING)
+  node whose consumers are all Post or Output (a filename builder for a save node,
+  a detailer's prompt) moves to that stage. Nodes no output node depends on
+  (`_unused_nodes`, reverse walk from every `output_node`) go to an "Unconnected"
+  band, unpainted and with no knob table; a graph with no output yet is left alone,
+  and a class the instance doesn't know is never judged. `layout.apply_staged_layout`
+  flows a stage's columns into rows at `BAND_WRAP_W`; when that would make a band
+  more than twice as tall as wide (28 tall text nodes made one 11,700 px column),
+  `_flow_rows` is retried at each cumulative column width and the squarest result
+  wins. The Qwen 2.1 fixture is the acceptance case (canvas ≤ 2.5× its height).
+  `layout="panel"` swaps the pipeline bands for Controls (green knobs, plus nodes
+  with an unwired glossary knob: samplers, detailers) | Pipeline | Unconnected; the
+  knob judgement still runs on the pipeline stage, so both layouts paint the same
+  nodes. Knob table rows name their node once more than one node contributes, and a
+  glossary name holding a non-number (a pack's `height` combo of Random/tall) is a
+  different knob and is skipped.
 - **A note may quote a family as a reference, never the graph's own values as
   "tuned".** The sampling note compares the graph's steps/CFG to the family range
   and, when outside, says so and omits the base-model numbers.
@@ -749,7 +762,33 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   node, seconds per step between the first and last websocket `progress` tick, times
   steps. Model loads happen before step 1, so a queue shared with other families'
   jobs (model swaps) does not skew it; the sweep still marks such cells
-  `shared_queue`.
+  `shared_queue`. Detailer nodes count too, and a step counter that restarts (one
+  detailer pass per face) starts a new segment. `node_s` gives each run's slowest
+  nodes from the websocket `executing` start times (a node runs until the next one
+  starts), so a face pass or a model load is visible per node.
+  `always_rerun` only compares runs that did not follow other jobs: after another job,
+  an unchanged node re-running usually means that job evicted ComfyUI's cache, and
+  is reported apart as `rerun_after_other_jobs`. `sweep.freeze=<node id>` runs only
+  that node's ancestors once with a `PreviewImage` on its first IMAGE output, then
+  rewires every cell to a `LoadImage` of the `[temp]` result (`_freeze_stage`), so
+  random/LLM nodes above it cannot differ per cell. A `reference` with
+  `always_rerun` nodes and no freeze gets `reference_warning`.
+- **One websocket clientId per `run_and_wait`.** ComfyUI's `/ws` handler pops the
+  socket's sid in its `finally`, so a socket that closes while a new one with the same
+  `clientId` connects can remove the new one, and that run never sees its events.
+  `run_and_wait` queues under a fresh uuid each call; the ProgressTracker keeps its
+  own long-lived id.
+- **Edit batches are all or nothing.** `edit_workflow` runs the ops on a
+  `copy.deepcopy` first; any failure returns `applied: []` and changes nothing, then
+  the real apply runs. Before 0.25.5 the ops before a failure were kept, so a retry
+  of the fixed batch re-added them and an earlier op's `ref` (scoped to one call)
+  could not be reused. `copy_nodes` clones nodes from another session workflow
+  (deep copy, new ids, links between copied nodes re-added by input name) and names
+  each input that was fed from outside the copy and is now unwired.
+- **Seed rolls stay inside the frontend's range.** The browser's randomize caps at
+  `SAFE_INTEGER_MAX` = 2**50 (`widgets.FRONTEND_SEED_MAX`); a seed above 2**53 rounds
+  when the browser loads the file, so `roll_seed_controls` and
+  `roll_primitive_control` randomize no higher.
 - **The banding score is a spectral line test, in color too.** `imaging.banding_score`
   averages the image down to one column profile and one row profile per RGB channel
   (linear, so the opponent colors red-green and blue-yellow come from the profiles;

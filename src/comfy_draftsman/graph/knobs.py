@@ -79,6 +79,9 @@ _UNBOUNDED_RANGE_NAMES = {"seed", "noise_seed"}
 
 _ROW_VALUE_CAP = 60
 
+# glossary knobs whose value is text; every other glossary knob is a number
+_TEXT_KNOBS = {"sampler_name", "scheduler", "control_after_generate"}
+
 
 @cache
 def _load_techniques() -> list[dict[str, Any]]:
@@ -154,19 +157,30 @@ def knob_rows(
     Family guidance (a per-knob ``note``, e.g. H3's "No CFG...") wins over
     the generic glossary sentence when both have something to say."""
     sampling_guidance = (guidance or {}).get("sampling") or {}
-    rows: list[str] = []
+    per_node: list[tuple[Node, list[tuple[str, str]]]] = []
     for node in members:
         try:
             named = w.widgets_to_named(node.type, node.widgets_values, object_info)
         except (ValueError, KeyError):
             continue
+        cells: list[tuple[str, str]] = []
         for name, value in named.items():
             if name not in _KNOB_EFFECTS:
                 continue
             if _is_wired(node, name):
-                rows.append(f"| {name} | *(wired)* | | |")
+                cells.append((name, "*(wired)* | |"))
                 continue
+            if name not in _TEXT_KNOBS and (not isinstance(value, int | float) or isinstance(value, bool)):
+                continue  # same name, different knob (a pack's 'height' combo of Random/tall)
             range_str = _range_or_choices(node.type, name, object_info)
             effect = (sampling_guidance.get(name) or {}).get("note") or _KNOB_EFFECTS[name]
-            rows.append(f"| {name} | {_clip(value)} | {range_str} | {effect} |")
-    return rows
+            cells.append((name, f"{_clip(value)} | {range_str} | {effect}"))
+        if cells:
+            per_node.append((node, cells))
+    # several nodes share knob names (seed, steps): say whose knob each row is
+    many = len(per_node) > 1
+    return [
+        f"| {name}{f' ({node.title or node.type} #{node.id})' if many else ''} | {rest} |"
+        for node, cells in per_node
+        for name, rest in cells
+    ]

@@ -44,13 +44,15 @@ async def test_edits_survive_a_server_restart(env):
     assert fresh.title(wf_id) == "keep me"
 
 
-async def test_ops_that_landed_before_a_failure_are_persisted_too(env):
+async def test_a_failing_batch_changes_nothing(env):
     wf_id = (await server.create_workflow("t"))["workflow_id"]
     result = await server.edit_workflow(
         wf_id, [{"op": "add_node", "class_type": "KSampler"}, {"op": "set_title", "node_id": 99, "title": "x"}]
     )
-    assert "error" in result
-    assert len(Session(env.session_dir).get(wf_id).nodes) == 1
+    assert "error" in result and result["applied"] == []
+    assert "nothing was changed" in result["note"]
+    assert len(server._wf(wf_id).nodes) == 0
+    assert len(Session(env.session_dir).get(wf_id).nodes) == 0
 
 
 async def test_connect_only_batch_does_not_echo_the_endpoints(env):
@@ -94,7 +96,7 @@ async def test_unknown_or_duplicate_ref_is_a_clear_error(env):
         ],
     )
     assert "must be a non-numeric string" in dup["error"]
-    assert len(dup["applied"]) == 1  # the first add landed, the batch stopped
+    assert dup["applied"] == [] and not server._wf(wf_id).nodes  # all or nothing
 
 
 def test_learned_singular_sampler_folds_into_the_plural_list(tmp_path):

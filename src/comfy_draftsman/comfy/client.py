@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import time
 import uuid
@@ -298,12 +299,33 @@ class ComfyClient:
         between someone else's jobs reloads its models every time)."""
         total = None
         for node, seq in ticks.items():
-            if "sampler" not in str(api_prompt.get(node, {}).get("class_type", "")).lower():
+            kind = str(api_prompt.get(node, {}).get("class_type", "")).lower()
+            if "sampler" not in kind and "detailer" not in kind:
                 continue
-            (t0, v0, _), (t1, v1, steps) = seq[0], seq[-1]
-            if v1 > v0 and steps:
-                total = (total or 0.0) + (t1 - t0) / (v1 - v0) * steps
+            # a detailer samples once per face: the step counter restarts per pass
+            passes: list[list[tuple[float, int, int]]] = []
+            for tick in seq:
+                if not passes or tick[1] <= passes[-1][-1][1]:
+                    passes.append([])
+                passes[-1].append(tick)
+            for run in passes:
+                (t0, v0, _), (t1, v1, steps) = run[0], run[-1]
+                if v1 > v0 and steps:
+                    total = (total or 0.0) + (t1 - t0) / (v1 - v0) * steps
         return None if total is None else round(total, 1)
+
+    @staticmethod
+    def _node_seconds(
+        starts: list[tuple[float, str]], end: float, api_prompt: dict[str, Any], top: int = 5
+    ) -> dict[str, float]:
+        """Slowest nodes of this run, from the ws 'executing' start times: each
+        node runs until the next one starts. Unaffected by other queued jobs."""
+        spans: dict[str, float] = {}
+        for (t0, nid), (t1, _) in itertools.pairwise([*starts, (end, "")]):
+            label = f"#{nid} {api_prompt.get(nid, {}).get('class_type', '?')}"
+            spans[label] = spans.get(label, 0.0) + t1 - t0
+        slow = sorted(spans.items(), key=lambda kv: -kv[1])[:top]
+        return {k: round(v, 1) for k, v in slow if v >= 0.1}
 
     @staticmethod
     def _collect_outputs(history: dict[str, Any]) -> list[dict[str, Any]]:
@@ -390,8 +412,11 @@ class ComfyClient:
         Returns {"status", "prompt_id", "outputs" (image/video/audio files from
         history), "error"?}.
         """
-        async with websockets.connect(self._ws_url(), max_size=32 * 1024 * 1024) as ws:
-            queued = await self.queue_prompt(api_prompt, extra_data=extra_data, front=front)
+        # a fresh clientId per run: ComfyUI's handler for a closing socket pops its
+        # sid, so a back-to-back reconnect under the same id loses every event
+        sid = uuid.uuid4().hex
+        async with websockets.connect(self._ws_url(sid), max_size=32 * 1024 * 1024) as ws:
+            queued = await self.queue_prompt(api_prompt, extra_data=extra_data, front=front, client_id=sid)
             prompt_id = queued["prompt_id"]
             # ComfyUI accepts a prompt (HTTP 200 + prompt_id) yet still returns
             # node_errors for nodes it rejected at validation, executing only the
@@ -401,6 +426,7 @@ class ComfyClient:
             error: dict[str, Any] | None = None
             timed_out = False
             ticks: dict[str, list[tuple[float, int, int]]] = {}  # node -> (time, step, steps)
+            starts: list[tuple[float, str]] = []  # (time, node id) per 'executing' event
             try:
                 async with asyncio.timeout(timeout):
                     while True:
@@ -412,6 +438,8 @@ class ComfyClient:
                         if data.get("prompt_id") not in (None, prompt_id):
                             continue
                         kind = event.get("type")
+                        if kind == "executing" and data.get("node") is not None:
+                            starts.append((time.monotonic(), str(data["node"])))
                         if kind == "progress" and isinstance(data.get("value"), int):
                             ticks.setdefault(str(data.get("node")), []).append(
                                 (time.monotonic(), data["value"], data.get("max") or 0)
@@ -429,6 +457,7 @@ class ComfyClient:
                             break
             except TimeoutError:
                 timed_out = True
+            finished_at = time.monotonic()
             if timed_out:
                 return {
                     "status": "timeout",
@@ -463,6 +492,8 @@ class ComfyClient:
             result["elapsed_s"] = elapsed
         if (sampling := self._sampling_s(ticks, api_prompt)) is not None:
             result["sampling_s"] = sampling
+        if node_s := self._node_seconds(starts, finished_at, api_prompt):
+            result["node_s"] = node_s
         cached = [
             str(node)
             for message in (history.get("status") or {}).get("messages") or []
