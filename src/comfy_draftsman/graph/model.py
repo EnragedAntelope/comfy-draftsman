@@ -236,6 +236,11 @@ class Node:
         return None
 
 
+def _short(value: Any) -> str:
+    text = repr(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
 def _as_pair(value: Any) -> list[float]:
     """pos/size may be [x, y] or {'0': x, '1': y}."""
     if isinstance(value, dict):
@@ -375,7 +380,7 @@ class Workflow:
         for raw_group in data.get("groups", []) or []:
             wf.groups.append(
                 Group(
-                    id=raw_group.get("id", len(wf.groups) + 1),
+                    id=raw_group.get("id", max((g.id for g in wf.groups), default=0) + 1),
                     title=raw_group.get("title", "Group"),
                     bounding=list(raw_group.get("bounding", [0, 0, 100, 100])),
                     color=raw_group.get("color", "#3f789e"),
@@ -555,6 +560,7 @@ class Workflow:
                 # saves; its value stays out of widgets_values (pack JS state)
                 js_widget = name if w.is_unfed_custom_input(spec, object_info) else None
                 node.inputs.append(InputSlot(name=name, type=slot_type, widget_name=js_widget))
+            node.inputs += [InputSlot(name=n, type=t) for n, t in w.LM_JS_INPUTS.get(class_type, [])]
             out_names = schema.get("output_name") or schema.get("output") or []
             out_types = schema.get("output") or []
             for idx, out_type in enumerate(out_types):
@@ -650,7 +656,7 @@ class Workflow:
     ) -> Group:
         """Build a group from its members' extents, append it, and return it."""
         group = Group(
-            id=len(self.groups) + 1,
+            id=max((g.id for g in self.groups), default=0) + 1,
             title=title,
             bounding=self.group_bounding_for(node_ids),
             color=color,
@@ -696,6 +702,11 @@ class Workflow:
             # input" action. Keeps the widgets_values slot; the link overrides it.
             in_slot = self._materialize_widget_input(target, target_input, object_info)
             materialized = in_slot is not None
+        if in_slot is None and (js_type := dict(w.LM_JS_INPUTS.get(target.type, [])).get(target_input)):
+            # a known pack-JS socket missing from an older save: restore it typed
+            in_slot = InputSlot(name=target_input, type=js_type)
+            target.inputs.append(in_slot)
+            materialized = True
         if in_slot is None and force:
             # some packs (rgthree switches, dynamic collectors) build their
             # inputs in frontend JS, so /object_info declares none - there is
@@ -986,7 +997,7 @@ class Workflow:
             input_name = controls[0]  # the bare name PrimitiveNode uses
         if input_name not in slots:
             real_widgets = [s for s in slots if not s.endswith(w.SYNTHETIC_SUFFIXES)]
-            if input_name in w.all_slot_names(node.type, object_info):
+            if "." in input_name and input_name in w.all_slot_names(node.type, object_info):
                 # a sub-widget of a dynamic combo whose option isn't selected
                 raise ValueError(
                     f"{node.type}: '{input_name}' is a sub-widget of a dynamic "
@@ -1326,27 +1337,37 @@ class Workflow:
             api[str(node.id)] = {"class_type": node.type, "inputs": inputs}
         return api
 
-    def apply_seed_control(self, object_info: dict[str, Any]) -> bool:
+    def apply_seed_control(
+        self, object_info: dict[str, Any], changes: list[str] | None = None
+    ) -> bool:
         """Re-roll seed widgets per their control_after_generate mode (the
         frontend does this between queues; the raw API never does). Mutates
-        widgets_values in place. Returns True if any seed changed."""
+        widgets_values in place. Returns True if any seed changed; ``changes``
+        collects one "#id name: old -> new" line per rolled value."""
         changed = False
         for node in self.nodes.values():
+            old = list(node.widgets_values) if isinstance(node.widgets_values, list) else None
             if node.type == PRIMITIVE_TYPE:
-                if self.roll_primitive_control(node, object_info):
-                    changed = True
-                continue
-            if node.type not in object_info:
-                continue
-            new_values, node_changed = w.roll_seed_controls(
-                node.type,
-                node.widgets_values,
-                object_info,
-                socket_names={slot.name for slot in node.inputs},
-            )
-            if node_changed:
+                if not self.roll_primitive_control(node, object_info):
+                    continue
+                names = ["value"]
+            elif node.type in object_info:
+                socket_names = {slot.name for slot in node.inputs}
+                new_values, node_changed = w.roll_seed_controls(
+                    node.type, node.widgets_values, object_info, socket_names=socket_names
+                )
+                if not node_changed:
+                    continue
                 node.widgets_values = new_values
-                changed = True
+                names = w.widget_slot_names(node.type, object_info, old, socket_names)
+            else:
+                continue
+            changed = True
+            if changes is not None and old is not None:
+                for i, (a, b) in enumerate(zip(old, node.widgets_values, strict=False)):
+                    if a != b:
+                        label = names[i] if i < len(names) else f"widgets_values[{i}]"
+                        changes.append(f"#{node.id} {label}: {_short(a)} -> {_short(b)}")
         return changed
 
     def roll_primitive_control(

@@ -828,6 +828,11 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `loras` appends missing tags to the text. `lastAccepted` in the meta dict is
   session-only autocomplete state LM strips on export, so it is dropped on every set.
   Nodes with a control_after_generate or dynamic combo still stop loudly.
+  `all_slot_names` lists LM's text/loras names so `add_node` can set them at creation.
+  The loader's optional `clip`/`lora_stack` (and the stacker's `lora_stack`) are not in
+  object_info (its optional section is a `FlexibleOptionalInputType`); LM's
+  `onNodeCreated` adds them with `addInput`, so `widgets.LM_JS_INPUTS` names them for
+  `add_node` and `connect`.
 - **`headless: true` findings block runs, not saves.** `js-widget-input` and
   `widget-layout-unmapped` mean the raw API can't carry the node, while the editor can;
   `save_workflow` filters them out of its gate, `run_workflow` and the sweep do not.

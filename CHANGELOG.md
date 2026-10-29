@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.25.4 - session feedback
+
+### Fixed
+
+- `add_node` accepts `text` and `loras` on a LoRA Manager Lora Loader or Stacker
+  (it rejected them with "no widget 'text'" though `set_widget` worked after).
+- A new LoRA Manager Lora Loader gets its `clip` and `lora_stack` sockets, and a
+  Stacker its `lora_stack`, the ones LM's JS adds on creation; `connect` restores
+  them on an older save that lacks them, so no `force` or "frontend-created" note.
+- `add_group` and imported groups without an id take the highest id + 1, so a new
+  group no longer reuses an imported group's id.
+- `get_node_info` with `input:substr` naming a connection (`bbox_detector`) or a
+  non-dropdown widget says the filter matched nothing and that other dropdowns
+  keep the default cap, instead of falling back silently.
+- `inspect_workflow` returns full note text under `notes` (16000 chars total); the
+  per-edit summary still clips it.
+- Sweep crop sheets include the reference image, cropped at render scale.
+
+### Added
+
+- `run_workflow(roll_seeds=True)` lists each value it changed under `rolled`
+  ("#12 unet_name: 'a' -> 'b'"), so a dropdown left on increment is visible.
+- A sweep reports `always_rerun`: nodes that ran again with unchanged inputs while
+  everything feeding them was cached (LLM, API, random pickers), with how to freeze
+  their output.
+
 ## 0.25.3 - session feedback
 
 ### Fixed

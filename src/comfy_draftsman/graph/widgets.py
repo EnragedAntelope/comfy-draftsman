@@ -356,6 +356,15 @@ LM_META_PREFIX = "__lm_autocomplete_meta_"
 _LM_LORA_RE = re.compile(r"<lora:([^:]+):([-\d.]+)(?::([-\d.]+))?>")
 
 
+# Optional sockets LM's onNodeCreated adds with addInput (web/comfyui/lora_loader.js,
+# lora_stacker.js); object_info shows only FlexibleOptionalInputType, so no schema
+# names them. Source-checked 2026-10-29.
+LM_JS_INPUTS: dict[str, list[tuple[str, str]]] = {
+    "Lora Loader (LoraManager)": [("clip", "CLIP"), ("lora_stack", "LORA_STACK")],
+    "Lora Stacker (LoraManager)": [("lora_stack", "LORA_STACK")],
+}
+
+
 def lm_fresh_widgets(class_type: str, object_info: dict[str, Any]) -> tuple[list[str], list[Any]] | None:
     """(saved names, values) in the layout LoRA Manager saves for a new node, or
     None when the node has no autocomplete text widget or one we can't lay out."""
@@ -721,6 +730,11 @@ def all_slot_names(class_type: str, object_info: dict[str, Any]) -> list[str]:
     for name, spec in _iter_schema_inputs(schema):
         if is_widget_input(spec):
             walk(name, spec)
+    if lm := lm_fresh_widgets(class_type, object_info):
+        # LoRA Manager's JS widgets (text, loras) are settable by their saved names
+        for name in lm[0]:
+            if not name.startswith(LM_META_PREFIX):
+                add(name)
     return names
 
 

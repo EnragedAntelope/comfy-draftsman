@@ -14,6 +14,7 @@ import copy
 import difflib
 import inspect
 import io
+import itertools
 import json
 import math
 import re
@@ -373,6 +374,8 @@ def _alias_control(widgets: dict[str, Any], slots: list[str]) -> dict[str, Any]:
 def _clip(v: Any) -> Any:
     return v[:120] + "…" if isinstance(v, str) and len(v) > 120 else v
 
+
+_NOTES_BUDGET = 16000  # chars of full note text inspect_workflow returns
 
 _LEVEL_RANK = {"error": 0, "warning": 1, "info": 2}
 _FINDINGS_CAP = 40
@@ -1327,6 +1330,15 @@ async def inspect_workflow(workflow_id: str) -> dict[str, Any]:
     (newer bundled templates package their graph as a subgraph)."""
     wf = _wf(workflow_id)
     summary = _summary(workflow_id, wf)
+    # note text in full here (the per-edit summary clips it), within a total budget
+    budget, notes = _NOTES_BUDGET, {}
+    for n in sorted(wf.nodes.values(), key=lambda x: x.id):
+        text = n.widgets_values[0] if n.type in NOTE_TYPES and n.widgets_values else None
+        if isinstance(text, str) and len(text) > 120 and budget > 0:
+            notes[str(n.id)] = text[:budget] + (" ...[cut: export_workflow_json for the rest]" if len(text) > budget else "")
+            budget -= len(text)
+    if notes:
+        summary["notes"] = notes
     subgraphs = wf.subgraph_defs()
     if subgraphs:
         summary["subgraphs"] = [_subgraph_summary(sg, wf) for sg in subgraphs.values()]
@@ -2223,6 +2235,22 @@ def _sampling_cached(res: dict[str, Any], api: dict[str, Any]) -> bool:
     return any("sampler" in str(api.get(nid, {}).get("class_type", "")).lower() for nid in cached)
 
 
+def _always_rerun(history: list[tuple[dict[str, Any], set[str]]]) -> list[str]:
+    """Nodes that ran again with the same inputs while every node feeding them was
+    cached - their IS_CHANGED forces a re-run (LLM/API nodes, random pickers), so
+    their output can differ per run even when nothing in the sweep changed it."""
+    found: dict[str, str] = {}
+    for (prev, _), (cur, cached) in itertools.pairwise(history):
+        for nid, node in cur.items():
+            old = prev.get(nid)
+            if nid in cached or old is None or old != node:
+                continue
+            feeds = [v[0] for v in node.get("inputs", {}).values() if isinstance(v, list) and len(v) == 2]
+            if all(str(src) in cached for src in feeds):
+                found[nid] = f"#{nid} {node.get('class_type')}"
+    return list(found.values())
+
+
 def _output_ref(item: dict[str, Any]) -> str:
     """'sub/file.png [output]' - the annotated form LoadImage takes as-is."""
     sub = f"{item['subfolder']}/" if item.get("subfolder") else ""
@@ -2316,6 +2344,7 @@ async def _run_sweep(
     crop_cells: list[list[tuple[PILImage.Image | None, str]]] = [[] for _ in crops]
     halt: str | None = None
     first_image: PILImage.Image | None = None
+    history: list[tuple[dict[str, Any], set[str]]] = []  # (api, cached ids) per finished run
     started = time.monotonic()
     for label, api, problem in prepared:
         if api is None:
@@ -2358,6 +2387,8 @@ async def _run_sweep(
             entry.update(status=res["status"], elapsed_s=res.get("elapsed_s"), prompt_id=res.get("prompt_id"))
             if res.get("sampling_s") is not None:
                 entry["sampling_s"] = res["sampling_s"]
+            if res["status"] == "success":
+                history.append((run_api, set(res.get("cached_nodes") or [])))
             if _sampling_cached(res, run_api):
                 entry["sampling_cached"] = True  # elapsed_s timed only what ran after it
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
@@ -2408,6 +2439,14 @@ async def _run_sweep(
             + (" - other jobs shared the queue, so elapsed_s includes model swaps"
                if any(r.get("shared_queue") for r in runs) else "")
         )
+    if rerun := _always_rerun(history):
+        out["always_rerun"] = rerun[:8]
+        out["always_rerun_hint"] = (
+            "these re-ran with unchanged inputs (the node forces it: LLM, API, random "
+            "picks), so their output can differ per run and the comparison isn't held "
+            "fixed. To freeze one: copy its text from a run into its consumer with "
+            "set_widget, disconnect the node, and sweep again"
+        )
     if any("banding" in r for r in runs):
         out["banding_note"] = (
             f"banding = strongest evenly spaced 10-64px stripe (color or brightness) over its "
@@ -2422,8 +2461,8 @@ async def _run_sweep(
         out["crop_hint"] = "the 0.1 grid on the first render shows where to aim crops=[[x0,y0,x1,y1]] (0-1 fractions); repeat seeds rerun from cache"
         if return_preview:
             content.append(Image(data=to_png(guide), format="png"))
+    ref_cell: tuple[PILImage.Image | None, str] | None = None
     if any(img is not None for r in grid for img, _ in r):
-        ref_cell: tuple[PILImage.Image | None, str] | None = None
         if reference:
             item = _parse_output_ref(reference)
             try:
@@ -2449,6 +2488,14 @@ async def _run_sweep(
         if return_preview:
             data, fmt, _, _ = downscale_image(to_png(sheet), INLINE_MAX)
             content.append(Image(data=data, format=fmt))
+    if ref_cell and ref_cell[0] is not None and first_image is not None:
+        # crop the reference at render scale so each box lands on the same spot
+        # shortcut: a reference of another aspect ratio is stretched to the render's
+        ref_full = ref_cell[0]
+        if ref_full.size != first_image.size:
+            ref_full = ref_full.resize(first_image.size)
+        for j, tile in enumerate(crop_tiles(ref_full, crops)):
+            crop_cells[j].insert(0, (tile, "ref"))
     oversized: list[str] = []
     for j, cells in enumerate(crop_cells):
         if not any(t is not None for t, _ in cells):
@@ -2566,7 +2613,7 @@ async def run_workflow(
     # here, after to_api: they describe what would actually be submitted, and
     # neither is worth computing for a graph that cannot be.
     capacity = await _capacity(wf, object_info)
-    warn = {"capacity": capacity} if capacity else {}
+    warn: dict[str, Any] = {"capacity": capacity} if capacity else {}
     # Partner/API nodes spend the user's money, so this gate fires BEFORE
     # anything is queued and returns rather than raises.
     billable = api_nodes(api, object_info)
@@ -2612,12 +2659,15 @@ async def run_workflow(
     # the same way, and a rollback would be wrong in the ambiguous case that
     # matters most - a connection lost after the prompt was accepted would
     # restore a seed that has already rendered.
-    if roll_seeds and wf.apply_seed_control(object_info):
+    rolled: list[str] = []
+    if roll_seeds and wf.apply_seed_control(object_info, rolled):
         # persist so inspect_workflow reflects what ran and increment/decrement
         # advance across calls; best-effort (a read-only session dir shouldn't
         # block the run)
         _persist(workflow_id)
         api = wf.to_api(object_info)  # re-serialize with the rolled values
+        # name each rolled value: a model dropdown left on "increment" changes what runs
+        warn = {**warn, "rolled": rolled[:12]}
     extra_data: dict[str, Any] | None = None
     if _config().comfy_api_key:
         extra_data = {"api_key_comfy_org": _config().comfy_api_key}
