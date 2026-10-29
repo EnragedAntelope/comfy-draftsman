@@ -464,7 +464,10 @@ def test_primitive_classifies_as_a_tweakable_input(oi):
 def test_organize_paints_a_primitive_green_and_keeps_its_size(oi):
     wf = Workflow.new()
     sampler = wf.add_node("KSampler", object_info=oi)
-    wf.add_node("SaveImage", object_info=oi)
+    decode = wf.add_node("VAEDecode", object_info=oi)
+    save = wf.add_node("SaveImage", object_info=oi)
+    wf.connect(sampler.id, "LATENT", decode.id, "samples", oi)
+    wf.connect(decode.id, "IMAGE", save.id, "images", oi)  # else nothing feeds an output
     prim = wf.add_node(PRIMITIVE_TYPE)
     wf.connect(prim.id, 0, sampler.id, "steps", oi)
     annotate(wf, oi)

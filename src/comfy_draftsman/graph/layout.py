@@ -11,6 +11,7 @@ relative to the groups it creates.
 
 from __future__ import annotations
 
+import itertools
 import re
 from typing import Any
 
@@ -278,6 +279,22 @@ def resolve_overlaps(wf: Workflow, gap: float = Y_GAP, max_passes: int = 12) -> 
     return moved_total
 
 
+def _flow_rows(
+    widths: list[float], heights: list[float], gap: float, wrap_w: float
+) -> tuple[list[list[int]], float, float]:
+    """Columns flowed into rows no wider than wrap_w: (rows, width, height)."""
+    rows: list[list[int]] = [[]]
+    row_w = 0.0
+    for i, width in enumerate(widths):
+        if rows[-1] and row_w + gap + width > wrap_w:
+            rows.append([])
+            row_w = 0.0
+        row_w += width + (gap if rows[-1] else 0.0)
+        rows[-1].append(i)
+    total_w = max(sum(widths[i] + gap for i in r) for r in rows)
+    return rows, total_w, sum(max(heights[i] for i in r) + Y_GAP for r in rows)
+
+
 def apply_staged_layout(
     wf: Workflow,
     object_info: dict[str, Any],
@@ -364,14 +381,14 @@ def apply_staged_layout(
         # flow columns into rows no wider than BAND_WRAP_W: a 20-node stage is
         # one screenful, not a 7,000px strip
         col_gap = X_GUTTER / 2
-        rows: list[list[int]] = [[]]
-        row_w = 0.0
-        for i, width in enumerate(col_widths):
-            if rows[-1] and row_w + col_gap + width > BAND_WRAP_W:
-                rows.append([])
-                row_w = 0.0
-            row_w += width + (col_gap if rows[-1] else 0.0)
-            rows[-1].append(i)
+        col_heights = [sum(wf.nodes[nid].size[1] + Y_GAP for nid in col) for col in columns]
+        rows, flow_w, flow_h = _flow_rows(col_widths, col_heights, col_gap, BAND_WRAP_W)
+        if flow_h > 2 * flow_w:
+            # a big stage would stack 900px rows into one 10,000px-tall strip:
+            # take the wrap width that makes it closest to square instead
+            wraps = itertools.accumulate(w + col_gap for w in col_widths)
+            flows = (_flow_rows(col_widths, col_heights, col_gap, wrap) for wrap in wraps)
+            rows = min(flows, key=lambda f: max(f[1], f[2]))[0]
         row_y = origin[1]
         band_w = 0.0
         band_bottom = row_y

@@ -227,6 +227,7 @@ def test_stages_declares_seven_bands_in_reader_priority_order():
     keys = [key for key, _, _ in STAGES]
     assert keys == [
         "inputs", "prompt_build", "models", "conditioning", "sampling", "post", "output",
+        "controls", "plumbing", "unused",  # panel layout bands, then Unconnected
     ]
     assert _STAGE_INDEX["inputs"] < _STAGE_INDEX["prompt_build"] < _STAGE_INDEX["models"]
     assert _STAGE_INDEX["models"] < _STAGE_INDEX["conditioning"] < _STAGE_INDEX["sampling"]

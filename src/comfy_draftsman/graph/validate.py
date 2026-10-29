@@ -87,6 +87,23 @@ def _finding(
     return finding
 
 
+def _bypass_hint(wf: Workflow, node: Node, object_info: dict[str, Any]) -> str:
+    """'or bypass it' when every consumer of this node takes it on an OPTIONAL
+    input - bypassing then just leaves those inputs empty for a test render."""
+    targets = [wf.links[lid] for out in node.outputs for lid in out.links if lid in wf.links]
+    for link in targets:
+        consumer = wf.nodes.get(link.target_id)
+        if consumer is None or link.target_slot >= len(consumer.inputs):
+            return ""
+        optional = (object_info.get(consumer.type) or {}).get("input", {}).get("optional") or {}
+        if consumer.inputs[link.target_slot].name not in optional:
+            return ""
+    return (
+        ". Its output only feeds optional inputs, so bypassing it (set_mode 4) "
+        "runs test renders without it"
+    ) if targets else ""
+
+
 _combo_choices = w.combo_choices
 
 
@@ -612,7 +629,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         "with its schema (the pack's JS adds or reorders widgets), so "
                         "draftsman can't read or set them by name. The saved file works "
                         "in ComfyUI; a headless run can't. Edit with set_widget "
-                        "index=N (inspect_workflow shows positions)",
+                        "index=N (inspect_workflow shows positions)" + _bypass_hint(wf, node, object_info),
                         node.id,
                         headless=True,
                     )
@@ -761,7 +778,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         "widget-type-mismatch",
                         f"{node.type} #{node.id}: {problem}"
                         + (shift_hint or (" - ComfyUI would cast it" if coerces else
-                                          " - ComfyUI rejects it at queue time")),
+                                          " - ComfyUI rejects it at queue time"))
+                        + ("" if coerces else _bypass_hint(wf, node, object_info)),
                         node.id,
                         input=name,
                         # the run would fail, but a pack whose JS reorders widgets loads
@@ -837,7 +855,8 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                         f"{kind}) is a custom widget its pack's frontend JS fills in "
                         "the browser; the raw API can't, so a headless run would "
                         "no-op this node's branch. Connect it, or swap this node for "
-                        "the pack's plain-STRING variant / a core equivalent",
+                        "the pack's plain-STRING variant / a core equivalent"
+                        + _bypass_hint(wf, node, object_info),
                         node.id,
                         input=name,
                         headless=True,

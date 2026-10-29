@@ -26,7 +26,7 @@ from .layout import (
     is_text_display,
     resolve_overlaps,
 )
-from .model import PRIMITIVE_TYPE, REROUTE_TYPE, Node, Workflow
+from .model import PRIMITIVE_TYPE, REROUTE_TYPE, VIRTUAL_TYPES, Node, Workflow
 
 NOTE_MARKER = "comfy-draftsman"
 
@@ -48,6 +48,11 @@ STAGES: list[tuple[str, str, str]] = [
     ("sampling", "Sampling", "#42425c"),
     ("post", "Post-Processing", "#5c5029"),
     ("output", "Output", "#653d3d"),
+    # organize_workflow(layout="panel") uses only these, in place of the above
+    ("controls", "Controls", "#3d5c47"),
+    ("plumbing", "Pipeline", "#3f5159"),
+    # either layout: nodes no output depends on (they never run)
+    ("unused", "Unconnected", "#444444"),
 ]
 _STAGE_INDEX = {key: i for i, (key, _, _) in enumerate(STAGES)}
 # group titles organize writes besides STAGES', and the emoji forms releases
@@ -256,6 +261,19 @@ def _restage_by_graph(
             stage_of_key[nid] = STAGES[min(stages)][0]
         elif nid in switches and (src := _source_stage(wf, wf.nodes[nid], stage_of_key)) is not None:
             stage_of_key[nid] = src
+
+    # STRING plumbing (a filename builder for a save node, a detailer's prompt)
+    # sits with what it feeds, not in Prompt Building with the main prompt
+    for nid in sorted(stage_of_key, key=lambda n: (-rank.get(n, 0), n)):
+        if stage_of_key[nid] != "prompt_build":
+            continue
+        fed = [
+            _STAGE_INDEX[stage_of_key[c]]
+            for c in consumers.get(nid, [])
+            if c in stage_of_key and not _is_display_companion(wf.nodes[c], object_info)
+        ]
+        if fed and min(fed) >= _STAGE_INDEX["post"]:
+            stage_of_key[nid] = STAGES[min(fed)][0]
 
     frontier = [n for n, s in stage_of_key.items() if s == "sampling"]
     if not frontier:
@@ -512,50 +530,89 @@ def _has_unwired_choice(node: Node, object_info: dict[str, Any]) -> bool:
     return False
 
 
+def _unused_nodes(wf: Workflow, object_info: dict[str, Any], staged: set[int]) -> set[int]:
+    """Staged nodes no output node depends on - ComfyUI never runs them. Empty
+    when the graph has no output yet (half-built), and a class the instance
+    doesn't know is never judged."""
+    outputs = [n for n in staged if (object_info.get(wf.nodes[n].type) or {}).get("output_node")]
+    if not outputs:
+        return set()
+    feeders: dict[int, list[int]] = {}
+    for link in wf.links.values():
+        feeders.setdefault(link.target_id, []).append(link.origin_id)
+    reached, todo = set(), list(outputs)
+    while todo:
+        nid = todo.pop()
+        if nid not in reached:
+            reached.add(nid)
+            todo += feeders.get(nid, [])
+    return {
+        n for n in staged - reached
+        if wf.nodes[n].type in object_info or wf.nodes[n].type in VIRTUAL_TYPES
+    }
+
+
+def _panel_stage(wf: Workflow, node: Node, object_info: dict[str, Any], stage: str) -> str:
+    """layout="panel": what a user edits (green knobs, plus samplers/detailers
+    with unwired steps/cfg/seed...) vs the plumbing that connects them."""
+    if _is_knob(wf, node, object_info, stage):
+        return "controls"
+    if _is_orphan(node, object_info) or _is_model_patch(node, object_info):
+        return "plumbing"
+    named = _named_widgets(node, object_info)
+    editable = set(knobs._KNOB_EFFECTS) - {"control_after_generate", "batch_size"}
+    return "controls" if any(k in editable and not _wired_input(node, k) for k in named) else "plumbing"
+
+
+def _is_knob(wf: Workflow, node: Node, object_info: dict[str, Any], stage: str | None) -> bool:
+    """A node a user edits by hand (organize paints these green)."""
+    if stage == "unused":
+        return False  # editing it changes nothing
+    slots = set(_safe_slots(node, object_info))
+    prompt_knobs = slots & _PROMPT_WIDGETS
+    # a text/prompt knob that is wired from upstream isn't editable - don't
+    # paint it "touch me" green (that combination misleads a human reader).
+    # "inputs" (a bare encoder box) and "prompt_build" (a wildcard bank/
+    # LLM step's own text) are the two stages where a prompt knob can be
+    # genuinely hand-typed; classify() never routes a WIRED one into
+    # either, so the wired check below is redundant-but-cheap insurance.
+    editable_prompt_knob = (
+        stage in ("inputs", "prompt_build")
+        and any(not _wired_input(node, name) for name in prompt_knobs)
+        # a negative prompt at CFG 1 changes nothing - not a knob
+        and not (
+            _prompt_role(wf, node) == "negative"
+            and _negative_is_inert(wf, node, object_info)
+        )
+    )
+    canvas_knob = _is_canvas_node(node.type) and any(
+        not _wired_input(node, name)
+        for name in slots
+        if name != "batch_size" and "__" not in name
+    )
+    has_values = bool(node.widgets_values)
+    return not _is_orphan(node, object_info) and (
+        node.type in _INPUT_CLASSES
+        or editable_prompt_knob
+        or canvas_knob
+        # a primitive IS a hand-set value, whatever socket it mirrors
+        or node.type == PRIMITIVE_TYPE
+        # model/LoRA pickers - but not MODEL->MODEL tuning patches
+        or (stage == "models" and has_values and not _is_model_patch(node, object_info))
+        # prompt builders: character/style pickers, wildcard banks
+        or (
+            stage == "prompt_build"
+            and not _is_display_companion(node, object_info)
+            and _has_unwired_choice(node, object_info)
+        )
+    )
+
+
 def _paint_knobs(wf: Workflow, object_info: dict[str, Any], stage_of_key: dict[int, str]) -> int:
     """Highlight user-editable knobs green. Returns how many nodes were painted."""
     painted = 0
     for node in wf.nodes.values():
-        stage = stage_of_key.get(node.id)
-        slots = set(_safe_slots(node, object_info))
-        prompt_knobs = slots & _PROMPT_WIDGETS
-        # a text/prompt knob that is wired from upstream isn't editable - don't
-        # paint it "touch me" green (that combination misleads a human reader).
-        # "inputs" (a bare encoder box) and "prompt_build" (a wildcard bank/
-        # LLM step's own text) are the two stages where a prompt knob can be
-        # genuinely hand-typed; classify() never routes a WIRED one into
-        # either, so the wired check below is redundant-but-cheap insurance.
-        editable_prompt_knob = (
-            stage in ("inputs", "prompt_build")
-            and any(not _wired_input(node, name) for name in prompt_knobs)
-            # a negative prompt at CFG 1 changes nothing - not a knob
-            and not (
-                _prompt_role(wf, node) == "negative"
-                and _negative_is_inert(wf, node, object_info)
-            )
-        )
-        canvas_knob = _is_canvas_node(node.type) and any(
-            not _wired_input(node, name)
-            for name in slots
-            if name != "batch_size" and "__" not in name
-        )
-        has_values = bool(node.widgets_values)
-        is_knob = not _is_orphan(node, object_info) and (
-            node.type in _INPUT_CLASSES
-            or editable_prompt_knob
-            or canvas_knob
-            # a primitive IS a hand-set value, whatever socket it mirrors
-            or node.type == PRIMITIVE_TYPE
-            # model/LoRA pickers - but not MODEL->MODEL tuning patches
-            or (stage == "models" and has_values and not _is_model_patch(node, object_info))
-            # prompt builders: character/style pickers, wildcard banks
-            or (
-                stage == "prompt_build"
-                and not _is_display_companion(node, object_info)
-                and _has_unwired_choice(node, object_info)
-            )
-        )
-        if is_knob:
+        if _is_knob(wf, node, object_info, stage_of_key.get(node.id)):
             node.color, node.bgcolor = GREEN
             painted += 1
         elif (node.color, node.bgcolor) == GREEN:
@@ -671,6 +728,7 @@ def _note_text(
     notes = g.get("notes", {})
     lines: list[str] = []
     source_lines: list[str] = []
+    table_members = members
     if stage == "models":
         lines.append("Swap models here to change the whole look.")
         if notes.get("loaders"):
@@ -774,6 +832,17 @@ def _note_text(
             )
             listed = ", ".join(steps[:4]) + (", ..." if len(steps) > 4 else "")
             lines.append(f"Extra image steps applied after generation: {listed}.")
+    elif stage == "unused":
+        lines.append(
+            "No output depends on these nodes, so they never run. Wire them in, or "
+            "delete them."
+        )
+        table_members = []  # their knobs change nothing
+    elif stage == "controls":
+        lines.append("Everything you normally change between runs. Green nodes are knobs.")
+    elif stage == "plumbing":
+        lines.append("The machinery that wires the controls together - normally left alone.")
+        table_members = []  # its knobs live in Controls
     elif stage == "output":
         medium = _output_medium(members, object_info)
         # "video"/"audio" are mass nouns (singular verb); "images"/"files" are
@@ -810,7 +879,7 @@ def _note_text(
     # upscale node's feather in Post, ...) - knob_rows/technique_note only
     # ever match nodes that actually carry a glossary-known widget/pattern,
     # so this naturally comes back empty for stages with nothing to say
-    table_rows = knobs.knob_rows(members, object_info, guidance)
+    table_rows = knobs.knob_rows(table_members, object_info, guidance)
     technique_lines = [
         f"**{n.title or n.type}**: {note}"
         for n in members
@@ -834,7 +903,7 @@ def _note_text(
     return "\n\n".join(parts)
 
 
-def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> int:
+def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> list[str]:
     """Human-authored Note/MarkdownNote nodes are excluded from the staged
     layout (they aren't classified/positioned), so when the layout moves
     everything around them, they stay put and land on top of it - the 49
@@ -849,7 +918,7 @@ def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> int:
         if n.type in ("Note", "MarkdownNote") and n.properties.get("draftsman") != NOTE_MARKER
     ]
     if not foreign:
-        return 0
+        return []
     others = [wf.nodes[nid] for nid in stage_of]
 
     def collides(note: Node) -> bool:
@@ -864,22 +933,27 @@ def _park_foreign_notes(wf: Workflow, stage_of: dict[int, int]) -> int:
         )
 
     to_park = [n for n in foreign if collides(n)]
-    if not to_park:
-        return 0
-    park_x = -max(n.size[0] for n in to_park) - X_GUTTER
+    park_x = -max((n.size[0] for n in to_park), default=0.0) - X_GUTTER
     y_cursor = 0.0
+    parked = []
     for note in to_park:
         note.pos = [park_x, y_cursor]
         y_cursor += note.size[1] + Y_GAP
-    return len(to_park)
+        text = str((note.widgets_values or [""])[0]).strip().splitlines()
+        name = note.title or (text[0][:40] if text else note.type)
+        parked.append(f"#{note.id} {name!r} -> column left of the graph at x={park_x:g}, y={note.pos[1]:g}")
+    return parked
 
 
 def annotate(
     wf: Workflow,
     object_info: dict[str, Any],
     learned_dir: Path | str | None = None,
+    layout: str = "pipeline",
 ) -> dict[str, Any]:
     """Organize, group, title, highlight, and annotate the workflow in place.
+    layout="panel" groups by what a user edits (Controls | Pipeline |
+    Unconnected) instead of by pipeline stage.
 
     Four ordered phases so a later one can always see (and fix) what an
     earlier one produced: (1) lay out nodes into stage bands, (2) place
@@ -922,13 +996,22 @@ def annotate(
     _restage_by_graph(wf, object_info, stage_of_key, undecided)
     # display nodes follow whatever they display (stage + position)
     companion_of = _companion_sources(wf, object_info, stage_of_key)
+    knob_stage = dict(stage_of_key)  # knob judgement needs the pipeline stage
+    unused = _unused_nodes(wf, object_info, set(stage_of_key))
+    for nid in stage_of_key:
+        if layout == "panel":
+            stage_of_key[nid] = _panel_stage(wf, wf.nodes[nid], object_info, knob_stage[nid])
+        if nid in unused:
+            stage_of_key[nid] = "unused"
+    for nid, src in companion_of.items():
+        stage_of_key[nid] = stage_of_key[src]  # displays stay beside their source
     stage_of = {nid: _STAGE_INDEX[key] for nid, key in stage_of_key.items()}
     # phase 1: lay out
     band_boxes = apply_staged_layout(wf, object_info, stage_of, companion_of=companion_of)
     foreign_parked = _park_foreign_notes(wf, stage_of)
 
     titled = _title_nodes(wf, object_info)
-    painted = _paint_knobs(wf, object_info, stage_of_key)
+    painted = _paint_knobs(wf, object_info, {n: "unused" if n in unused else s for n, s in knob_stage.items()})
     notes_added = 0
 
     members_by_stage: dict[int, list[Node]] = {}
@@ -1015,9 +1098,11 @@ def annotate(
             "guidance_notes_added": notes_added,
             "nodes_retitled": titled,
             "knobs_highlighted_green": painted,
-            "foreign_notes_parked": foreign_parked,
+            "foreign_notes_parked": len(foreign_parked),
         },
     }
+    if foreign_parked:
+        report["parked_notes"] = foreign_parked[:10]
     if own_groups:
         report["groups_replaced"] = (
             f"{own_groups}: the user's own groups no longer fit the new layout and "

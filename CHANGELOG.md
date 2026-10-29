@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.25.5 - session feedback
+
+### Fixed
+
+- A sweep's `always_rerun` no longer blames a node when the cell ran after other
+  jobs (`shared_queue`); those are listed apart as `rerun_after_other_jobs`, since
+  another job evicting the cache is the likely cause.
+- `edit_workflow` is all or nothing: a failing op changes nothing, so resending the
+  fixed batch no longer duplicates the ops before it or loses their refs.
+- `sampling_s` counts FaceDetailer and other detailer passes; a step counter that
+  restarts starts a new pass.
+- Seed rolls stay at or under 2**50, the browser's randomize cap; larger seeds
+  rounded when the workflow was opened in ComfyUI.
+- organize moves filename and detailer-prompt string nodes out of Prompt Building
+  to the stage they feed, and wraps a tall band into a near-square block (a
+  28-node band was one 11,700 px column).
+- Knob tables name each row's node when several nodes contribute, and skip a
+  glossary name holding a non-number (an IdentityForge `height` set to Random).
+- `foreign_notes_parked` comes with `parked_notes`, naming each note and where it
+  went.
+- Each `run_and_wait` uses its own websocket client id, so a socket closing as the
+  next run starts can no longer drop that run's progress events.
+
+### Added
+
+- `sweep.freeze=<node id>` renders up to that node once and feeds its image to every
+  cell, so a random or LLM prompt stage stays fixed; a `reference` with
+  `always_rerun` nodes and no freeze gets `reference_warning`.
+- Each sweep run reports `node_s`, its slowest nodes from websocket timings.
+- `copy_nodes` edit op: clone nodes from another session workflow with the links
+  among them; inputs fed from outside the copy are listed as unwired.
+- organize puts nodes no output depends on in an "Unconnected" band, and
+  `layout="panel"` groups the knobs into one Controls band apart from the pipeline.
+- Headless errors for a pack node (Lora Randomizer/Pool) whose output only feeds
+  optional inputs suggest bypassing it with `set_mode` 4.
+
+### Not changed
+
+- Re-importing a workflow still makes a new `workflow_id`; editing the session copy
+  and saving with `overwrite=True` keeps one id.
+
 ## 0.25.4 - session feedback
 
 ### Fixed

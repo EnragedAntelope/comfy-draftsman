@@ -107,6 +107,10 @@ def test_always_rerun_flags_only_uncached_identical_nodes():
     llm = {"class_type": "LLM", "inputs": {"prompt": "x"}}
     enc = {"class_type": "Enc", "inputs": {"text": ["1", 0]}}
     run = {"1": llm, "2": enc}
-    history = [(run, set()), (copy.deepcopy(run), set())]
+    history = [(run, set(), False), (copy.deepcopy(run), set(), False)]
     assert server._always_rerun(history) == ["#1 LLM"]  # enc's feed re-ran, so not flagged
-    assert server._always_rerun([(run, set()), (run, {"1", "2"})]) == []
+    assert server._always_rerun([(run, set(), False), (run, {"1", "2"}, False)]) == []
+    # after another job shared the queue, a re-run is blamed on cache eviction instead
+    shared = [(run, set(), False), (copy.deepcopy(run), set(), True)]
+    assert server._always_rerun(shared) == []
+    assert server._always_rerun(shared, shared=True) == ["#1 LLM"]

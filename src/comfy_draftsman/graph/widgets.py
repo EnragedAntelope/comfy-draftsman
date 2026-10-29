@@ -37,6 +37,7 @@ PRIMITIVE_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN"}
 
 # ComfyUI seeds are unsigned 64-bit; the frontend randomizes within this range.
 MAX_SEED = 0xFFFFFFFFFFFFFFFF
+FRONTEND_SEED_MAX = 1125899906842624  # 2**50, the frontend's SAFE_INTEGER_MAX for randomize
 
 # V3 dynamic combo: a combo whose selected key ("options"[i].key) reveals that
 # option's conditional sub-widgets (options[i].inputs). Serialized flat in
@@ -830,7 +831,8 @@ def roll_seed_controls(
         high = min(int(opts.get("max") or MAX_SEED), MAX_SEED)
         step = int(opts.get("step") or 1) or 1
         if mode == "randomize":
-            new = roller.randint(low, high)
+            # the frontend's own randomize range: larger seeds round in browser JS
+            new = roller.randint(low, max(low, min(high, FRONTEND_SEED_MAX)))
         elif mode == "increment":
             new = current + step
         else:
