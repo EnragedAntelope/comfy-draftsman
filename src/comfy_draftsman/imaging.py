@@ -188,11 +188,13 @@ def banding_score(img: PILImage.Image) -> tuple[float, str]:
     return round(score, 1), (f"{axis} {period:.0f}px" if axis else "")
 
 
-def crop_guide(img: PILImage.Image, size: int = 384) -> PILImage.Image:
-    """Thumbnail with a labelled 0.1 grid, for aiming fractional sweep crops."""
+def crop_guide(img: PILImage.Image, size: int = 384, boxes: list[list[float]] | None = None) -> PILImage.Image:
+    """Thumbnail with a labelled 0.1 grid, for aiming fractional sweep crops;
+    each of `boxes` is outlined in red and numbered, so a bad crop shows here."""
     from PIL import ImageDraw
 
     guide = img.convert("RGB")
+    full_w, full_h = guide.size
     guide.thumbnail((size, size), PILImage.Resampling.LANCZOS)
     draw = ImageDraw.Draw(guide)
     for i in range(1, 10):
@@ -202,6 +204,12 @@ def crop_guide(img: PILImage.Image, size: int = 384) -> PILImage.Image:
         draw.line([(0, y), (guide.width, y)], fill=color)
         draw.text((x + 2, 2), f".{i}", fill=color)
         draw.text((2, y + 2), f".{i}", fill=color)
+    sx, sy = guide.width / full_w, guide.height / full_h
+    for n, raw in enumerate(boxes or [], 1):
+        x0, y0, x1, y1 = _pixel_box(raw, full_w, full_h)
+        rect = [round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy)]
+        draw.rectangle(rect, outline=(255, 40, 40), width=2)
+        draw.text((rect[0] + 3, rect[1] + 3), str(n), fill=(255, 40, 40))
     return guide
 
 

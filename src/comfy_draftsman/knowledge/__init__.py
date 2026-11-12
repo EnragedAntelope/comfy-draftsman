@@ -88,7 +88,7 @@ _TOP_SHAPES: dict[str, type | tuple[type, ...]] = {
     "multiple_of": int, "notes": dict, "sampling": dict, "techniques": dict,
     "detect": dict, "hardware": dict, "variants": dict, "loader_nodes": dict,
     "components": dict, "avoid_nodes": dict, "sources": list, "resolutions": (list, dict),
-    "native_resolution": dict,
+    "native_resolution": dict, "banding": dict,
 }
 # children of these maps must all have one type (sampling has exceptions below)
 _CHILD_SHAPES: dict[str, type] = {

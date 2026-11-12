@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.25.7 - H3-Image session feedback
+
+### Fixed
+
+- Sweeps marked runs `sampling_cached` (and labelled them "cached" on the contact
+  sheet) when they rendered: a cached KSamplerSelect or SamplerLCM, which only build
+  a sampler object, counted as cached sampling. Only nodes that sample count now.
+- `run_workflow(sweep=..., allow_invalid=True)` still refused variants with
+  validation errors.
+- `layout="panel"` put model loaders, LLM nodes (their seed) and a locked scheduler
+  in Controls, and core primitives (prompt, float, boolean), the resolution selector
+  and RandomNoise in Pipeline.
+- Knob tables listed steps, scheduler and denoise on a family that pins them
+  (H3-Image: 6 steps, simple) and left out primitive values, `aspect_ratio`,
+  `megapixels` and `noise_seed`. Pinned knobs are now named as fixed in the note.
+- The LCM/Lightning note ("burnt output if copied from non-distilled workflows") is
+  skipped when the family itself only runs at CFG 1.
+- `list_models(metadata_for=...)` said "file not found" for a bare filename that
+  lives in a subfolder; it resolves the name (and lists the matches if several).
+- The muted-source error said "missing input"; it now says the input points at a
+  node dropped from the prompt (a dangling link, ComfyUI KeyError).
+- `edit_workflow` reported only the first malformed op; every malformed op is now in
+  one error, and `name`/`from_slot` are accepted for `input`/`from_output`.
+
+### Added
+
+- Family `banding: {grain_period_px, grain_max}` calibration: a sweep reports a
+  stripe on the family's VAE grain period as `banding_grain`, not banding.
+  `minimax_h3_image` sets 16 px.
+- The sweep crop guide comes back on every sweep, with the requested crops drawn on
+  it as numbered red boxes.
+- `empty-group` and `group-overlap` lint; `add_group`/`set_group` batches return
+  them as `group_warnings`.
+- `metadata-prompt-uncaptured` lint: SaveImageWithMetaDataUniversal with no
+  CLIPTextEncode-style encoder and nothing on `extra_metadata` suggests a
+  CreateExtraMetaDataUniversal node with the prompt.
+- `minimax_h3_image` floor: locally tested settings (SamplerLCM 1.1 -> 0.9 first,
+  euler_ancestral s_noise 0.9 second, plain euler blotchy), 20 MP notes and the
+  16 MP ResolutionSelector workaround, and LoRA guidance.
+
+### Not changed
+
+- EA_LMStudio still runs on every changed prompt even when a switch skips it: it is
+  an output node, and bypass or mute leave a hole. The fix belongs in that pack.
+
 ## 0.25.6 - session feedback, Comfy-Org families
 
 ### Fixed

@@ -552,16 +552,40 @@ def _unused_nodes(wf: Workflow, object_info: dict[str, Any], staged: set[int]) -
     }
 
 
-def _panel_stage(wf: Workflow, node: Node, object_info: dict[str, Any], stage: str) -> str:
-    """layout="panel": what a user edits (green knobs, plus samplers/detailers
-    with unwired steps/cfg/seed...) vs the plumbing that connects them."""
+def _is_distilled(guidance: dict[str, Any] | None) -> bool:
+    """The family itself only runs at CFG 1 (its floor caps cfg at 1)."""
+    cfg = ((guidance or {}).get("sampling") or {}).get("cfg")
+    return isinstance(cfg, dict) and isinstance(cfg.get("max"), int | float) and cfg["max"] <= 1
+
+
+# a seed only steers the image on a node that makes noise, latents or images;
+# an LLM/prompt node's seed is set-once machinery, not a per-run control
+_IMAGE_OUTPUTS = {"NOISE", "LATENT", "IMAGE"}
+
+
+def _panel_stage(
+    wf: Workflow, node: Node, object_info: dict[str, Any], stage: str, guidance: dict[str, Any] | None = None
+) -> str:
+    """layout="panel": what a user edits between runs (green knobs, plus
+    samplers/detailers with unwired steps/cfg/seed...) vs the plumbing that
+    connects them. Model/VAE/encoder loaders are set once, so they are plumbing;
+    LoRA loaders stay controls. Knobs the family pins (6 fixed steps) don't count."""
+    if stage == "models" and "lora" not in node.type.lower():
+        return "plumbing"
     if _is_knob(wf, node, object_info, stage):
         return "controls"
     if _is_orphan(node, object_info) or _is_model_patch(node, object_info):
         return "plumbing"
     named = _named_widgets(node, object_info)
     editable = set(knobs._KNOB_EFFECTS) - {"control_after_generate", "batch_size"}
-    return "controls" if any(k in editable and not _wired_input(node, k) for k in named) else "plumbing"
+    outs = {str(t).upper() for t in ((object_info.get(node.type) or {}).get("output") or [])}
+    for k, value in named.items():
+        if k not in editable or _wired_input(node, k) or knobs.locked_value(k, value, guidance):
+            continue
+        if k in ("seed", "noise_seed") and not outs & _IMAGE_OUTPUTS:
+            continue
+        return "controls"
+    return "plumbing"
 
 
 def _is_knob(wf: Workflow, node: Node, object_info: dict[str, Any], stage: str | None) -> bool:
@@ -596,7 +620,7 @@ def _is_knob(wf: Workflow, node: Node, object_info: dict[str, Any], stage: str |
         or editable_prompt_knob
         or canvas_knob
         # a primitive IS a hand-set value, whatever socket it mirrors
-        or node.type == PRIMITIVE_TYPE
+        or knobs.is_primitive_value(node, object_info)
         # model/LoRA pickers - but not MODEL->MODEL tuning patches
         or (stage == "models" and has_values and not _is_model_patch(node, object_info))
         # prompt builders: character/style pickers, wildcard banks
@@ -752,9 +776,15 @@ def _note_text(
     elif stage == "conditioning":
         # pure wiring: an encoder/apply node fed either by a hand-typed prompt
         # box in Inputs or by Prompt Building - nothing here is user-editable
+        # a size picker (ResolutionSelector) can sit here too: then the table has knobs
+        sized = any(
+            k in ("aspect_ratio", "megapixels") and not _wired_input(n, k)
+            for n in members for k in _named_widgets(n, object_info)
+        )
         lines.append(
-            "Wires the prompt into the model - nothing to edit here; change "
-            "the prompt itself upstream (Inputs or Prompt Building)."
+            ("Wires the prompt into the model - only the size knobs below are edited "
+             if sized else "Wires the prompt into the model - nothing to edit ")
+            + "here; change the prompt itself upstream (Inputs or Prompt Building)."
         )
     elif stage == "sampling":
         graph_knobs = _graph_knobs(members, object_info)
@@ -863,7 +893,7 @@ def _note_text(
             res_text = _resolution_text(g.get("resolutions"))
             if res_text:
                 lines.append(res_text)
-        if any(n.type == PRIMITIVE_TYPE for n in members):
+        if any(knobs.is_primitive_value(n, object_info) for n in members):
             lines.append(
                 "The green value boxes here feed settings further along the "
                 "graph - change them here, not at the node they connect to."
@@ -879,11 +909,14 @@ def _note_text(
     # upscale node's feather in Post, ...) - knob_rows/technique_note only
     # ever match nodes that actually carry a glossary-known widget/pattern,
     # so this naturally comes back empty for stages with nothing to say
-    table_rows = knobs.knob_rows(table_members, object_info, guidance)
+    locked: list[str] = []
+    table_rows = knobs.knob_rows(table_members, object_info, guidance, locked)
+    if locked:
+        lines.append(f"Fixed by the model - leave as is: {', '.join(dict.fromkeys(locked))}.")
     technique_lines = [
         f"**{n.title or n.type}**: {note}"
         for n in members
-        if (note := knobs.technique_note(n.type))
+        if (note := knobs.technique_note(n.type, distilled=_is_distilled(guidance)))
     ]
     if not lines and not table_rows and not technique_lines and not source_lines:
         return None
@@ -1000,7 +1033,7 @@ def annotate(
     unused = _unused_nodes(wf, object_info, set(stage_of_key))
     for nid in stage_of_key:
         if layout == "panel":
-            stage_of_key[nid] = _panel_stage(wf, wf.nodes[nid], object_info, knob_stage[nid])
+            stage_of_key[nid] = _panel_stage(wf, wf.nodes[nid], object_info, knob_stage[nid], guidance)
         if nid in unused:
             stage_of_key[nid] = "unused"
     for nid, src in companion_of.items():

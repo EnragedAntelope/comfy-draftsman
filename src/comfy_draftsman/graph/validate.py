@@ -297,9 +297,10 @@ def _connected_source_finding(
             "error",
             "muted-input-source",
             f"{node.type} #{node.id}: input '{input_label}' is fed by muted node "
-            f"#{src.id} ({src.type}) - a muted node never runs, so the graph would "
-            f"fail at execution with a missing input. Unmute #{src.id} (set_mode 0) "
-            "or rewire it to an active source",
+            f"#{src.id} ({src.type}) - a muted node is dropped from the prompt, so "
+            f"this input points at a node that isn't there and ComfyUI fails with a "
+            f"raw KeyError (a dangling link). Unmute #{src.id} (set_mode 0), "
+            "disconnect the input, or rewire it to an active source",
             node.id,
             input=input_label,
         )

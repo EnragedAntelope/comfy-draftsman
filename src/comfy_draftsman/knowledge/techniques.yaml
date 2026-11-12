@@ -28,6 +28,8 @@
     cost - but the tuned defaults are per-model-family; wrong values smear or
     oversaturate detail.
 - match: ["lcm", "lightning", "hyper.?(sd|flux)"]
+  # the warning is about non-distilled settings; a family that only runs at CFG 1 has none
+  skip_for_distilled: true
   note: >-
     A distillation-aware sampling shortcut: needs far fewer steps and a very
     low (often 1.0) CFG - copying settings from a non-distilled workflow
