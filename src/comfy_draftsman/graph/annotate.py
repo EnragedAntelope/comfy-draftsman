@@ -252,7 +252,17 @@ def _restage_by_graph(
         return ((object_info.get(node.type) or {}).get("category") or "").lower()
 
     switches = {n for n in stage_of_key if "utilities/logic" in category(wf.nodes[n])}
-    movable = switches | (undecided or set())
+    # an unwired number picker (aspect ratio / resolution selector) is a knob the
+    # user sets, like a primitive - not machinery of the node it happens to feed
+    pickers = {
+        n for n in undecided or set()
+        if all(s.link is None for s in wf.nodes[n].inputs)
+        and (outs := {str(t).upper() for t in (object_info.get(wf.nodes[n].type) or {}).get("output") or []})
+        and outs <= {"INT", "FLOAT"}
+    }
+    for nid in pickers:
+        stage_of_key[nid] = "inputs"
+    movable = switches | ((undecided or set()) - pickers)
     for nid in sorted(movable, key=lambda n: (-rank.get(n, 0), n)):  # consumers first
         stages = [
             _STAGE_INDEX[stage_of_key[c]] for c in consumers.get(nid, []) if c in stage_of_key
@@ -263,14 +273,16 @@ def _restage_by_graph(
             stage_of_key[nid] = src
 
     # STRING plumbing (a filename builder for a save node, a detailer's prompt)
-    # sits with what it feeds, not in Prompt Building with the main prompt
+    # sits with what it feeds, not in Prompt Building with the main prompt.
+    # A display node only counts when it passes text on (PreviewAny into the encoder).
     for nid in sorted(stage_of_key, key=lambda n: (-rank.get(n, 0), n)):
         if stage_of_key[nid] != "prompt_build":
             continue
         fed = [
             _STAGE_INDEX[stage_of_key[c]]
             for c in consumers.get(nid, [])
-            if c in stage_of_key and not _is_display_companion(wf.nodes[c], object_info)
+            if c in stage_of_key
+            and (consumers.get(c) or not _is_display_companion(wf.nodes[c], object_info))
         ]
         if fed and min(fed) >= _STAGE_INDEX["post"]:
             stage_of_key[nid] = STAGES[min(fed)][0]
