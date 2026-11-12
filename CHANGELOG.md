@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.25.8 - Pipeline staging
+
+### Fixed
+
+- `organize_workflow` (pipeline layout) put an LLM prompt node, its switch and the
+  prompt string nodes in Output when the final prompt also fed a metadata node: a
+  PreviewAny passing the prompt on to the encoder was skipped as a consumer. A
+  display node that passes its text on counts now.
+- An unwired aspect-ratio or resolution selector (INT/FLOAT outputs only) landed in
+  Conditioning beside the node it feeds; it goes in Inputs with the primitives.
+
 ## 0.25.7 - H3-Image session feedback
 
 ### Fixed
