@@ -1,0 +1,47 @@
+family: z_image
+display_name: Z-Image
+# Tongyi-MAI Z-Image: 6B single-stream DiT. Base (undistilled, real CFG and
+# negative prompts) and Turbo (distilled, 8 steps) share every component.
+detect:
+  checkpoint_patterns: ["z_image", "z-image", "zimage"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen_3_4b (bf16 / fp8_mixed / fp4_mixed; CLIPLoader, type=lumina2)"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {default: 30}
+  samplers: [res_multistep]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 8}
+    notes:
+      sampling: >-
+        Turbo is distilled: 8 steps, CFG 1, no negative prompt. Very high
+        quality, but low variety across seeds. z_image_turbo_distill_patch_lora
+        is a LoRA for the base model, not something Turbo needs.
+native_resolution:
+  max_mp: 4.2
+  note: >-
+    512x512 to 2048x2048 total area at any aspect ratio. The templates start
+    at 1024x1024.
+notes:
+  loaders: >-
+    UNETLoader (z_image_bf16 / z_image_turbo_{bf16|int8_convrot|nvfp4}) +
+    CLIPLoader qwen_3_4b type=lumina2 + VAELoader ae.safetensors, then
+    ModelSamplingAuraFlow shift 3 before the sampler.
+  sampling: >-
+    Base: the card recommends 28-50 steps at CFG 3-5 (template: 25 steps, CFG
+    4, res_multistep/simple). Negative prompts work well on Base.
+  prompting: >-
+    Natural-language prompts in English or Chinese; renders bilingual text.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Tongyi-MAI/Z-Image and
+  https://huggingface.co/Tongyi-MAI/Z-Image-Turbo (recommended parameters) and
+  Comfy-Org/workflow_templates image_z_image / image_z_image_turbo. Not
+  rendered locally.

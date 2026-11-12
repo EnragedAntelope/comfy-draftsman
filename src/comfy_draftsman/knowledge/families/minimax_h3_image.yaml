@@ -1,0 +1,47 @@
+family: minimax_h3_image
+display_name: MiniMax H3 Image
+# MiniMax H3 Image: 33B single-stream DiT (H3 without the audio layers) for
+# text-to-image and editing with up to 16 reference images. "minimax_h3_image"
+# is longer than the video family's "minimax_h3", so these files detect here.
+detect:
+  checkpoint_patterns: ["minimax_h3_image", "minimax-h3-image"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_32b_minimax_h3 (int8_convrot or nvfp4_awq; CLIPLoader, type=minimax) - the same encoder as H3 video"]
+  vae: "minimax_h3_image_vae_fp16.safetensors (image VAE, NOT the H3 video/audio VAEs)"
+  prompt_upsampler: "qwen3.5_9b_w4a8_gptq (CLIPLoader type=minimax into TextGenerateV2)"
+sampling:
+  cfg: {min: 1, max: 1, default: 1}
+  steps: {min: 6, max: 6, default: 6}
+  samplers: [euler]
+  schedulers: [simple]
+multiple_of: 32
+native_resolution:
+  max_mp: 20
+  note: >-
+    Works from about 4 MP to 20 MP and is best near 16 MP: 4096x4096 (1:1),
+    4736x3552 (4:3), 5024x3360 (3:2), 5472x3072 (16:9), 6272x2688 (21:9).
+    Generate at the final size directly - no upscaler pass. The Comfy
+    template defaults to 3104x3104.
+notes:
+  loaders: >-
+    UNETLoader (minimax_h3_image_pruned_{bf16|int8_convrot|w4a8}) + CLIPLoader
+    qwen3vl_32b_minimax_h3 type=minimax + VAELoader minimax_h3_image_vae_fp16.
+    MiniMaxH3ImageConditioning builds the conditioning and size; the negative
+    is ConditioningZeroOut. Decode with plain VAEDecode.
+  sampling: >-
+    Distilled to exactly 6 steps with no CFG: KSampler 6 steps, CFG 1,
+    euler/simple. The reference servers reject any other step count or
+    guidance, and negative prompts are not supported.
+  prompting: >-
+    Expects a long, detailed English description of the whole image. The
+    template runs a short prompt through qwen3.5_9b (TextGenerateV2) to expand
+    it and pick the canvas; MiniMax also ships MiniMax-H3-Image-PE for this.
+    Edit references are cited in order as <Picture 1>, <Picture 2>, ...
+  limits: >-
+    License requires MiniMax's written permission above 1M USD annual revenue
+    or for hosted services.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/MiniMaxAI/MiniMax-H3-Image
+  (model card: steps, guidance, sizes) and Comfy-Org/workflow_templates
+  image_minimax_h3_image_t2i / _edit. Not rendered locally.

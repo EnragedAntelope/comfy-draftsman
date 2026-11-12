@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.25.6 - session feedback, Comfy-Org families
+
+### Fixed
+
+- `set_widget` and `replace_in_widget` on a subgraph instance fail and name the
+  `set_widget_in_definition` call that works (definition id, inner node, input).
+  Before, a by-name write raised "unknown node class", replace_in_widget said
+  "holds NoneType" (also inside sweeps), and a raw `index` write that lined up with
+  no proxied widget reported success while flatten ignored it. A raw index write
+  onto a live `proxyWidgets` entry still lands.
+- A missing LoRA no longer gets a "closest installed option": a name-alike can
+  change style or content entirely (a style LoRA was offered an NSFW one). validate
+  suggests bypassing the loader or picking one from `list_models`, and the edit-time
+  error says the same.
+- MiniMax H3 Image files detected as the H3 video family, and FLUX.2 Dev/Klein
+  files as FLUX.1, so both got the wrong encoders, VAEs and settings.
+
+### Added
+
+- Family floors for Comfy-Org repackaged models: `minimax_h3_image`, `flux2` (Dev,
+  Klein, Klein Base), `z_image` (Base, Turbo), `ideogram4`, `mage_flow`,
+  `boogu_image`, `hidream` (I1 Full/Dev/Fast, E1, E1.1), `hidream_o1`, `lens`,
+  `longcat_image`, `ernie_image`, `pixeldit`, `ovis_image`, `newbie_image`,
+  `omnigen2`, `ming_image`, `joyai_image`, `hunyuan_video` (v1, 1.5) and
+  `bernini_r`. Each carries components, loader wiring and Comfy's template
+  defaults (H3 Image and Z-Image also the upstream card's recommendations); none
+  were rendered locally.
+
+### Not changed
+
+- Audio, 3D, depth, segmentation, upscaler and text-encoder repos got no floor:
+  family guidance targets image and video samplers.
+- Hunyuan Image 2.1, Cosmos Predict2 and UltraTex got none: no Comfy template to
+  take defaults from.
+
 ## 0.25.5 - session feedback
 
 ### Fixed

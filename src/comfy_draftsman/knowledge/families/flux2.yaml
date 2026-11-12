@@ -1,0 +1,57 @@
+family: flux2
+display_name: FLUX.2
+# BFL FLUX.2: Dev (32B, Mistral text encoder) and Klein 4B/9B (Qwen3 text
+# encoders), each with reference-image editing. "flux2"/"flux-2" outscore the
+# FLUX.1 floor's generic "flux", which used to claim these files.
+detect:
+  checkpoint_patterns: ["flux2", "flux-2", "flux_2", "flux.2"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["Dev: mistral_3_small_flux2 (bf16/fp8/fp4_mixed); Klein 4B: qwen_3_4b; Klein 9B: qwen_3_8b - all CLIPLoader type=flux2"]
+  vae: "flux2-vae.safetensors (templates sometimes use full_encoder_small_decoder for a faster decode)"
+latent_node: EmptyFlux2LatentImage
+multiple_of: 16
+sampling:
+  cfg: {default: 1}
+  steps: {default: 20}
+  samplers: [euler]
+  # no schedulers list: the sigmas come from the Flux2Scheduler node, not a KSampler combo
+variants:
+  # klein_base before klein: the first matching variant wins
+  klein_base:
+    patterns: ["klein-base", "klein_base"]
+    sampling:
+      cfg: {default: 5}
+      steps: {default: 20}
+    notes:
+      sampling: >-
+        Klein Base (undistilled): CFGGuider at CFG 5, 20 steps, euler,
+        Flux2Scheduler. Takes a negative prompt.
+  klein:
+    patterns: ["klein"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 4}
+    notes:
+      sampling: >-
+        Klein distilled: CFGGuider at CFG 1, 4 steps, euler, Flux2Scheduler.
+notes:
+  loaders: >-
+    UNETLoader (flux2_dev_fp8mixed, flux-2-klein-[base-]{4b|9b}[-fp8]) +
+    CLIPLoader type=flux2 + VAELoader flux2-vae. Sampling goes through
+    SamplerCustomAdvanced with KSamplerSelect + Flux2Scheduler(steps, width,
+    height) - the scheduler needs the output size.
+  sampling: >-
+    Dev: BasicGuider (guidance-distilled, no CFG), 20 steps, euler. The Comfy
+    templates add a Turbo LoRA (Flux_2-Turbo-LoRA_comfyui or
+    Flux2TurboComfyv2, LoraLoaderModelOnly at 1.0) by default.
+  editing: >-
+    Each reference image goes VAEEncode -> ReferenceLatent on the
+    conditioning; chain several ReferenceLatent nodes for multiple references.
+  limits: >-
+    Dev and Klein 9B are non-commercial; Klein 4B is Apache-2.0.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Flux-2-Dev,
+  https://huggingface.co/Comfy-Org/Flux-2-Klein-4B,
+  https://huggingface.co/Comfy-Org/Flux-2-Klein-9B and Comfy-Org/workflow_templates
+  image_flux2* (Comfy defaults, not tuned). Not rendered locally.

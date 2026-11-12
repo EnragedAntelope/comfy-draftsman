@@ -1,0 +1,36 @@
+family: boogu_image
+display_name: Boogu Image
+# Boogu Image 0.1: text-to-image and edit checkpoints, with a distilled Turbo.
+detect:
+  checkpoint_patterns: ["boogu"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_8b_fp8_scaled (CLIPLoader, type=boogu)"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptyLatentImage
+sampling:
+  cfg: {default: 3.5}
+  steps: {default: 25}
+  samplers: [dpmpp_2m]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 4}
+      samplers: [lcm]
+      schedulers: [sgm_uniform]
+notes:
+  loaders: >-
+    UNETLoader (boogu_image[_edit|_turbo]_fp8_scaled / _int8) + CLIPLoader
+    qwen3vl_8b type=boogu + VAELoader ae.safetensors.
+  sampling: >-
+    Edit template: ModelSamplingAuraFlow shift 3.16, SamplerCustom CFG 3.5,
+    dpmpp_2m, BasicScheduler simple 25 steps. Turbo: KSampler 4 steps, CFG 1,
+    lcm/sgm_uniform. 1024x1024 start.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Boogu-Image and
+  Comfy-Org/workflow_templates image_boogu_image_0_1_* (Comfy defaults, not
+  tuned; no base t2i template, so base defaults come from the edit one). Not
+  rendered locally.

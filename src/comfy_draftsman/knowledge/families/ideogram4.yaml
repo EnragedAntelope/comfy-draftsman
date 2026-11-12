@@ -1,0 +1,38 @@
+family: ideogram4
+display_name: Ideogram 4
+# Ideogram 4 open weights: a conditional and an unconditional UNet sampled
+# together through DualModelGuider, with a Qwen3-VL 8B text encoder.
+detect:
+  checkpoint_patterns: ["ideogram4", "ideogram_4", "ideogram-4"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_8b_fp8_scaled (CLIPLoader, type=ideogram4)"]
+  vae: "flux2-vae.safetensors"
+  second_unet: "ideogram4_unconditional_{fp8_scaled|int8_convrot} - the guider's unconditional model"
+latent_node: EmptyFlux2LatentImage
+multiple_of: 16
+sampling:
+  cfg: {default: 7}
+  steps: {default: 20}
+  samplers: [euler]
+notes:
+  loaders: >-
+    TWO UNETLoaders: ideogram4_{fp8_scaled|int8_convrot} (conditional) and
+    ideogram4_unconditional_* (unconditional), both into DualModelGuider
+    (cfg 7). CLIPLoader qwen3vl_8b type=ideogram4; the negative is
+    ConditioningZeroOut. VAELoader flux2-vae.
+  sampling: >-
+    SamplerCustomAdvanced with KSamplerSelect euler and Ideogram4Scheduler
+    (steps, width, height, mu, std; template 20, 0.5, 1.75), plus CFGOverride
+    (3, 0.7, 1). The template's preset combo offers Quality (48 steps),
+    Default and Turbo schedules.
+  resolution: >-
+    The template rounds width and height up to a multiple of 16 with a 256
+    minimum. Starts at 1024x1024.
+  prompting: >-
+    The template expands the prompt with a single-shot prompt-rewrite text
+    block before encoding; long descriptive prompts suit it.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Ideogram-4 and
+  Comfy-Org/workflow_templates image_ideogram4_t2i / _int8 (Comfy defaults,
+  not tuned). Not rendered locally.

@@ -190,6 +190,8 @@ def check_widget_value(
             f"'{input_name}' = {value!r} is not an available option on this "
             f"instance - {listing}{browse}. Only listed values run; "
             '"force": true overrides if you know better'
+            + ("; a LoRA is optional - bypass the loader (set_mode 4) rather than swap in a name-alike"
+               if "lora" in input_name.lower() else "")
             + (
                 "; file lists are cached - validate_workflow refreshes them if the file was just added"
                 if _looks_like_file_combo(choices) else ""
@@ -733,6 +735,20 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                             f"{node.type} #{node.id}: combo '{name}' holds "
                             f"{type(value).__name__} {value!r}, not one of its options"
                             f"{shift_hint}",
+                            node.id,
+                            input=name,
+                        )
+                    )
+                elif _authoritative_combo(node.type, choices, object_info) and "lora" in name.lower():
+                    # a name-alike LoRA can swap style or content entirely (a style
+                    # LoRA once got an NSFW one as its "closest"): never suggest one
+                    findings.append(
+                        _finding(
+                            "error",
+                            "invalid-combo-value",
+                            f"{node.type} #{node.id}: LoRA {value!r} is not installed - a LoRA "
+                            "is optional, so bypass this loader (set_mode 4; model/clip pass "
+                            "through) or pick a replacement yourself from list_models('loras')",
                             node.id,
                             input=name,
                         )

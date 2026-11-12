@@ -1,0 +1,24 @@
+family: ovis_image
+display_name: Ovis-Image
+# Ovis-Image 7B: text-to-image tuned for text rendering, Ovis 2.5 encoder.
+detect:
+  checkpoint_patterns: ["ovis_image", "ovis-image"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["ovis_2.5 (CLIPLoader, type=ovis)"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 5}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    UNETLoader (ovis_image_bf16) + CLIPLoader ovis_2.5 type=ovis + VAELoader
+    ae.safetensors, then ModelSamplingAuraFlow shift 3.
+  sampling: "KSampler 20 steps, CFG 5, euler/simple, 1024x1024."
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Ovis-Image and
+  Comfy-Org/workflow_templates image_ovis_text_to_image (Comfy defaults, not
+  tuned). Not rendered locally.
