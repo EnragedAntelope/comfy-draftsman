@@ -365,6 +365,8 @@ def lint(
     findings.extend(_missing_prompt_previews(wf, object_info))
     findings.extend(_output_behind_lazy_input(wf, object_info))
     findings.extend(_overlap_findings(wf))
+    findings.extend(group_findings(wf))
+    findings.extend(_uncaptured_metadata(wf))
     family, guidance = _family_guidance(wf, object_info, learned_dir)
     findings.extend(_avoid_node_findings(wf, family, guidance))
     findings.extend(_resolution_alignment_findings(wf, object_info, family, guidance))
@@ -495,6 +497,60 @@ def _visible_box(n: Node) -> tuple[float, float, float, float]:
         width = min(n.size[0], 8.0 * len(n.title or n.type) + 40.0)
         return (x, y - 30.0, x + width, y)
     return (x, y, x + n.size[0], y + n.size[1])
+
+
+def _uncaptured_metadata(wf: Workflow) -> list[dict[str, Any]]:
+    """SaveImageWithMetaDataUniversal reads the prompt from encoders it knows
+    (CLIPTextEncode and kin); a model-specific conditioning node (H3-Image's
+    MiniMaxH3ImageConditioning, say) leaves the saved prompt empty unless a
+    CreateExtraMetaDataUniversal supplies it."""
+    if any("cliptextencode" in n.type.lower() for n in wf.nodes.values() if n.mode not in (MODE_MUTE, MODE_BYPASS)):
+        return []
+    return [
+        _finding(
+            "metadata-prompt-uncaptured",
+            f"{n.type} #{n.id}: no CLIPTextEncode-style encoder in the graph, so the saver "
+            "likely cannot read the prompt - wire a CreateExtraMetaDataUniversal node with "
+            "the prompt (and any sampler it can't see) into its extra_metadata input",
+            n.id,
+        )
+        for n in wf.nodes.values()
+        if n.type == "SaveImageWithMetaDataUniversal"
+        and n.mode not in (MODE_MUTE, MODE_BYPASS)
+        and not ((slot := n.input_by_name("extra_metadata")) is not None and slot.link is not None)
+    ]
+
+
+def group_findings(wf: Workflow) -> list[dict[str, Any]]:
+    """Groups that hold no node, and groups that partly overlap another (a group
+    fully inside another is a deliberate nest, not a defect). A node belongs to
+    a group when its centre is inside, as the canvas decides on a group drag."""
+    findings: list[dict[str, Any]] = []
+    boxes = []
+    for g in wf.groups:
+        if len(g.bounding) != 4:
+            continue
+        x, y, gw, gh = (float(v) for v in g.bounding)
+        boxes.append((g, (x, y, x + gw, y + gh)))
+    for g, (x0, y0, x1, y1) in boxes:
+        if not any(
+            x0 <= n.pos[0] + n.size[0] / 2 <= x1 and y0 <= n.pos[1] + n.size[1] / 2 <= y1
+            for n in wf.nodes.values()
+        ):
+            findings.append(_finding("empty-group", f"group #{g.id} {g.title!r} contains no node - check its bounding"))
+
+    def inside(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+        return b[0] <= a[0] and b[1] <= a[1] and a[2] <= b[2] and a[3] <= b[3]
+
+    for i, (ga, a) in enumerate(boxes):
+        for gb, b in boxes[i + 1 :]:
+            if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3] and not (inside(a, b) or inside(b, a)):
+                findings.append(_finding(
+                    "group-overlap",
+                    f"groups #{ga.id} {ga.title!r} and #{gb.id} {gb.title!r} partly overlap - "
+                    "dragging one moves the other's nodes",
+                ))
+    return findings
 
 
 def _overlap_findings(wf: Workflow) -> list[dict[str, Any]]:

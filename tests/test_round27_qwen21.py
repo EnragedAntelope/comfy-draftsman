@@ -576,7 +576,7 @@ async def test_sweep_runs_variants_x_seeds_and_builds_sheets(sweep_env):
         wf_id, front=True, save_dir=str(out),
         sweep={"variants": _variants(), "seeds": [7, 8], "crops": [[10, 20, 110, 120]]},
     )
-    body, _thumb, *rest = result
+    body, _guide, _thumb, *rest = result  # crop guide (with the boxes), contact sheet, crop sheets
     assert [(r["label"], r["seed"], r["status"], r["elapsed_s"]) for r in body["runs"]] == [
         ("base", 7, "success", 1.5), ("base", 8, "success", 1.5),
         ("fast", 7, "success", 1.5), ("fast", 8, "success", 1.5),
@@ -622,7 +622,7 @@ async def test_oversized_crop_sheet_is_a_file_not_an_inline_image(sweep_env):
         wf_id, front=True, save_dir=str(out), sweep={"seeds": list(range(9)), "crops": [box]}
     )
     body, *images = result
-    assert len(images) == 1  # contact sheet only: 3x3 tiles of 512 is past INLINE_MAX
+    assert len(images) == 2  # crop guide + contact sheet: 3x3 tiles of 512 is past INLINE_MAX
     assert "crop_hint" in body and Path(body["crop_sheets"][0]).is_file()
 
 

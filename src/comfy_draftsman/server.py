@@ -39,7 +39,7 @@ from .comfy.progress import ProgressTracker, execution_error
 from .comfy.registry import RegistryClient, RegistryUnavailableError
 from .config import Config, load_config
 from .graph.annotate import annotate
-from .graph.lint import lint, resolution_nodes
+from .graph.lint import group_findings, lint, resolution_nodes
 from .graph.model import NOTE_TYPES, PRIMITIVE_TYPE, VIRTUAL_TYPES, Workflow
 from .graph.port import port_workflow as port_engine
 from .graph.spend import api_nodes
@@ -858,6 +858,14 @@ async def list_models(
     if folder not in folders:
         return {"error": f"unknown folder '{folder}'", "available": folders}
     if metadata_for:
+        if "/" not in metadata_for.replace("\\", "/"):
+            # a bare name: find it in a subfolder (the list holds "sub/name.safetensors")
+            listed = await _client().list_models(folder)
+            hits = [f for f in listed if f.replace("\\", "/").rsplit("/", 1)[-1] == metadata_for]
+            if len(hits) > 1:
+                return {"error": f"{metadata_for!r} is in several subfolders - pass one", "matches": hits[:8]}
+            if hits:
+                metadata_for = hits[0]
         try:
             meta = await _client().get_model_metadata(folder, metadata_for)
         except FileNotFoundError:
@@ -1601,6 +1609,21 @@ def _copy_nodes(wf: Workflow, op: dict[str, Any], refs: dict[str, int], touched:
     )
 
 
+# common misnamings, renamed only when the op takes the real key and not the alias
+_KEY_ALIASES = {"name": "input", "from_slot": "from_output"}
+
+
+def _alias_keys(op: Any) -> Any:
+    if not isinstance(op, dict) or op.get("op") not in _OP_SPECS:
+        return op
+    required, optional = _OP_SPECS[op["op"]]
+    out = dict(op)
+    for alias, real in _KEY_ALIASES.items():
+        if alias in out and real not in out and real in required | optional and alias not in required | optional:
+            out[real] = out.pop(alias)
+    return out
+
+
 def _check_op(index: int, op: dict[str, Any]) -> str:
     """Validate one op against _OP_SPECS; returns the op kind or raises with
     the exact schema of the failing op."""
@@ -1658,6 +1681,16 @@ def _apply_ops(
 ) -> None:
     """Apply edit ops in order, appending to ``applied``/``touched`` as it goes so a
     failing op still reports what landed before it. Raises ValueError/KeyError."""
+    operations = [_alias_keys(op) for op in operations]
+    # every malformed op in one error, not one per round trip
+    problems = []
+    for index, op in enumerate(operations):
+        try:
+            _check_op(index, op)
+        except ValueError as e:
+            problems.append(str(e))
+    if problems:
+        raise ValueError(" | ".join(problems))
     refs: dict[str, int] = {}
     for index, op in enumerate(operations):
         kind = _check_op(index, op)
@@ -2121,12 +2154,18 @@ async def edit_workflow(
         _apply_ops(wf, operations, object_info, applied, touched)
     finally:
         _persist(workflow_id)
+    extra: dict[str, Any] = {}
+    if any(isinstance(op, dict) and op.get("op") in ("add_group", "set_group") for op in operations) and (
+        found := group_findings(wf)
+    ):
+        extra["group_warnings"] = [f["message"] for f in found[:6]]
     if summary:
-        return {"applied": applied, "summary": _summary(workflow_id, wf)}
+        return {"applied": applied, **extra, "summary": _summary(workflow_id, wf)}
     # compact delta: re-sending the whole graph after every edit batch was the
     # single biggest recurring token cost; inspect_workflow has the full view
     return {
         "applied": applied,
+        **extra,
         "nodes": len(wf.nodes),
         "links": len(wf.links),
         "changed": [
@@ -2380,11 +2419,49 @@ async def _freeze_stage(
     return f"#{freeze} {node.type} output held fixed from one run: {ref}{batch}; ops upstream of it have no effect"
 
 
-def _sampling_cached(res: dict[str, Any], api: dict[str, Any]) -> bool:
+def _family_grain(wf: Workflow, object_info: dict[str, Any]) -> dict[str, Any] | None:
+    """The detected family's banding calibration ({family, grain_period_px,
+    grain_max}) from its guidance, or None - unknown means the plain threshold."""
+    with contextlib.suppress(Exception):
+        family = knowledge.detect_family(wf, object_info, learned_dir=_config().learned_dir)
+        if family:
+            band = knowledge.get_guidance(family, learned_dir=_config().learned_dir).get("banding") or {}
+            if isinstance(band.get("grain_period_px"), (int, float)):
+                return {"family": family, **band}
+    return None
+
+
+def _is_family_grain(score: float, stripe: str, grain: dict[str, Any] | None) -> bool:
+    """True when the strongest stripe sits on the family's VAE grain period
+    (+-1 px) and scores under its calibrated ceiling."""
+    if not grain or not stripe:
+        return False
+    try:
+        period = float(stripe.split()[-1].removesuffix("px"))
+    except ValueError:
+        return False
+    ceiling = grain.get("grain_max")
+    return abs(period - grain["grain_period_px"]) <= 1 and (
+        not isinstance(ceiling, (int, float)) or score < ceiling
+    )
+
+
+def _sampling_cached(res: dict[str, Any], api: dict[str, Any], object_info: dict[str, Any] | None = None) -> bool:
     """Pops the client's cached_nodes; True when ComfyUI reused a sampler's
-    cached result, so elapsed_s timed only the nodes after it."""
+    cached result, so elapsed_s timed only the nodes after it. Sampler-object
+    nodes (KSamplerSelect, SamplerLCM: output SAMPLER) are always cached and
+    say nothing about whether sampling ran, so they don't count."""
     cached = res.pop("cached_nodes", None) or []
-    return any("sampler" in str(api.get(nid, {}).get("class_type", "")).lower() for nid in cached)
+    for nid in cached:
+        cls = str(api.get(nid, {}).get("class_type", ""))
+        if "sampler" not in cls.lower():
+            continue
+        outputs = ((object_info or {}).get(cls) or {}).get("output")
+        if outputs is None and cls.lower().startswith("sampler") and "custom" not in cls.lower():
+            continue  # unknown class named Sampler*: ComfyUI's SAMPLER-object naming
+        if outputs is None or "SAMPLER" not in outputs:
+            return True
+    return False
 
 
 def _always_rerun(history: list[tuple[dict[str, Any], set[str], bool]], shared: bool = False) -> list[str]:
@@ -2436,6 +2513,7 @@ async def _run_sweep(
     confirm_spend: bool,
     ctx: Context | None,
     return_preview: bool = True,
+    allow_invalid: bool = False,
 ) -> Any:
     """run_workflow(sweep=...): each variant (edit ops applied to a COPY - the session
     workflow is never touched) x each seed, run one after another, then one labelled
@@ -2445,6 +2523,7 @@ async def _run_sweep(
         return {"status": "invalid", "error": spec}
     variants, seeds, crops, reference, freeze = spec
     object_info = await _object_info(refresh=True)
+    grain = _family_grain(wf, object_info)
     base_ui = wf.to_ui()
     prepared: list[tuple[str, dict[str, Any] | None, str | None]] = []
     for i, variant in enumerate(variants):
@@ -2452,7 +2531,7 @@ async def _run_sweep(
         trial = Workflow.from_ui(json.loads(json.dumps(base_ui)))
         try:
             _apply_ops(trial, variant.get("ops") or [], object_info, [], set())
-            errors = [f for f in validate(trial, object_info) if f["level"] == "error"]
+            errors = [] if allow_invalid else [f for f in validate(trial, object_info) if f["level"] == "error"]
             if errors:
                 raise ValueError(f"{len(errors)} validation error(s), first: {errors[0]['message']}")
             prepared.append((label, trial.to_api(object_info), None))
@@ -2554,7 +2633,7 @@ async def _run_sweep(
                 entry["node_s"] = dict(list(res["node_s"].items())[:3])
             if res["status"] == "success":
                 history.append((run_api, set(res.get("cached_nodes") or []), bool(entry.get("shared_queue"))))
-            if _sampling_cached(res, run_api):
+            if _sampling_cached(res, run_api, object_info):
                 entry["sampling_cached"] = True  # elapsed_s timed only what ran after it
             if files := [_output_ref(o) for o in res.get("outputs") or [] if o.get("filename")]:
                 entry["files"] = files
@@ -2580,7 +2659,10 @@ async def _run_sweep(
                 first_image = first_image or image
                 entry["banding"], stripe = banding_score(image)
                 if entry["banding"] >= BANDING_VISIBLE:
-                    entry["banding_stripe"] = stripe
+                    if _is_family_grain(entry["banding"], stripe, grain):
+                        entry["banding_grain"] = True  # the family's normal texture, not stripes
+                    else:
+                        entry["banding_stripe"] = stripe
             secs = f" - {entry['elapsed_s']}s" if entry.get("elapsed_s") is not None else ""
             if entry.get("sampling_s") is not None:
                 secs = f" - {entry['sampling_s']}s sampling"  # comparable across runs
@@ -2632,13 +2714,21 @@ async def _run_sweep(
             f"banding = strongest evenly spaced 10-64px stripe (color or brightness) over its "
             f"spectral neighbours; clean renders 1-6, >= {BANDING_VISIBLE:g} is visible striping "
             "(banding_stripe says where) - confirm in a crop"
+            + (f"; banding_grain = a {grain['family']} render's normal "
+               f"{grain['grain_period_px']}px VAE grain, not stripes"
+               if grain and any(r.get("banding_grain") for r in runs) else "")
         )
-    if first_image is not None and not crops:
-        guide = crop_guide(first_image)
+    if first_image is not None:
+        guide = crop_guide(first_image, boxes=crops)
         gpath = root / f"crop-guide-{stamp}.png"
         gpath.write_bytes(to_png(guide))
         out["crop_guide"] = str(gpath)
-        out["crop_hint"] = "the 0.1 grid on the first render shows where to aim crops=[[x0,y0,x1,y1]] (0-1 fractions); repeat seeds rerun from cache"
+        out["crop_hint"] = (
+            "the 0.1 grid on the first render shows where to aim crops=[[x0,y0,x1,y1]] (0-1 fractions)"
+            + ("; red numbered boxes are this sweep's crops - check they land on the detail you meant"
+               if crops else "")
+            + "; repeat seeds rerun from cache"
+        )
         if return_preview:
             content.append(Image(data=to_png(guide), format="png"))
     ref_cell: tuple[PILImage.Image | None, str] | None = None
@@ -2769,7 +2859,8 @@ async def run_workflow(
         if not wait:
             return {"status": "invalid", "error": "sweep needs wait=True"}
         return await _run_sweep(
-            wf, workflow_id, sweep, timeout_seconds, save_dir, front, confirm_spend, ctx, return_preview
+            wf, workflow_id, sweep, timeout_seconds, save_dir, front, confirm_spend, ctx, return_preview,
+            allow_invalid,
         )
     # refresh: combo choices embed the installed model files, so a stale cache
     # can wave through (or wrongly block) model-name widgets
@@ -2884,7 +2975,7 @@ async def run_workflow(
         return {"status": "rejected", "error": str(e), "node_errors": e.node_errors}
     _record_submission(result["prompt_id"], workflow_id)
     result.update(warn)
-    if _sampling_cached(result, api) and "elapsed_s" in result:
+    if _sampling_cached(result, api, object_info) and "elapsed_s" in result:
         result["elapsed_note"] = "sampling was reused from ComfyUI's cache - elapsed_s excludes it"
     # ComfyUI ran only part of the graph (some nodes rejected at queue time): keep
     # relocating/previewing whatever DID render, but downgrade to "partial" so the

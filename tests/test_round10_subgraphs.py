@@ -645,8 +645,11 @@ async def test_list_models_metadata_for(monkeypatch, tmp_path, oi):
         async def list_model_folders(self):
             return ["loras"]
 
+        async def list_models(self, folder):
+            return ["capy.safetensors", "photo\\koda.safetensors", "a/dup.safetensors", "b/dup.safetensors"]
+
         async def get_model_metadata(self, folder, filename):
-            assert (folder, filename) == ("loras", "capy.safetensors")
+            assert folder == "loras" and filename in ("capy.safetensors", "photo\\koda.safetensors")
             return {"ss_output_name": "capy", "ss_base_model_version": "sdxl_base_v1-0"}
 
     monkeypatch.setattr(
@@ -655,6 +658,11 @@ async def test_list_models_metadata_for(monkeypatch, tmp_path, oi):
     monkeypatch.setattr(server._State, "client", StubClient())
     result = await server.list_models(folder="loras", metadata_for="capy.safetensors")
     assert result["metadata"]["ss_output_name"] == "capy"
+    # a bare name resolves to its subfolder path; an ambiguous one asks
+    result = await server.list_models(folder="loras", metadata_for="koda.safetensors")
+    assert result["file"] == "photo\\koda.safetensors"
+    result = await server.list_models(folder="loras", metadata_for="dup.safetensors")
+    assert "several subfolders" in result["error"] and len(result["matches"]) == 2
 
     class Missing(StubClient):
         async def get_model_metadata(self, folder, filename):

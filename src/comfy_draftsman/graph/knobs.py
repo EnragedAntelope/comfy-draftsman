@@ -70,7 +70,13 @@ _KNOB_EFFECTS: dict[str, str] = {
     "higher hides seams but softens detail near the edge.",
     "weight": "How strongly this effect/conditioning is applied - higher is "
     "a stronger pull, can overpower everything else.",
+    "aspect_ratio": "The canvas shape - changes the composition the model "
+    "lays out, not just the crop.",
+    "megapixels": "Total output size - higher adds detail and render time; "
+    "far outside the model's trained range looks soft or breaks up.",
 }
+_KNOB_EFFECTS["noise_seed"] = _KNOB_EFFECTS["seed"]
+_PRIMITIVE_EFFECT = "A hand-set value wired into the graph - the node title says what it sets."
 
 # Widgets whose numeric range is legally huge but never meaningfully a "pick
 # within this range" choice (a seed's max is 2**64-1) - omit the range cell
@@ -80,7 +86,36 @@ _UNBOUNDED_RANGE_NAMES = {"seed", "noise_seed"}
 _ROW_VALUE_CAP = 60
 
 # glossary knobs whose value is text; every other glossary knob is a number
-_TEXT_KNOBS = {"sampler_name", "scheduler", "control_after_generate"}
+_TEXT_KNOBS = {"sampler_name", "scheduler", "control_after_generate", "aspect_ratio"}
+
+
+def is_primitive_value(node: Node, object_info: dict[str, Any]) -> bool:
+    """A core Primitive* node (Float, Boolean, String (Multiline)...) or the
+    frontend PrimitiveNode: one hand-set value feeding the graph."""
+    if node.type == "PrimitiveNode":
+        return True
+    return str((object_info.get(node.type) or {}).get("category") or "").startswith("utilities/primitive")
+
+
+def locked_value(name: str, value: Any, guidance: dict[str, Any] | None) -> bool:
+    """True when the family guidance pins this knob to the value it holds (a
+    6-step distilled model: steps 6-6, one scheduler) - a row for it would
+    invite an edit that breaks the model. A full-strength denoise is pinned
+    with the steps: below 1 it cuts steps off the fixed schedule."""
+    sampling = (guidance or {}).get("sampling") or {}
+    spec = sampling.get(name)
+    if isinstance(spec, dict) and spec.get("min") is not None and spec.get("min") == spec.get("max"):
+        return value == spec["min"]
+    steps = sampling.get("steps")
+    fixed_steps = isinstance(steps, dict) and steps.get("min") is not None and steps.get("min") == steps.get("max")
+    if not fixed_steps:
+        # a one-entry sampler/scheduler list is usually just the template default
+        return False
+    plural = {"sampler_name": "samplers", "scheduler": "schedulers"}.get(name)
+    if plural:
+        choices = sampling.get(plural)
+        return isinstance(choices, list) and choices == [value]
+    return name == "denoise" and value == 1
 
 
 @cache
@@ -89,15 +124,19 @@ def _load_techniques() -> list[dict[str, Any]]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or []
 
 
-def technique_note(class_type: str) -> str | None:
+def technique_note(class_type: str, distilled: bool = False) -> str | None:
     """One-line tradeoff for a well-known technique node (EasyCache,
     SageAttention, TorchCompile...), matched by class-name pattern against
-    techniques.yaml - or None if this class isn't a recognized technique."""
+    techniques.yaml - or None if this class isn't a recognized technique.
+    distilled=True (the family itself runs at CFG 1) drops entries marked
+    skip_for_distilled, whose warning is about mixing in non-distilled settings."""
     name = class_type.lower()
     for entry in _load_techniques():
         patterns = entry.get("match") or []
         if any(re.search(p, name) for p in patterns):
             note = entry.get("note")
+            if distilled and entry.get("skip_for_distilled"):
+                return None
             return str(note) if note else None
     return None
 
@@ -149,16 +188,27 @@ def knob_rows(
     members: list[Node],
     object_info: dict[str, Any],
     guidance: dict[str, Any] | None = None,
+    locked: list[str] | None = None,
 ) -> list[str]:
     """Markdown table rows (``| knob | now | range/choices | effect |``) for
-    every glossary-known widget across these nodes. A knob wired from
+    every glossary-known widget across these nodes, plus one row per primitive
+    value node (labelled by its title). A knob wired from
     upstream is listed as ``<- wired`` with no range/effect claimed - it
     isn't hand-editable here, so a range/effect sentence would mislead.
     Family guidance (a per-knob ``note``, e.g. H3's "No CFG...") wins over
-    the generic glossary sentence when both have something to say."""
+    the generic glossary sentence when both have something to say. Knobs the
+    family pins (locked_value) get no row; ``locked`` collects them as
+    "steps 6" so the caller can say they are fixed."""
     sampling_guidance = (guidance or {}).get("sampling") or {}
     per_node: list[tuple[Node, list[tuple[str, str]]]] = []
+    primitive_rows: list[str] = []
     for node in members:
+        if is_primitive_value(node, object_info):
+            # one value; the frontend PrimitiveNode has no schema to name it by
+            if node.widgets_values:
+                text = _clip(node.widgets_values[0]).replace("\n", " ").replace("|", "/")
+                primitive_rows.append(f"| {node.title or node.type} #{node.id} | {text} | | {_PRIMITIVE_EFFECT} |")
+            continue
         try:
             named = w.widgets_to_named(node.type, node.widgets_values, object_info)
         except (ValueError, KeyError):
@@ -172,6 +222,10 @@ def knob_rows(
                 continue
             if name not in _TEXT_KNOBS and (not isinstance(value, int | float) or isinstance(value, bool)):
                 continue  # same name, different knob (a pack's 'height' combo of Random/tall)
+            if locked_value(name, value, guidance):
+                if locked is not None:
+                    locked.append(f"{name} {value}")
+                continue
             range_str = _range_or_choices(node.type, name, object_info)
             effect = (sampling_guidance.get(name) or {}).get("note") or _KNOB_EFFECTS[name]
             cells.append((name, f"{_clip(value)} | {range_str} | {effect}"))
@@ -179,7 +233,7 @@ def knob_rows(
             per_node.append((node, cells))
     # several nodes share knob names (seed, steps): say whose knob each row is
     many = len(per_node) > 1
-    return [
+    return primitive_rows + [
         f"| {name}{f' ({node.title or node.type} #{node.id})' if many else ''} | {rest} |"
         for node, cells in per_node
         for name, rest in cells

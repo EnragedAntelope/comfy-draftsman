@@ -735,9 +735,20 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   `layout="panel"` swaps the pipeline bands for Controls (green knobs, plus nodes
   with an unwired glossary knob: samplers, detailers) | Pipeline | Unconnected; the
   knob judgement still runs on the pipeline stage, so both layouts paint the same
-  nodes. Knob table rows name their node once more than one node contributes, and a
-  glossary name holding a non-number (a pack's `height` combo of Random/tall) is a
-  different knob and is skipped.
+  nodes. Panel puts model/VAE/encoder loaders in Pipeline (set once; LoRA loaders stay
+  Controls), counts a `seed` only on a node that outputs NOISE/LATENT/IMAGE (an LLM's
+  seed is set-once machinery), and ignores knobs the family pins. Knob table rows name
+  their node once more than one node contributes, and a glossary name holding a
+  non-number (a pack's `height` combo of Random/tall) is a different knob and is
+  skipped. Core `Primitive*` nodes (category `utilities/primitive`) and the frontend
+  `PrimitiveNode` get one row each, labelled by title. A knob the family guidance
+  pins to its current value (`knobs.locked_value`: `min == max`; and only when steps
+  are pinned too, a one-entry sampler/scheduler list and denoise 1 - most floors'
+  one-entry lists are just Comfy's template default) gets no row; the note
+  says "Fixed by the model" instead, because H3-Image's 6-step floor listed as
+  editable invited a breaking edit. Technique notes marked `skip_for_distilled` (the
+  LCM "burnt output from non-distilled settings" warning) are dropped when the family
+  caps cfg at 1.
 - **A note may quote a family as a reference, never the graph's own values as
   "tuned".** The sampling note compares the graph's steps/CFG to the family range
   and, when outside, says so and omits the base-model numbers.
@@ -758,6 +769,11 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   Each box gets its own square-ish sheet, since one row per run was unviewably tall.
   A run whose sampler came from ComfyUI's cache (`execution_cached`) is marked
   `sampling_cached`, because its `elapsed_s` timed only the nodes after the sampler.
+  Sampler-object nodes (KSamplerSelect, SamplerLCM: output `SAMPLER`) are always
+  cached and do not count; before 0.25.7 they marked every SamplerCustomAdvanced run
+  as cached. `allow_invalid` skips the per-variant validate gate as it does for a
+  single run. The crop guide comes back on every sweep, with the sweep's own crops
+  drawn on it as numbered red boxes, so a wrong box shows before a second sweep.
   `sampling_s` (`ComfyClient._sampling_s`) is the comparable number: per sampler
   node, seconds per step between the first and last websocket `progress` tick, times
   steps. Model loads happen before step 1, so a queue shared with other families'
@@ -784,7 +800,13 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   of the fixed batch re-added them and an earlier op's `ref` (scoped to one call)
   could not be reused. `copy_nodes` clones nodes from another session workflow
   (deep copy, new ids, links between copied nodes re-added by input name) and names
-  each input that was fed from outside the copy and is now unwired.
+  each input that was fed from outside the copy and is now unwired. Every op's keys
+  are checked before any op runs, and one error lists every malformed op (a batch
+  with three wrong key names took three round trips). `name` and `from_slot` are
+  renamed to `input` and `from_output` (`_alias_keys`) when the op takes the real key
+  and not the alias. An `add_group`/`set_group` batch returns `group_warnings` from
+  `lint.group_findings`: a group whose box holds no node centre, or two groups that
+  partly overlap (full nesting is allowed).
 - **Seed rolls stay inside the frontend's range.** The browser's randomize caps at
   `SAFE_INTEGER_MAX` = 2**50 (`widgets.FRONTEND_SEED_MAX`); a seed above 2**53 rounds
   when the browser loads the file, so `roll_seed_controls` and
@@ -802,7 +824,11 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   visibly banded SFT render the same as a clean one, and only seemed to work because
   it was tested at 2-4 MP, where SFT does not draw them. Thresholds (clean 1-7, banded
   12-16, `BANDING_VISIBLE` 8) come from the local MOSS and FIBO output folders; reference write-up of the
-  artifact: huggingface.co/MATLOWAI/MOSS-Image-SFT-DeBand.
+  artifact: huggingface.co/MATLOWAI/MOSS-Image-SFT-DeBand. A family whose VAE grain
+  peaks at a fixed period sets `banding: {grain_period_px, grain_max}` in its YAML: a
+  flagged score whose stripe is within 1 px of that period and under `grain_max` is
+  reported as `banding_grain`, not `banding_stripe`. H3-Image's 16 px grain scores
+  10-23 with nothing visible at 6x contrast.
 - **The session store writes through.** `server._persist` runs after every mutating
   tool (create/import/edit/organize/port, and seed rolls), best-effort on `OSError`,
   because the MCP server is a per-conversation process and an in-memory-only workflow
