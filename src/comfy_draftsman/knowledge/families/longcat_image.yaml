@@ -1,0 +1,34 @@
+family: longcat_image
+display_name: LongCat Image
+# Meituan LongCat-Image: text-to-image and an edit checkpoint.
+detect:
+  checkpoint_patterns: ["longcat_image", "longcat-image"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen_2.5_vl_7b_fp8_scaled (CLIPLoader, type=longcat_image)"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  edit:
+    patterns: ["edit"]
+    sampling:
+      cfg: {default: 4.5}
+      steps: {default: 50}
+    notes:
+      sampling: >-
+        Edit: 50 steps, CFG 4.5, euler/simple, with
+        FluxKontextMultiReferenceLatentMethod set to index for the references.
+notes:
+  loaders: >-
+    UNETLoader (longcat_image[_edit]_bf16) + CLIPLoader qwen_2.5_vl_7b
+    type=longcat_image + VAELoader ae.safetensors. The t2i template adds
+    CFGNorm on the model.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/LongCat-Image
+  and Comfy-Org/workflow_templates image_longcat_text_to_image /
+  image_longcat_image_edit (Comfy defaults, not tuned). Not rendered locally.

@@ -1,0 +1,31 @@
+family: ming_image
+display_name: Ming-Image
+# inclusionAI Ming-Image 0.1 Design: design-oriented t2i and edit, with a
+# Ling-mini text encoder and its own VAE.
+detect:
+  checkpoint_patterns: ["ming_image", "ming-image"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["ming_image_0.1_ling_mini_2.0_int8_convrot (CLIPLoader, type=qwen_image)"]
+  vae: "ming_image_vae_bf16.safetensors"
+  prompt_upsampler: "qwen3.8_27b_w4a8 (CLIPLoader type=stable_diffusion, in the t2i template)"
+latent_node: EmptyLatentImage
+sampling:
+  cfg: {default: 1}
+  steps: {default: 12}
+  samplers: [euler]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    UNETLoader (ming_image_0.1_design_int8_convrot) + CLIPLoader
+    ming_image_0.1_ling_mini_2.0 type=qwen_image + VAELoader ming_image_vae.
+    ModelSamplingFlux (max_shift 1.15, base_shift 0.5, 1536, 1536) on the
+    model.
+  sampling: >-
+    SamplerCustomAdvanced with BasicGuider (no CFG), BasicScheduler simple 12
+    steps; t2i uses KSamplerSelect euler, edit uses SamplerLCM. The templates
+    render 1024x2048.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Ming-Image and
+  Comfy-Org/workflow_templates image_ming_image_01_design_* (Comfy defaults,
+  not tuned). Not rendered locally.

@@ -1,0 +1,35 @@
+family: lens
+display_name: Lens
+# Microsoft Lens: text-to-image with a gpt-oss-20b text encoder; base and
+# distilled Turbo. Anchored at the filename start: "lens" alone would claim
+# any checkpoint with "lens" in its name.
+detect:
+  checkpoint_patterns: ["lens_*", "*/lens_*"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["gpt_oss_20b_nvfp4 (CLIPLoader, type=lens)"]
+  vae: "flux2-vae.safetensors"
+latent_node: EmptyLatentImage
+sampling:
+  cfg: {default: 5}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 4}
+notes:
+  loaders: >-
+    UNETLoader (lens_bf16 / lens_turbo_bf16) + CLIPLoader gpt_oss_20b
+    type=lens + VAELoader flux2-vae. ModelSamplingFlux (max_shift 1.15,
+    base_shift 0.5, width, height) and CFGNorm sit on the model.
+  sampling: >-
+    SamplerCustom CFG 5, euler, BasicScheduler simple 20 steps; Turbo 4 steps
+    at CFG 1. The templates render at 1440x1440.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Lens and
+  Comfy-Org/workflow_templates image_lens_t2i / image_lens_turbo_t2i (Comfy
+  defaults, not tuned). Not rendered locally.

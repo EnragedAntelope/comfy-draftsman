@@ -277,7 +277,7 @@ def test_fibo_native_and_default_sizes_stay_quiet(tmp_path):
 def test_flux3_klein_and_minimax_h3_floors(tmp_path):
     oi = {"UNETLoader": FIBO_OI["UNETLoader"]}
     for name, family in (("flux3-image-klein-int8-convrot.safetensors", "flux3_klein"),
-                         ("flux-2-klein-9b.safetensors", "flux"),  # FLUX.2 Klein is not FLUX 3
+                         ("flux-2-klein-9b.safetensors", "flux2"),  # FLUX.2 Klein is not FLUX 3
                          ("minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3")):
         wf = Workflow.new()
         wf.add_node("UNETLoader", object_info=oi).widgets_values = [name, "default"]

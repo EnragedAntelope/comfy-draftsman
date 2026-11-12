@@ -1,0 +1,43 @@
+family: hunyuan_video
+display_name: HunyuanVideo
+# Tencent HunyuanVideo (v1) and HunyuanVideo 1.5 (720p base + 1080p
+# super-resolution stage). Different encoders and VAEs per version.
+detect:
+  checkpoint_patterns: ["hunyuan_video", "hunyuanvideo", "hunyuan-video"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["v1: DualCLIPLoader clip_l + llava_llama3_fp8_scaled, type=hunyuan_video"]
+  vae: "v1: hunyuan_video_vae_bf16"
+latent_node: EmptyHunyuanLatentVideo
+sampling:
+  cfg: {default: 1}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  v1_5:
+    patterns: ["1.5", "15_", "1_5"]
+    components:
+      text_encoders: ["DualCLIPLoader qwen_2.5_vl_7b_fp8_scaled + byt5_small_glyphxl_fp16, type=hunyuan_video_15"]
+      vae: "hunyuanvideo15_vae_fp16"
+    latent_node: EmptyHunyuanVideo15Latent
+    sampling:
+      cfg: {default: 6}
+      steps: {default: 20}
+    notes:
+      sampling: >-
+        1.5 base (720p t2v / i2v): CFGGuider 6, ModelSamplingSD3 shift 7,
+        euler, BasicScheduler simple 20 steps, 1280x720x121 frames. The 1080p
+        stage: HunyuanVideo15LatentUpscaleWithModel (latent upsampler) into
+        hunyuanvideo1.5_1080p_sr_distilled at shift 2, CFG 1, 8 steps split at
+        4. i2v adds CLIPVisionLoader sigclip_vision_patch14_384.
+notes:
+  loaders: >-
+    UNETLoader + DualCLIPLoader + VAELoader. v1 template: hunyuan_video_t2v_720p,
+    ModelSamplingSD3 shift 7, SamplerCustomAdvanced euler + BasicScheduler
+    simple 20 steps, EmptyHunyuanLatentVideo 848x480x73.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Hunyuan-Video,
+  https://huggingface.co/Comfy-Org/Hunyuan-Video-1.5 and Comfy-Org/workflow_templates
+  hunyuan_video_text_to_video / video_hunyuan_video_1.5_720p_* (Comfy
+  defaults, not tuned). Not rendered locally.

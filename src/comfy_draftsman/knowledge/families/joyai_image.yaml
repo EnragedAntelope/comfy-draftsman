@@ -1,0 +1,25 @@
+family: joyai_image
+display_name: JoyAI Image Edit
+# JD JoyAI-Image-Edit: multi-image instruction editing, Wan 2.1 VAE.
+detect:
+  checkpoint_patterns: ["joyai_image", "joyai-image", "joyimage"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_8b_joyimage_edit_int8_convrot (CLIPLoader, type=joyimage)"]
+  vae: "wan_2.1_vae.safetensors"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {default: 40}
+  samplers: [euler]
+  schedulers: [normal]
+notes:
+  loaders: >-
+    UNETLoader (joyai_image_edit_int8_convrot) + CLIPLoader
+    qwen3vl_8b_joyimage_edit type=joyimage + VAELoader wan_2.1_vae, with
+    CFGNorm on the model.
+  sampling: "KSampler 40 steps, CFG 4, euler/normal, 1024x1024."
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/JoyAI-Image-Edit
+  and Comfy-Org/workflow_templates image_joyai_image_edit (Comfy defaults, not
+  tuned). Not rendered locally.

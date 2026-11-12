@@ -1,0 +1,34 @@
+family: ernie_image
+display_name: ERNIE-Image
+# Baidu ERNIE-Image: base and Turbo, Ministral 3B text encoder, FLUX.2 VAE.
+detect:
+  checkpoint_patterns: ["ernie-image", "ernie_image"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["ministral-3-3b (CLIPLoader, type=flux2)"]
+  vae: "flux2-vae.safetensors"
+  prompt_upsampler: "ernie-image-prompt-enhancer (CLIPLoader type=flux2, optional)"
+latent_node: EmptyFlux2LatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 8}
+notes:
+  loaders: >-
+    UNETLoader (ernie-image / ernie-image-turbo) + CLIPLoader ministral-3-3b
+    type=flux2 + VAELoader flux2-vae. The optional prompt enhancer is a second
+    CLIPLoader feeding a text-generation node.
+  sampling: >-
+    Base: KSampler 20 steps, CFG 4, euler/simple. Turbo: 8 steps, CFG 1.
+    1024x1024 start.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/ERNIE-Image and
+  Comfy-Org/workflow_templates image_ernie_image / _turbo (Comfy defaults, not
+  tuned). Not rendered locally.

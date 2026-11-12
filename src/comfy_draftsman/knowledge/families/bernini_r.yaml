@@ -1,0 +1,29 @@
+family: bernini_r
+display_name: Bernini-R
+# ByteDance Bernini-R: a Wan 2.2 high/low-noise pair fine-tuned for image and
+# video editing. "bernini" outscores the wan family's "wan2" on these files.
+detect:
+  checkpoint_patterns: ["bernini"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["umt5_xxl_fp8_e4m3fn_scaled (CLIPLoader, type=wan)"]
+  vae: "Wan2_1_VAE_bf16 (the Wan 2.1 VAE)"
+  loras: "lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64 on both experts (1.5 high, 3 low in the template)"
+sampling:
+  cfg: {default: 1}
+  steps: {default: 6}
+  samplers: [res_multistep]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    TWO UNETLoaders: wan2.2_bernini_r_high_noise and _low_noise (fp8_scaled),
+    each through LoraLoaderModelOnly with the lightx2v step-distill LoRA.
+  sampling: >-
+    BasicScheduler simple 6 steps, SplitSigmas at 3: the high-noise expert
+    samples the first part (SamplerCustom, add noise on), the low-noise expert
+    finishes (add noise off). CFG 1, res_multistep - the LoRA does the
+    distillation.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Bernini-R and
+  Comfy-Org/workflow_templates video_bernini_r_image_editing /
+  _video_editing (Comfy defaults, not tuned). Not rendered locally.

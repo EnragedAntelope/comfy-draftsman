@@ -1,0 +1,27 @@
+family: omnigen2
+display_name: OmniGen2
+# OmniGen2: one checkpoint for text-to-image and image editing.
+detect:
+  checkpoint_patterns: ["omnigen2", "omnigen_2", "omnigen-2"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen_2.5_vl_fp16 (CLIPLoader, type=omnigen2)"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 5}
+  steps: {default: 20}
+  samplers: [euler]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    UNETLoader (omnigen2_fp16) + CLIPLoader qwen_2.5_vl type=omnigen2 +
+    VAELoader ae.safetensors.
+  sampling: >-
+    SamplerCustomAdvanced with DualCFGGuider (cfg_conds 5, cfg_cond2_negative
+    2, regular), KSamplerSelect euler, BasicScheduler simple 20 steps, for
+    both t2i and editing. 1024x1024.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/OmniGen-2 and
+  Comfy-Org/workflow_templates image_omnigen2_t2i / _image_edit (Comfy
+  defaults, not tuned). Not rendered locally.

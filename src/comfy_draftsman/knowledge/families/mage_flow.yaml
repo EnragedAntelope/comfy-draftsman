@@ -1,0 +1,34 @@
+family: mage_flow
+display_name: Mage-Flow
+# Microsoft Mage-Flow: text-to-image plus edit checkpoints, each with a
+# distilled Turbo build. Anchored at the filename start so "image_flow..."
+# names don't match.
+detect:
+  checkpoint_patterns: ["mage_flow*", "*/mage_flow*", "mage-flow*", "*/mage-flow*"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["qwen3vl_4b_bf16 (CLIPLoader, type=mage)"]
+  vae: "mage_flow_vae_bf16.safetensors"
+sampling:
+  cfg: {default: 5}
+  steps: {default: 30}
+  samplers: [euler]
+  schedulers: [simple]
+variants:
+  turbo:
+    patterns: ["turbo"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 4}
+notes:
+  loaders: >-
+    UNETLoader (mage_flow[_edit][_turbo]_int8_convrot) + CLIPLoader qwen3vl_4b
+    type=mage + VAELoader mage_flow_vae. TextEncodeMageFlowEdit encodes the
+    prompt (and edit images) with the target width/height.
+  sampling: >-
+    Base: KSampler 30 steps, CFG 5, euler/simple. Turbo (t2i or edit): 4
+    steps, CFG 1. The template sizes in multiples of 16 from 1024x1024.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/Mage-Flow and
+  Comfy-Org/workflow_templates image_mage_flow_* (Comfy defaults, not tuned).
+  Not rendered locally.

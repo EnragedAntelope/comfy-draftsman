@@ -1,0 +1,25 @@
+family: newbie_image
+display_name: NewBie Image
+# NewBie-Image Exp0.1: anime-focused text-to-image with two text encoders.
+detect:
+  checkpoint_patterns: ["newbie-image", "newbie_image", "newbieimage"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["DualCLIPLoader: gemma_3_4b_it_bf16 + jina_clip_v2_bf16, type=newbie"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 5.5}
+  steps: {default: 20}
+  samplers: [res_multistep]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    UNETLoader (NewBie-Image-Exp0.1-bf16) + DualCLIPLoader (gemma_3_4b_it,
+    jina_clip_v2, type=newbie) + VAELoader ae.safetensors, then
+    ModelSamplingAuraFlow shift 6.
+  sampling: "KSampler 20 steps, CFG 5.5, res_multistep/simple; template size 1024x1536."
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/NewBie-Image-Exp0.1
+  and Comfy-Org/workflow_templates image_newbieimage_exp0_1-t2i (Comfy
+  defaults, not tuned). Not rendered locally.

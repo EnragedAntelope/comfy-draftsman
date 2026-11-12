@@ -1,0 +1,70 @@
+family: hidream
+display_name: HiDream I1 / E1
+# HiDream-I1 (Full / Dev / Fast) text-to-image and HiDream-E1 instruction
+# editing. HiDream-O1 is a different model (see hidream_o1, a longer pattern).
+detect:
+  checkpoint_patterns: ["hidream"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["QuadrupleCLIPLoader: clip_l_hidream, clip_g_hidream, t5xxl_fp8_e4m3fn_scaled, llama_3.1_8b_instruct_fp8_scaled"]
+  vae: "ae.safetensors (the FLUX.1 VAE)"
+latent_node: EmptySD3LatentImage
+sampling:
+  cfg: {default: 5}
+  steps: {default: 50}
+  samplers: [uni_pc]
+  schedulers: [simple]
+variants:
+  # e1_1 before e1: the first matching variant wins
+  e1_1:
+    patterns: ["e1_1", "e1.1"]
+    sampling:
+      cfg: {default: 3}
+      steps: {default: 20}
+      samplers: [euler]
+      schedulers: [simple]
+    notes:
+      sampling: >-
+        E1.1 edit: DualCFGGuider (3, 1.5, regular) with CFGNorm 1, euler,
+        BasicScheduler simple 20 steps.
+  e1:
+    patterns: ["e1_full", "_e1_", "e1-"]
+    sampling:
+      cfg: {default: 5}
+      steps: {default: 28}
+      samplers: [euler]
+      schedulers: [normal]
+    notes:
+      sampling: >-
+        E1 edit: DualCFGGuider (5, 2, regular), euler, BasicScheduler normal
+        28 steps.
+  dev:
+    patterns: ["i1_dev"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 28}
+      samplers: [lcm]
+      schedulers: [normal]
+    notes:
+      sampling: "I1 Dev: ModelSamplingSD3 shift 6, 28 steps, CFG 1, lcm/normal."
+  fast:
+    patterns: ["i1_fast"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 16}
+      samplers: [lcm]
+      schedulers: [normal]
+    notes:
+      sampling: "I1 Fast: ModelSamplingSD3 shift 3, 16 steps, CFG 1, lcm/normal."
+notes:
+  loaders: >-
+    UNETLoader (hidream_i1_{full|dev|fast}_fp8, hidream_e1_*) +
+    QuadrupleCLIPLoader (four encoders, the Llama one is the large one) +
+    VAELoader ae.safetensors.
+  sampling: >-
+    I1 Full: ModelSamplingSD3 shift 3, 50 steps, CFG 5, uni_pc/simple. Dev and
+    Fast are distilled (CFG 1).
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/HiDream and
+  Comfy-Org/workflow_templates hidream_i1_* / hidream_e1_* (Comfy defaults,
+  not tuned). Not rendered locally.

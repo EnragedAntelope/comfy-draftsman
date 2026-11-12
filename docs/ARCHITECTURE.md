@@ -902,9 +902,10 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
 
 Open:
 
-- **[OPEN] VRAM floors for the unsourced families.** anima, chroma, fibo2, krea2, ltx,
-  minimax_h3, moss_image, qwen_image, qwen_image21, sd35 and sd15 carry no `hardware` block and correctly report
-  nothing. sd15 in particular was left out on purpose: no citable floor was
+- **[OPEN] VRAM floors for the unsourced families.** Most family YAMLs (every one
+  without a `hardware:` block - grep the floor) correctly report nothing. The
+  0.25.6 Comfy-Org families are template-default floors only: components and
+  Comfy's defaults, which are rarely the tuned optimum. sd15 in particular was left out on purpose: no citable floor was
   found for it, and it runs comfortably on anything ComfyUI itself supports, so
   the verdict would never fire. Add one only from a source that states the
   number - `hardware.source` is a test-enforced requirement, not a convention.

@@ -1,0 +1,25 @@
+family: pixeldit
+display_name: PixelDiT
+# NVIDIA PixelDiT: a pixel-space diffusion transformer - no latent VAE.
+detect:
+  checkpoint_patterns: ["pixeldit"]
+loader: unet_clip_vae
+components:
+  text_encoders: ["gemma_2_2b_it_elm_bf16 (CLIPLoader, type=pixeldit)"]
+  vae: "pixel_space (the VAELoader built-in option, not a file)"
+latent_node: EmptyChromaRadianceLatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {default: 30}
+  samplers: [er_sde]
+  schedulers: [simple]
+notes:
+  loaders: >-
+    UNETLoader (pixeldit_1300m_1024px_bf16) + CLIPLoader gemma_2_2b_it_elm
+    type=pixeldit + VAELoader set to pixel_space. Start from
+    EmptyChromaRadianceLatentImage (the pixel-space empty image), 1024x1024.
+  sampling: "KSampler 30 steps, CFG 4, er_sde/simple."
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/PixelDiT and
+  Comfy-Org/workflow_templates image_pixeldit_t2i (Comfy defaults, not tuned).
+  Not rendered locally.

@@ -1,0 +1,38 @@
+family: hidream_o1
+display_name: HiDream O1 Image
+# HiDream-O1-Image: an all-in-one checkpoint (CheckpointLoaderSimple) with a
+# separate Gemma 4 text encoder; full and Dev (distilled) builds.
+detect:
+  checkpoint_patterns: ["hidream_o1", "hidream-o1"]
+loader: checkpoint
+components:
+  text_encoders: ["gemma4_e4b_it_fp8_scaled (CLIPLoader, type=stable_diffusion)"]
+latent_node: EmptyHiDreamO1LatentImage
+sampling:
+  cfg: {default: 5}
+  steps: {default: 40}
+  samplers: [dpmpp_2m_sde_gpu]
+  schedulers: [normal]
+variants:
+  dev:
+    patterns: ["_dev"]
+    sampling:
+      cfg: {default: 1}
+      steps: {default: 28}
+    notes:
+      sampling: >-
+        Dev (distilled): SamplerCustom CFG 1 with SamplerLCM, BasicScheduler
+        normal 28 steps.
+native_resolution:
+  max_mp: 4.2
+  note: "The templates render at 2048x2048 (EmptyHiDreamO1LatentImage)."
+notes:
+  loaders: >-
+    CheckpointLoaderSimple (hidream_o1_image[_dev]_{bf16|fp8_scaled|mxfp8},
+    checkpoints/) + CLIPLoader gemma4_e4b_it type=stable_diffusion.
+  sampling: >-
+    Full: SamplerCustom CFG 5, dpmpp_2m_sde_gpu, BasicScheduler normal 40 steps.
+research: >-
+  Floor written 2026-11-11 from https://huggingface.co/Comfy-Org/HiDream-O1-Image
+  and Comfy-Org/workflow_templates image_hidream_o1 / _dev (Comfy defaults,
+  not tuned). Not rendered locally.

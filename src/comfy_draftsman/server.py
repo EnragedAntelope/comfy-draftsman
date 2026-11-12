@@ -1395,6 +1395,45 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
 }
 
 
+def _inner_owner(sg: dict[str, Any], node: Any, name: str) -> int | None:
+    """Inner node id holding widget ``name`` of a subgraph instance: its
+    proxyWidgets entry, else whatever the same-named boundary input feeds."""
+    for pair in (node.properties or {}).get("proxyWidgets") or []:
+        if isinstance(pair, list | tuple) and len(pair) >= 2 and pair[1] == name and str(pair[0]).isdigit():
+            return int(pair[0])
+    slot = next((k for k, i in enumerate(sg.get("inputs") or []) if i.get("name") == name), None)
+    for ln in sg.get("links") or []:
+        oid, oslot, tid = (
+            (ln.get("origin_id"), ln.get("origin_slot"), ln.get("target_id"))
+            if isinstance(ln, dict) else (ln[1], ln[2], ln[3])
+        )
+        if slot is not None and oid == -10 and oslot == slot and tid is not None:
+            return int(tid)
+    return None
+
+
+def _check_subgraph_write(wf: Workflow, node: Any, op: dict[str, Any]) -> None:
+    """A subgraph instance has no schema of its own: a by-name write can't land
+    on it, and a raw index write only runs when it lines up with a live
+    proxyWidgets entry (flatten ignores the rest). Raise with the op that works."""
+    sg = wf.subgraph_defs().get(node.type)
+    if sg is None:
+        return
+    proxies = (node.properties or {}).get("proxyWidgets") or []
+    pos = op.get("index")
+    if pos is not None and 0 <= int(pos) < len(proxies) and str(proxies[int(pos)][0]).isdigit():
+        return
+    name = op.get("input") or (proxies[int(pos)][1] if pos is not None and 0 <= int(pos) < len(proxies) else None)
+    owner = _inner_owner(sg, node, name) if name else None
+    raise ValueError(
+        f"#{node.id} is a subgraph instance ({sg.get('name')!r}); its widgets live inside "
+        f"the definition, so this write would not reach the run. Use set_widget_in_definition "
+        f"with definition_id={sg.get('id')!r}, "
+        + (f"node_id={owner}, input={name!r}" if owner is not None else
+           "the inner node id from inspect_workflow's 'subgraphs'")
+    )
+
+
 def _replace_as_set_widget(
     wf: Workflow, op: dict[str, Any], object_info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1402,6 +1441,7 @@ def _replace_as_set_widget(
     every set_widget check. ``old`` must match exactly once: a silent
     replace-first on an ambiguous match edits the wrong sentence."""
     node = wf.nodes[int(op["node_id"])]
+    _check_subgraph_write(wf, node, op)
     where = f"#{node.id}.{op['input']}"
     if node.type in NOTE_TYPES:
         named: dict[str, Any] = {"text": (node.widgets_values or [""])[0]}
@@ -1742,6 +1782,7 @@ def _apply_ops(
                     f"operation {index} (set_widget): pass exactly one of 'input' (by "
                     "name) or 'index' (raw widgets_values position)"
                 )
+            _check_subgraph_write(wf, node, op)
             if "index" in op:
                 # raw positional write for widgets the name mapping can't see
                 # (pack JS widgets, reordered packs): no check, no round-trip
