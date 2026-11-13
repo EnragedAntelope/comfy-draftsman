@@ -136,13 +136,15 @@ def shape_errors(data: Any) -> list[tuple[str, str]]:
                 elif key == "techniques" and isinstance(item, dict) and not isinstance(item.get("note", ""), str):
                     errors.append((f"{key}.{name}", f"techniques.{name}.note must be a string"))
         if key == "detect":
-            for extra in sorted(set(value) - {"checkpoint_patterns"}):
+            for extra in sorted(set(value) - {"checkpoint_patterns", "clip_types"}):
                 # per-child path: a loaded file loses only this key, not its patterns
                 errors.append((f"detect.{extra}", f"detect.{extra} is never read - detect takes only "
-                               "checkpoint_patterns, substrings matched against checkpoint AND unet filenames"))
-            patterns = value.get("checkpoint_patterns", [])
-            if not (isinstance(patterns, list) and all(isinstance(p, str) for p in patterns)):
-                errors.append((key, "detect.checkpoint_patterns must be a list of strings"))
+                               "checkpoint_patterns (substrings of checkpoint AND unet filenames) and "
+                               "clip_types (exact CLIP loader `type` values)"))
+            for field in ("checkpoint_patterns", "clip_types"):
+                patterns = value.get(field, [])
+                if not (isinstance(patterns, list) and all(isinstance(p, str) for p in patterns)):
+                    errors.append((key, f"detect.{field} must be a list of strings"))
         if key == "sources" and not all(
             isinstance(s, dict) and isinstance(s.get("match"), list) for s in value
         ):
@@ -435,7 +437,32 @@ def detect_family_detail(
     if family is None:
         other = [r for r in refs if r[2] == "other"]
         family, pattern, widget = _detect_over_refs(other, index)
+    if family is None:
+        # last resort: a CLIP loader `type` a family claims (CLIPLoader
+        # type=moss_image). Opt-in per family: many types (flux2, qwen_image,
+        # wan) are shared across families, so a name match alone would guess
+        clip_type = _clip_loader_type(wf, object_info)
+        for name, data in index.items():
+            if clip_type and clip_type in ((data.get("detect") or {}).get("clip_types") or []):
+                family, pattern, widget = name, clip_type, "type"
+                break
     return {"family": family, "matched_on": pattern, "widget": widget}
+
+
+def _clip_loader_type(wf, object_info: dict[str, Any]) -> str | None:
+    """The `type` widget of the first CLIP loader node, if any."""
+    from ..graph import widgets as w  # local import to avoid cycle
+
+    for node in wf.nodes.values():
+        if "CLIPLoader" not in node.type or node.type not in object_info:
+            continue
+        try:
+            value = w.widgets_to_named(node.type, node.widgets_values, object_info).get("type")
+        except ValueError:
+            continue
+        if isinstance(value, str):
+            return value
+    return None
 
 
 def detect_family(

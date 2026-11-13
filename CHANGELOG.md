@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.25.9 - MOSS session feedback
+
+### Fixed
+
+- Saved TextGenerate nodes (and any dynamic-combo child named `seed`) carried an
+  extra control_after_generate value after `sampling_mode.seed`, so the browser
+  read every later widget one place off (`thinking` got the control value, `mtp`
+  got True). The frontend gives a nested seed no control widget, as its bundled
+  blueprints show; the name heuristic now applies to top-level inputs only. Runs
+  were unaffected (the API path used the same wrong map consistently). A file saved
+  by 0.25.8 or earlier with this shape needs the extra value removed by hand.
+- A file saved before a node gained a REQUIRED widget (MoGeInference
+  `refine_steps`, CurveEditor `curve`) ran in the browser but was rejected by
+  ComfyUI (`required_input_missing`) when draftsman submitted it: the browser fills
+  the missing widget's default and draftsman sent nothing. Draftsman now fills it
+  too. Optional widgets stay omitted.
+- CustomCombo's INDEX output was always 0 in draftsman runs: the browser sends a
+  hidden `index` widget (the choice's position among the options) that draftsman
+  never sent. A Bernini-R blueprint picking option 7 got 0.
+- A bypassed node feeding an OPTIONAL input (a bypassed LoadImage on TextGenerate's
+  `images.image1`) raised a blocking `dead-input-source` error, so run and save
+  needed `allow_invalid`. The input is just left empty and the run succeeds; it is
+  a warning now. Required inputs keep the error.
+- Family detection ignored the CLIP loader: a MOSS graph whose UNet filename matches
+  no pattern now detects from `CLIPLoader type=moss_image` (last resort, after
+  filenames), so organize writes the family's notes. Opt-in per family through the
+  new `detect.clip_types` list, since many CLIP types (flux2, qwen_image, wan) are
+  shared across families; only `moss_image` declares one.
+- `get_node_info` listed model files from a cached object_info: files added or
+  deleted since the first call were missing or still shown. It now re-fetches just
+  the requested classes (`/object_info/<class>`) and patches the cache.
+
+### Tests
+
+- Integration test against the instance's bundled blueprints (`/global_subgraphs`):
+  every control_after_generate slot draftsman maps must hold a control word in the
+  frontend-saved file. It catches saved-layout drift that API runs cannot.
+
+### Added
+
+- `set_widget` (and `set_widget_in_definition`) take `file_path` in place of
+  `value`: the widget gets that local text file's contents (a long system prompt),
+  no export/script/re-import round trip.
+- `text-only-encoder-generate` lint: a TextGenerate node fed by a file whose name
+  marks it encoder-only (`_te_`, `text_encoder`, `encoder_only`, not `full`) is
+  flagged, since it fails only at run time. Filename-based: the server cannot read
+  tensor names.
+
 ## 0.25.8 - Pipeline staging
 
 ### Fixed

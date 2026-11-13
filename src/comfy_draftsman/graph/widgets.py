@@ -97,12 +97,13 @@ def has_control_slot(name: str, spec: Any) -> bool:
     """True if the frontend appends a control_after_generate widget slot after
     this input: the schema opts ask for it, or (legacy name heuristic, matching
     the frontend) it's an INT literally named seed/noise_seed. An explicit
-    ``control_after_generate: false`` opts out."""
+    ``control_after_generate: false`` opts out. The name heuristic never applies
+    to a dotted dynamic-combo child (TextGenerate's ``sampling_mode.seed``): the
+    frontend gives those no control widget (its bundled blueprints save none)."""
     opts = _opts(spec)
     if "control_after_generate" in opts:
         return bool(opts["control_after_generate"])
-    leaf = name.rsplit(".", 1)[-1]
-    return spec[0] == "INT" and leaf in ("seed", "noise_seed")
+    return spec[0] == "INT" and name in ("seed", "noise_seed")
 
 
 def combo_choices(spec: Any) -> list[Any] | None:
@@ -771,8 +772,10 @@ def named_for_api(
     """Named widget inputs for the /prompt API. Like widgets_to_named, but every
     dynamic-combo slot (the main key and its selected option's dotted
     sub-widgets) is guaranteed present - defaulted when an older save dropped
-    it - so a graph containing V3 combos stays runnable. Regular optional
-    widgets are left as-is (dynamic nodes legitimately omit unused ones).
+    it - so a graph containing V3 combos stays runnable. So is every REQUIRED
+    widget a file saved before it existed (MoGeInference.refine_steps): the
+    browser fills its default, and /prompt rejects the run without it. Regular
+    optional widgets are left as-is (dynamic nodes legitimately omit unused ones).
     ``socket_names`` lets custom JS-widget inputs (e.g. LoraManager's autocomplete
     box) survive UI->API conversion instead of being dropped."""
     named = widgets_to_named(class_type, widgets_values, object_info, socket_names)
@@ -782,10 +785,17 @@ def named_for_api(
             named.setdefault(name, list(API_ONLY_WIDGET_VALUES[spec[0]]))
     if isinstance(widgets_values, dict):
         return named
+    if class_type == "CustomCombo" and widgets_values:
+        # frontend-only widgets saved as [choice, index, option1, ...]; the API
+        # gets index as the choice's position among the options (-1 if absent),
+        # which the backend returns as the INDEX output
+        options = widgets_values[2:]
+        named["index"] = options.index(widgets_values[0]) if widgets_values[0] in options else -1
+    required = schema.get("input", {}).get("required") or {}
     for name, spec in _entries(schema, _positional_resolver(widgets_values), socket_names):
         if spec is None or name in named:
             continue
-        if is_dynamic_combo(spec) or "." in name:
+        if is_dynamic_combo(spec) or "." in name or (name in required and is_widget_input(spec)):
             named[name] = _default_for(spec)
     return named
 

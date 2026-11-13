@@ -235,7 +235,7 @@ def check_primitive_value(
 
 
 def _autogrow_findings(
-    node: Node, marker: str, template: dict[str, Any]
+    wf: Workflow, node: Node, marker: str, template: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """Check an autogrow container: at least `min` of its synthesized sockets must
     be wired. Gaps are fine - the backend collects whichever names the prompt
@@ -248,7 +248,8 @@ def _autogrow_findings(
         # either spelling counts: an imported graph carries whatever the frontend
         # wrote, a draftsman-authored one carries the dotted API name
         for slot in (node.input_by_name(n) or node.input_by_name(f"{marker}.{n}"),)
-        if slot is not None and slot.link is not None
+        # a bypassed dead end is omitted from the prompt, so it fills nothing
+        if slot is not None and slot.link is not None and _source_origin(wf, slot) is not None
     ]
     if len(wired) >= template["min"]:
         return []
@@ -268,18 +269,34 @@ def _autogrow_findings(
     ]
 
 
+def _source_origin(wf: Workflow, slot: Any) -> tuple[int, int] | None:
+    """Real producer behind a wired slot; None for a bypassed dead end, which
+    to_api omits exactly as the frontend does at queue time."""
+    link = wf.links.get(slot.link)
+    return None if link is None else wf._trace_origin(link.origin_id, link.origin_slot, 0, slot.type)
+
+
 def _connected_source_finding(
-    wf: Workflow, node: Node, input_label: str, slot: Any
+    wf: Workflow, node: Node, input_label: str, slot: Any, required: bool = True
 ) -> dict[str, Any] | None:
     """A wired slot whose source resolves to nothing, or to a MUTED node, leaves
     `to_api` emitting a dangling `[node_id, slot]` reference - the muted node is
     dropped from the API document entirely, so ComfyUI's own validator raises a
-    raw KeyError instead of a clean rejection. Whether the slot is schema-required
-    or optional only gates "must it be wired" - a wired source's realness matters
-    either way, so both callers (required and optional loops) share this check."""
-    link = wf.links.get(slot.link)
-    origin = wf._trace_origin(link.origin_id, link.origin_slot, 0, slot.type) if link is not None else None
+    raw KeyError instead of a clean rejection. A muted source breaks either way;
+    a dead (bypassed) source only breaks a REQUIRED input - on an optional one
+    the input is simply omitted and the run proceeds, so it is a warning."""
+    origin = _source_origin(wf, slot)
     if origin is None:
+        if not required:
+            return _finding(
+                "warning",
+                "dead-input-source",
+                f"{node.type} #{node.id}: optional input '{input_label}' is fed by a "
+                "bypassed dead end, so it is left empty for this run. Fine if "
+                "intended (a bypassed optional image); otherwise unbypass its source",
+                node.id,
+                input=input_label,
+            )
         return _finding(
             "error",
             "dead-input-source",
@@ -319,7 +336,8 @@ def _autogrow_source_findings(
         slot = node.input_by_name(n) or node.input_by_name(f"{marker}.{n}")
         if slot is None or slot.link is None:
             continue
-        finding = _connected_source_finding(wf, node, f"{marker}.{n}", slot)
+        # each socket is optional; _autogrow_findings errors if dead ones underfill `min`
+        finding = _connected_source_finding(wf, node, f"{marker}.{n}", slot, required=False)
         if finding is not None:
             findings.append(finding)
     return findings
@@ -846,7 +864,7 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 # is "connected" is a category error, and it produced a blocking
                 # error on 56 required markers across a stock instance. What the
                 # backend actually requires is the first `min` synthesized slots.
-                findings.extend(_autogrow_findings(node, name, autogrow))
+                findings.extend(_autogrow_findings(wf, node, name, autogrow))
                 findings.extend(_autogrow_source_findings(wf, node, name, autogrow))
                 continue
             slot = node.input_by_name(name)
@@ -902,13 +920,13 @@ def _validate_nodes(wf: Workflow, object_info: dict[str, Any]) -> list[dict[str,
                 continue
             autogrow = w.autogrow_template(spec)
             if autogrow is not None:
-                findings.extend(_autogrow_findings(node, name, autogrow))
+                findings.extend(_autogrow_findings(wf, node, name, autogrow))
                 findings.extend(_autogrow_source_findings(wf, node, name, autogrow))
                 continue
             slot = node.input_by_name(name)
             if slot is None or slot.link is None:
                 continue  # optional and unwired - nothing to check
-            finding = _connected_source_finding(wf, node, name, slot)
+            finding = _connected_source_finding(wf, node, name, slot, required=False)
             if finding is not None:
                 findings.append(finding)
     findings.extend(_primitive_findings(wf, object_info))

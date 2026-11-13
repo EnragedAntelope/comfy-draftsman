@@ -86,6 +86,17 @@ class ComfyClient:
             self._object_info = await self._get_json("/object_info")
         return self._object_info
 
+    async def get_node_schemas(self, class_types: list[str]) -> dict[str, Any]:
+        """Fresh schemas for just these classes (/object_info/<class>), patched
+        into the cache: combo choices list model files, which change between
+        calls, and a full refresh is multi-MB. Unknown classes are absent."""
+        info = await self.get_object_info()
+        for name in dict.fromkeys(class_types):
+            fresh = await self._get_json(f"/object_info/{quote(name, safe='')}")
+            if name in fresh:
+                info[name] = fresh[name]
+        return info
+
     async def list_model_folders(self) -> list[str]:
         return await self._get_json("/models")
 

@@ -5,6 +5,7 @@ display_name: MOSS-Image
 # ModelSamplingSD3 (hardcoded multiplier 1000) breaks it.
 detect:
   checkpoint_patterns: ["moss_image", "moss-image", "mossimage"]
+  clip_types: ["moss_image"]
 loader: unet_clip_vae
 components:
   text_encoders: ["qwen3.5 9B (CLIPLoader, type=moss_image)"]

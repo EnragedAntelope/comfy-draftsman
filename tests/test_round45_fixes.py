@@ -60,6 +60,9 @@ class FakeClient:
     async def get_object_info(self, refresh: bool = False):
         return self._object_info
 
+    async def get_node_schemas(self, class_types):
+        return self._object_info
+
 
 @pytest.fixture
 def wired(tmp_path, config, monkeypatch, object_info):

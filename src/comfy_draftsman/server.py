@@ -809,7 +809,7 @@ async def get_node_info(
         names.insert(0, class_type)
     if not names:
         return {"error": "pass class_type=... or class_types=[...]"}
-    object_info = await _object_info()
+    object_info = await _client().get_node_schemas([n for n in names if n not in VIRTUAL_TYPES])
     results: dict[str, Any] = {}
 
     def _inputs(cls: str) -> set[str]:
@@ -1374,7 +1374,7 @@ _OP_SPECS: dict[str, tuple[set[str], set[str]]] = {
     "connect": ({"from_node", "from_output", "to_node", "to_input"}, {"force"}),
     "disconnect": ({"node_id", "input"}, set()),
     # exactly one of input/index - checked in _apply_ops
-    "set_widget": ({"node_id", "value"}, {"input", "index", "force"}),
+    "set_widget": ({"node_id", "value"}, {"input", "index", "force", "file_path"}),
     "set_resolution": ({"width", "height"}, set()),
     "replace_in_widget": ({"node_id", "input", "old", "new"}, {"force"}),
     "set_title": ({"node_id", "title"}, set()),
@@ -1624,6 +1624,18 @@ def _alias_keys(op: Any) -> Any:
     return out
 
 
+def _value_from_file(index: int, op: dict[str, Any]) -> dict[str, Any]:
+    """set_widget's ``file_path``: the widget value is that local text file's
+    contents (a long system prompt), so it never passes through the chat."""
+    if "value" in op:
+        raise ValueError(f"operation {index} ({op['op']}): pass 'value' or 'file_path', not both")
+    rest = {k: v for k, v in op.items() if k != "file_path"}
+    try:
+        return {**rest, "value": Path(op["file_path"]).read_text(encoding="utf-8")}
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"operation {index} ({op['op']}): could not read file_path {op['file_path']!r}: {e}") from e
+
+
 def _check_op(index: int, op: dict[str, Any]) -> str:
     """Validate one op against _OP_SPECS; returns the op kind or raises with
     the exact schema of the failing op."""
@@ -1686,6 +1698,8 @@ def _apply_ops(
     problems = []
     for index, op in enumerate(operations):
         try:
+            if "file_path" in op and op.get("op") in ("set_widget", "set_widget_in_definition"):
+                operations[index] = op = _value_from_file(index, op)
             _check_op(index, op)
         except ValueError as e:
             problems.append(str(e))
@@ -2099,16 +2113,16 @@ async def edit_workflow(
 ) -> dict[str, Any]:
     """Apply batched edits. Each op is a dict with 'op' plus:
 
-    - {"op": "add_node", "class_type": str, "title"?: str, "ref"?: str, "widgets"?: {name: value}}  # later ops may use a ref as a node id
+    - {"op": "add_node", "class_type": str, "title"?: str, "ref"?: str, "widgets"?: {name: value}}  # later ops use a ref as node id
     - {"op": "remove_node", "node_id": int}
-    - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}  # replaces a link
+    - {"op": "connect", "from_node": int, "from_output": str|int, "to_node": int, "to_input": str}  # replaces link
     - {"op": "disconnect", "node_id": int, "input": str}
-    - {"op": "set_widget", "node_id": int, "input": str | "index": int, "value": any}
-    - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' must match once
+    - {"op": "set_widget", "node_id": int, "input": str | "index": int, "value": any | "file_path": str}
+    - {"op": "replace_in_widget", "node_id": int, "input": str, "old": str, "new": str}  # 'old' matches once
     - {"op": "set_title", "node_id": int, "title": str}
     - {"op": "set_mode", "node_id": int, "mode": int}  # 0 normal, 2 mute, 4 bypass
     - {"op": "set_resolution", "width": int, "height": int}  # all latents + size patches
-    - {"op": "copy_nodes", "from_workflow": id, "node_ids": [int], "ref"?: str}  # + links among them
+    - {"op": "copy_nodes", "from_workflow": id, "node_ids": [int], "ref"?: str}  # + their links
 
     Subgraph twins add "definition_id": add_node_to_definition,
     remove_node_from_definition, connect/set_widget/set_title/set_mode_in_definition.
