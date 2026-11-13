@@ -6,6 +6,7 @@ wired workflow lints clean.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -367,6 +368,7 @@ def lint(
     findings.extend(_overlap_findings(wf))
     findings.extend(group_findings(wf))
     findings.extend(_uncaptured_metadata(wf))
+    findings.extend(_text_only_encoder_findings(wf))
     family, guidance = _family_guidance(wf, object_info, learned_dir)
     findings.extend(_avoid_node_findings(wf, family, guidance))
     findings.extend(_resolution_alignment_findings(wf, object_info, family, guidance))
@@ -519,6 +521,34 @@ def _uncaptured_metadata(wf: Workflow) -> list[dict[str, Any]]:
         and n.mode not in (MODE_MUTE, MODE_BYPASS)
         and not ((slot := n.input_by_name("extra_metadata")) is not None and slot.link is not None)
     ]
+
+
+# an encoder-only export (the LM head stripped) by its filename: "_te_", "text_encoder",
+# "encoder_only"; "full" marks a complete model saved under a te name
+_TEXT_ONLY_ENCODER = re.compile(r"(?<![a-z])(te|text_?encoder|encoder_?only)(?![a-z])", re.IGNORECASE)
+
+
+def _text_only_encoder_findings(wf: Workflow) -> list[dict[str, Any]]:
+    """TextGenerate needs the model's LM head; an encoder-only file loads and
+    encodes fine but fails only once the generate node runs.
+    shortcut: filename heuristic - the server can't read tensor names; upgrade
+    if ComfyUI ever exposes a safetensors key listing."""
+    findings: list[dict[str, Any]] = []
+    for node in wf.nodes.values():
+        if not node.type.startswith("TextGenerate") or node.mode in (MODE_MUTE, MODE_BYPASS):
+            continue
+        for src in _upstream_nodes(wf, node, "clip"):
+            values = src.widgets_values.values() if isinstance(src.widgets_values, dict) else src.widgets_values or []
+            for value in values:
+                if isinstance(value, str) and _TEXT_ONLY_ENCODER.search(value) and "full" not in value.lower():
+                    findings.append(_finding(
+                        "text-only-encoder-generate",
+                        f"{node.type} #{node.id} is fed by {value!r} (via {src.type} #{src.id}), which "
+                        "looks like an encoder-only file - generation needs the full model with its LM "
+                        "head and fails at run time otherwise. Load the full model file for this node",
+                        node.id,
+                    ))
+    return findings
 
 
 def group_findings(wf: Workflow) -> list[dict[str, Any]]:

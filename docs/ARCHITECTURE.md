@@ -391,6 +391,26 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   neither the required nor optional by-name lookup ever reaches the actual
   synthesized sockets — `_autogrow_source_findings` walks them directly and is
   called from both the required and optional autogrow branches.
+- **The API conversion fills what the browser fills (`widgets.named_for_api`).**
+  A file saved before a node gained a widget is short. The browser fills the
+  missing widgets from the schema at load, so a REQUIRED one missing from the
+  draftsman `/prompt` document is a `required_input_missing` rejection of a file
+  that runs fine in the browser (MoGeInference `refine_steps`, CurveEditor
+  `curve`). Required widgets therefore get their schema default; optional ones
+  stay omitted, because dynamic nodes legitimately leave unused ones out.
+  CustomCombo is frontend-defined: saved as `[choice, index, option1, ...]`,
+  and the browser sends `index` as the choice's position among the options
+  (-1 if absent), which the backend returns as INDEX. The bundled blueprints
+  (`/global_subgraphs`) are the reference for what the browser saves; the live
+  integration test checks control slots against them. A raw length comparison
+  is too noisy to assert: blueprints predate newer widgets.
+- **A dead (bypassed) source is an error only on a REQUIRED input.** On an
+  optional input or an autogrow socket `to_api` omits the input, exactly as the
+  frontend does, and the run succeeds (a bypassed LoadImage on TextGenerate's
+  `images.image1`), so `dead-input-source` is a warning there. A muted source
+  stays an error everywhere (dangling reference). Dead autogrow sockets do not
+  count toward the container's `min`, so `autogrow-underfilled` still catches a
+  container left short.
 - **`socket_names` is required on every path that REBUILDS an existing node's
   `widgets_values`.** A pack's custom JS-widget input is only recognizable
   per-instance (`widgets._is_custom_widget`), so a slot walk without the node's

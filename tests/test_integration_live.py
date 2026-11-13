@@ -4,13 +4,15 @@ Run with: pytest -m integration
 These prove the full loop: discover -> build -> validate -> render -> outputs.
 """
 
+import json
 import os
 
 import pytest
 
 from comfy_draftsman.comfy.client import ComfyClient
 from comfy_draftsman.config import Config
-from comfy_draftsman.graph.model import Workflow
+from comfy_draftsman.graph import widgets as w
+from comfy_draftsman.graph.model import CONTROL_MODES, Workflow
 from comfy_draftsman.graph.validate import validate
 from comfy_draftsman.session import Session
 
@@ -264,3 +266,39 @@ async def test_subgraph_workflow_runs_flattened(live_client):
     result = await live_client.run_and_wait(api, timeout=300)
     assert result["status"] == "success", result
     assert result["outputs"][0]["filename"].startswith("draftsman_r10_subgraph")
+
+
+def _blueprint_nodes(doc):
+    """Every node of a blueprint: top level and each subgraph definition."""
+    yield from doc.get("nodes") or []
+    for sg in (doc.get("definitions") or {}).get("subgraphs") or []:
+        yield from sg.get("nodes") or []
+
+
+async def test_widget_layout_matches_frontend_blueprints(live_client):
+    """The frontend's bundled blueprints are files the browser saved. Wherever
+    draftsman's slot map puts a control_after_generate slot, the browser must
+    have saved a control word there; otherwise draftsman-saved files shift
+    every later widget in the browser (the 0.25.9 nested-seed bug) while API
+    runs still pass - they share the map. Lengths are not compared: blueprints
+    predate widgets added since (TextGenerate's mtp) and frontend-only widgets."""
+    object_info = await live_client.get_object_info()
+    index = await live_client._get_json("/global_subgraphs")
+    blueprints = [k for k, v in index.items() if v.get("source") == "templates"]
+    if not blueprints:
+        pytest.skip("this instance serves no bundled blueprints")
+    mismatches = []
+    for key in blueprints:
+        entry = await live_client._get_json(f"/global_subgraphs/{key}")
+        data = entry.get("data")
+        doc = json.loads(data) if isinstance(data, str) else data or {}
+        for node in _blueprint_nodes(doc):
+            values, kind = node.get("widgets_values"), node.get("type")
+            if kind not in object_info or not isinstance(values, list):
+                continue
+            sockets = {i.get("name") for i in node.get("inputs") or []}
+            slots = w.widget_slot_names(kind, object_info, values, sockets)
+            for pos, slot in enumerate(slots):
+                if slot.endswith(w.CONTROL_SUFFIX) and pos < len(values) and values[pos] not in CONTROL_MODES:
+                    mismatches.append(f"{index[key]['name']}: {kind} {slot} at {pos} holds {values[pos]!r}")
+    assert not mismatches, "\n".join(sorted(set(mismatches)))
