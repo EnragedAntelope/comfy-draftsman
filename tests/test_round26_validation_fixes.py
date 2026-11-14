@@ -96,6 +96,18 @@ async def test_export_workflow_json_writes_file(monkeypatch, tmp_path):
     assert isinstance(json.loads(out.read_text()), dict)
 
 
+async def test_export_workflow_json_refuses_relative_and_existing(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_wf", lambda wid: Workflow.new())
+    monkeypatch.setattr(server, "_object_info", lambda: {})
+    assert "absolute" in (await server.export_workflow_json("x", path="w.json"))["error"]
+    out = tmp_path / "keep.txt"
+    out.write_text("precious")
+    assert "overwrite=True" in (await server.export_workflow_json("x", path=str(out)))["error"]
+    assert out.read_text() == "precious"
+    assert (await server.export_workflow_json("x", path=str(out), overwrite=True))["saved_to"]
+    assert isinstance(json.loads(out.read_text()), dict)
+
+
 # --- Bug 5: import_workflow can read a local file -------------------------
 
 async def test_import_workflow_reads_local_file(monkeypatch, tmp_path):

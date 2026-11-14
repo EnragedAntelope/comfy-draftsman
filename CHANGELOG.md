@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.25.10 - repo audit fixes
+
+### Fixed
+
+- `export_workflow_json(path=...)` was annotated read-only (and listed in
+  docs/PERMISSIONS.md as safe to auto-approve) yet wrote to any path and replaced
+  an existing file. It is now annotated as a local write, refuses a relative path
+  (the server's working directory is not the agent's), and replaces an existing
+  file only with the new `overwrite=True`. Remove it from any allowlist you copied.
+- One unreadable learned-overlay YAML file (an interrupted `record_learning`
+  write, a bad hand edit) crashed family detection, so lint, organize, run and save
+  failed for every workflow. Unreadable files are now skipped with a stderr line,
+  `record_learning` writes atomically (temp file + rename), and it refuses to
+  overwrite a broken file for that family instead of discarding its contents.
+- `save_workflow(name="x.json")` on a taken name saved as `x.json (draftsman).json`;
+  the `.json` suffix is stripped first. An empty name is refused with an error.
+- Output relocation never overwrites after 9999 numbered collisions (a random
+  suffix is used instead of the original name).
+
+### Changed
+
+- Sweep contact/crop sheets in the default `sessions/sweeps` folder older than 30
+  days are deleted when the next sweep starts. A caller's `save_dir` is never pruned.
+- The progress websocket logs one line per outage instead of one every 2 seconds
+  while ComfyUI is down.
+- Output relocation helpers moved from `server.py` to `outputs.py`;
+  `ComfyClient.save_userdata_workflow` uses the same path check as reads.
+- Removed the unused `Session.list`, `Session.set_title` and `Session._peek_title`.
+
 ## 0.25.9 - MOSS session feedback
 
 ### Fixed

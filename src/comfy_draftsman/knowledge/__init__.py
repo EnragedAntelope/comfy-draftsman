@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import os
 import re
+import sys
+import tempfile
 from datetime import date
 from functools import cache
 from importlib import resources
@@ -72,13 +75,24 @@ def _learned_path(learned_dir: Path | str, family: str) -> Path:
     return Path(learned_dir) / f"{safe}.yaml"
 
 
+def _read_learned_file(path: Path) -> dict[str, Any]:
+    """A learned overlay file's contents; {} (logged) if it is unreadable, so one
+    broken file can't crash detection for every family."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as e:
+        print(f"[draftsman] skipping unreadable learned file {path}: {e}", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _load_learned(learned_dir: Path | str | None, family: str) -> dict[str, Any] | None:
     if learned_dir is None:
         return None
     path = _learned_path(learned_dir, family)
     if not path.is_file():
         return None
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or None
+    return _read_learned_file(path) or None
 
 
 # Top-level guidance keys code reads, and the type each must have. Unknown keys
@@ -158,8 +172,7 @@ def list_families(learned_dir: Path | str | None = None) -> list[str]:
         directory = Path(learned_dir)
         if directory.is_dir():
             for path in directory.glob("*.yaml"):
-                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-                names.add(data.get("family", path.stem))
+                names.add(_read_learned_file(path).get("family", path.stem))
     return sorted(names)
 
 
@@ -260,7 +273,11 @@ def save_learning(
     path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict[str, Any] = {}
     if path.is_file():
-        existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        try:
+            existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as e:
+            # never overwrite a broken file: it may hold lessons worth recovering
+            raise ValueError(f"learned file {path} is not valid YAML ({e}); fix or remove it first") from e
     existing.setdefault("family", family)
     today = date.today().isoformat()
     replaced = replaced_leaves(existing.get("data", {}), updates)
@@ -271,7 +288,15 @@ def save_learning(
     existing["data"] = deep_merge(existing.get("data", {}), updates)
     sources = existing.setdefault("sources", [])
     sources.append({"date": today, "source": source})
-    path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    # write-then-rename: an interrupted write must not leave a truncated file
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(existing, handle, sort_keys=False, allow_unicode=True)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -365,7 +390,7 @@ def _detect_index(learned_dir: Path | str | None) -> dict[str, dict[str, Any]]:
         directory = Path(learned_dir)
         if directory.is_dir():
             for path in directory.glob("*.yaml"):
-                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                raw = _read_learned_file(path)
                 family = raw.get("family", path.stem)
                 data = raw.get("data", {}) or {}
                 if family in index:

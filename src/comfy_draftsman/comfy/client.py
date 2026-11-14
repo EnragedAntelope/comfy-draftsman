@@ -254,10 +254,11 @@ class ComfyClient:
         With overwrite=False (default) ComfyUI answers 409 if the file exists,
         surfaced here as FileExistsError so callers can pick another name.
         """
-        filename = name if name.endswith(".json") else f"{name}.json"
+        path = self._workflow_userdata_path(name)
+        filename = path.removeprefix("workflows/")
         response = await self._send(
             "POST",
-            f"/api/userdata/{quote(f'workflows/{filename}', safe='')}",
+            f"/api/userdata/{quote(path, safe='')}",
             params={"overwrite": "true" if overwrite else "false"},
             json=document,
         )

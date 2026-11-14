@@ -515,7 +515,7 @@ async def test_read_only_annotations_match_what_the_tools_actually_do(offline):
     mutating = {
         "create_workflow", "import_workflow", "edit_workflow", "organize_workflow",
         "port_workflow", "run_workflow", "save_workflow", "save_output",
-        "upload_image", "manage_queue", "record_learning",
+        "upload_image", "manage_queue", "record_learning", "export_workflow_json",
     }
     async with await _session(server) as mcp_session:
         tools = (await mcp_session.list_tools()).tools

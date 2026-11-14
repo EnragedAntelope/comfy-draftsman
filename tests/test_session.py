@@ -33,11 +33,3 @@ def test_unknown_id_raises(tmp_path):
         raise AssertionError("expected KeyError")
     except KeyError as e:
         assert "nope" in str(e)
-
-
-def test_list_workflows(tmp_path):
-    session = Session(tmp_path)
-    a = session.create(Workflow.new(), title="a")
-    b = session.create(Workflow.new(), title="b")
-    listed = session.list()
-    assert {x["id"] for x in listed} == {a, b}

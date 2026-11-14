@@ -45,7 +45,6 @@ still ask:
       "mcp__comfy-draftsman__get_model_guidance",
       "mcp__comfy-draftsman__search_node_packs",
       "mcp__comfy-draftsman__resolve_missing_nodes",
-      "mcp__comfy-draftsman__export_workflow_json",
       "mcp__comfy-draftsman__view_output",
       "mcp__comfy-draftsman__get_run_status"
     ]
@@ -66,11 +65,12 @@ this tool"** the next time Claude Code prompts for one — it writes the same ru
 
 | Tools | What they do | Recommendation |
 |---|---|---|
-| The 18 read-only tools above | Query the instance / inspect the session workflow / fetch an output image. No side effects. | **Allow** — safe to pre-approve. |
+| The read-only tools above | Query the instance / inspect the session workflow / fetch an output image. No side effects. | **Allow** - safe to pre-approve. |
 | `create_workflow`, `import_workflow`, `edit_workflow`, `organize_workflow`, `port_workflow` | Modify the **in-memory** session workflow only (nothing on disk or the instance yet). | Optional — allow if you don't want to confirm every edit batch. |
 | `run_workflow` | **Queues a render** on your ComfyUI (uses the GPU); `wait=False` queues in the background. | Leave prompting, or allow if you're iterating fast. |
 | `upload_image` | **Writes** an image into ComfyUI's input folder. | Leave prompting. |
 | `save_workflow` | **Writes** a file into ComfyUI's workflow browser. | Leave prompting. |
+| `export_workflow_json` | Returns the JSON; with `path` it **writes** a file (absolute paths only, never replaces one without `overwrite=True`). | Leave prompting. |
 | `record_learning` | **Writes** to your learned-knowledge dir. | Leave prompting. |
 | `manage_queue` | **Destructive**: interrupt/clear/delete can discard queued renders (yours *and* anything else queued); `free` drops model caches. | Leave prompting. |
 

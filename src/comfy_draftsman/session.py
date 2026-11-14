@@ -11,7 +11,6 @@ import os
 import secrets
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from .graph.model import Workflow
 
@@ -36,23 +35,6 @@ class Session:
     def title(self, wf_id: str) -> str:
         self.get(wf_id)
         return self._titles.get(wf_id, "untitled")
-
-    def set_title(self, wf_id: str, title: str) -> None:
-        if wf_id not in self._workflows and not self._load(wf_id):
-            raise KeyError(f"no workflow with id '{wf_id}'")
-        self._titles[wf_id] = title
-
-    def list(self) -> list[dict[str, Any]]:
-        entries = [
-            {"id": wf_id, "title": self._titles.get(wf_id, "untitled")}
-            for wf_id in self._workflows
-        ]
-        if self._dir.is_dir():
-            for path in self._dir.glob("*.json"):
-                wf_id = path.stem
-                if wf_id not in self._workflows:
-                    entries.append({"id": wf_id, "title": self._peek_title(path)})
-        return entries
 
     def persist(self, wf_id: str) -> Path:
         wf = self.get(wf_id)
@@ -95,11 +77,3 @@ class Session:
         self._workflows[wf_id] = Workflow.from_ui(document)
         self._titles[wf_id] = document.get("extra", {}).get("draftsman_title", "untitled")
         return True
-
-    def _peek_title(self, path: Path) -> str:
-        try:
-            return json.loads(path.read_text(encoding="utf-8")).get("extra", {}).get(
-                "draftsman_title", "untitled"
-            )
-        except (OSError, json.JSONDecodeError):
-            return "untitled"

@@ -329,12 +329,6 @@ def test_corrupt_session_file_reads_as_a_named_error(tmp_path):
         session.get("deadbeef")
 
 
-def test_list_ignores_a_corrupt_file(tmp_path):
-    session = Session(tmp_path)
-    (tmp_path / "deadbeef.json").write_text("{truncated", encoding="utf-8")
-    assert session.list() == [{"id": "deadbeef", "title": "untitled"}]
-
-
 # --- #11 organize clears a stale "touch me" highlight ------------------------
 
 
