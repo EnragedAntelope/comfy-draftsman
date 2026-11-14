@@ -143,3 +143,17 @@ def test_krea2_sampling_note_lists_alternatives():
     sampling_note = g["notes"]["sampling"]
     assert "er_sde" in sampling_note
     assert g["sampling"]["samplers"] == ["euler"]
+
+
+def test_a_broken_learned_file_is_skipped_not_fatal(tmp_path):
+    (tmp_path / "broken.yaml").write_text("family: broken\ndata: {notes: 'x\n", encoding="utf-8")
+    save_learning(tmp_path, "mine", {"notes": {"sampling": "ok"}}, "test")
+    assert "mine" in list_families(tmp_path)
+    assert detect_family(Workflow.new(), {}, learned_dir=tmp_path) is None
+    with pytest.raises(KeyError):
+        get_guidance("broken", learned_dir=tmp_path)
+    # record_learning must not clobber the broken file's contents
+    with pytest.raises(ValueError, match="not valid YAML"):
+        save_learning(tmp_path, "broken", {"notes": {"sampling": "y"}}, "test")
+    assert "'x" in (tmp_path / "broken.yaml").read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.tmp"))

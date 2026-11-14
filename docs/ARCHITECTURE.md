@@ -12,6 +12,7 @@ src/comfy_draftsman/
 ├── config.py          # env-driven config (COMFYUI_URL, DRAFTSMAN_SESSION_DIR, ...)
 ├── session.py         # workflow_id -> Workflow store, persisted under ~/.comfy-draftsman
 ├── imaging.py         # preview downscaling / JPEG re-encode for inline images
+├── outputs.py         # render relocation to disk: dest resolve, safe join, dedupe, sweep-sheet pruning
 ├── graph/
 │   ├── model.py       # Workflow/Node/Link graph; from_ui/to_ui (schema 0.4) + to_api
 │   ├── widgets.py     # positional widgets_values <-> named values; dynamic combos

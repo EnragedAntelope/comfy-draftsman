@@ -80,11 +80,13 @@ class ProgressTracker:
             self._task = None
 
     async def _listen(self) -> None:
+        logged = False  # one line per outage, not one every reconnect attempt
         while True:
             try:
                 url = self._ws_url_factory(self.client_id)
                 async with websockets.connect(url, max_size=32 * 1024 * 1024) as ws:
                     self.connected = True
+                    logged = False
                     async for frame in ws:
                         if isinstance(frame, bytes):  # preview image frames
                             continue
@@ -92,10 +94,13 @@ class ProgressTracker:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(
-                    f"[draftsman] progress ws disconnected ({type(e).__name__}): {e}",
-                    file=sys.stderr,
-                )
+                if not logged:
+                    print(
+                        f"[draftsman] progress ws disconnected ({type(e).__name__}): {e}; "
+                        f"retrying every {_RECONNECT_DELAY:g}s",
+                        file=sys.stderr,
+                    )
+                    logged = True
                 # reconnect below; /history remains the source of truth
             finally:
                 self.connected = False
