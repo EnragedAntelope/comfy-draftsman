@@ -102,7 +102,18 @@ def search_nodes(
                 },
             )
         )
-    hits.sort(key=lambda pair: (pair[0], pair[1]["class_type"]))
+    words = q.split()
+    if len(words) > 1:
+        # after the exact phrase, nodes matching some of the words: "face crop" must
+        # still reach MediaPipeFaceLandmarker and CropByBBoxes, which name one word each
+        seen = {h["class_type"] for _, h in hits}
+        for hit in search_nodes(object_info, "", category, limit=len(object_info)):
+            schema = object_info[hit["class_type"]]
+            text = f"{hit['class_type']} {hit['display_name']} {schema.get('description') or ''}".lower()
+            if hit["class_type"] not in seen and (matched := sum(word in text for word in words)):
+                hits.append((10 - matched, hit))
+    # core nodes ahead of pack nodes at equal rank
+    hits.sort(key=lambda pair: (pair[0], w.is_custom_node(pair[1]["class_type"], object_info), pair[1]["class_type"]))
     return [h for _, h in hits[:limit]]
 
 

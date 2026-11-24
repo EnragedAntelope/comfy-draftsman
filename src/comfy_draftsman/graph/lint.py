@@ -309,8 +309,10 @@ def lint(
         findings.append(_finding("no-notes", "no guidance notes for human readers"))
 
     linked_ids: set[int] = set()
+    feeds_ids: set[int] = set()
     for link in wf.links.values():
         linked_ids.update((link.origin_id, link.target_id))
+        feeds_ids.add(link.origin_id)
 
     for node in real_nodes:
         if node.mode in (MODE_MUTE, MODE_BYPASS):
@@ -349,6 +351,22 @@ def lint(
         if node.id not in linked_ids and len(real_nodes) > 1:
             findings.append(
                 _finding("orphan-node", f"{node.type} #{node.id} is connected to nothing", node.id)
+            )
+        elif (
+            node.id in linked_ids
+            and node.id not in feeds_ids
+            and schema is not None
+            and schema.get("output")
+            and not schema.get("output_node")
+        ):
+            # ComfyUI never runs a node that reaches no output: an unwired LoRA does nothing
+            findings.append(
+                _finding(
+                    "dead-end-node",
+                    f"{node.type} #{node.id} has inputs wired but its outputs go nowhere, "
+                    "so ComfyUI skips it - wire its output on, or remove it (mute a spare you keep)",
+                    node.id,
+                )
             )
         try:
             slots = set(w.widget_slot_names(node.type, object_info))

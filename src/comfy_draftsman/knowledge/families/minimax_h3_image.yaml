@@ -24,12 +24,13 @@ banding:
   grain_period_px: 16
   grain_max: 25
 native_resolution:
-  max_mp: 20
+  max_mp: 40
   note: >-
-    Works from about 4 MP to 20 MP and is best near 16 MP: 4096x4096 (1:1),
-    4736x3552 (4:3), 5024x3360 (3:2), 5472x3072 (16:9), 6272x2688 (21:9).
-    Generate at the final size directly - no upscaler pass. The Comfy
-    template defaults to 3104x3104.
+    Text-to-image works from about 4 MP to 40 MP; start at 20 MP: 4480x4480
+    (1:1), 5152x3872 (4:3), 5472x3648 (3:2), 5952x3360 (16:9), 6848x2944
+    (21:9). 16 MP can show artifacts that 20 MP does not, and 20-40 MP
+    renders look better. Generate at the final size directly - no upscaler
+    pass. The Comfy template defaults to 3104x3104.
 notes:
   loaders: >-
     UNETLoader (minimax_h3_image_pruned_{bf16|int8_convrot|w4a8}) + CLIPLoader
@@ -45,9 +46,23 @@ notes:
     second; plain euler (the template default) over-sharpens skin into a
     blotchy texture. LCM 1.0/1.0 and 1.2/0.8 were no better.
   resolution: >-
-    20 MP (e.g. 5472x3648) works, about 30% slower and slightly grainier than
-    16 MP. Core ResolutionSelector caps megapixels at 16: for 20 MP run it at
-    1 MP and scale each side with ComfyMathExpression round(a * mp ** 0.5 / 32) * 32.
+    Text-to-image output: prefer 20 MP over 16 MP (user renders: 16 MP shows
+    artifacts 20 MP does not; 20-40 MP look much better). 20 MP is about 30%
+    slower than 16 MP. Core ResolutionSelector caps megapixels at 16: for 20 MP
+    run it at 1 MP and scale each side with ComfyMathExpression
+    round(a * mp ** 0.5 / 32) * 32.
+  edit_resolution: >-
+    Edits are sized separately: MiniMaxH3ImageConditioning's tooltip says it
+    is tuned for a 2048x2048 area, and width/height 0 takes image_1's size
+    after its reference scaling. The text-to-image 20 MP advice does not
+    carry over to edit references.
+  edit_identity: >-
+    Reference-identity edits (new angles of one person) follow angles and
+    scenes strongly but identity drifts: ArcFace likeness 0.57-0.63 vs FIBO
+    2.0 Edit Turbo 0.80 on the same subjects and prompts. A face crop as
+    second reference (0.63), 20/24 MP and the recon VAE (0.59) helped little.
+    Prefer FIBO 2.0 Edit for likeness. Citing <Picture 1> changed nothing vs
+    "the reference image" for one reference.
   loras: >-
     Photo LoRAs trained near 1.3 MP hurt at 16 MP in testing (0.8 over-sharpened
     skin and added stray limbs; 0.4 changed the composition without a clear
@@ -67,4 +82,6 @@ research: >-
   image_minimax_h3_image_t2i / _edit. Sampler, resolution, LoRA and banding
   notes from local A/B renders 2026-11-11 (32 GB card, full int8 DiT, 16 MP,
   6 steps, 1:1 crops); the LCM 1.1 -> 0.9 and euler_ancestral s_noise 0.9
-  starting points came from community H3-Image workflows.
+  starting points came from community H3-Image workflows. 2026-11-24: 20 MP
+  default from user render reports; edit identity from local A/B with ArcFace
+  likeness scoring.

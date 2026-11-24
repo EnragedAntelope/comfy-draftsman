@@ -45,6 +45,28 @@ notes:
     Native ~1 MP; tested to 4 MP. Above ~1 MP people repeat - ScaleROPE with
     scale_x = scale_y = sqrt(1 MP / output MP) fixes it (0.5 at 4 MP). Faces and
     hands held up at 4 MP, including distant groups; no face detailer needed.
+  edit: >-
+    Edit Turbo for reference-identity shots (new angles, poses, expressions of
+    one person): 8 steps, CFG 1, euler/simple, 4 MP with ScaleROPE 0.5. At
+    width/height 0 (~1 MP) faces come out soft and over-sharpened and full
+    profiles stay near 3/4; 4 MP gives real skin texture (ArcFace likeness
+    0.80 vs 0.785). Keep the reference aspect with core nodes: GetImageSize ->
+    ComfyMathExpression round(a * (c*1048576/(a*b))**0.5 / 16) * 16 for width
+    (b for height), c = MP from a PrimitiveFloat, and ScaleROPE scale_x/y from
+    ComfyMathExpression (1/c)**0.5. Samplers euler 6/8, euler_ancestral,
+    er_sde, res_2s, beta and bong_tangent scored within noise; er_sde and
+    res_2s 8 over-texture skin. Dev (24 steps, CFG 5) scored 0.81 but was about
+    4x slower, softer, and turned back views to camera.
+  edit_face_reference: >-
+    A square head crop of the same photo (about 5x eye distance) as a second
+    reference raised likeness 0.81 -> 0.85 on front, 3/4, seated and emotion
+    shots, but pulled full profiles toward 3/4 and turned a back view to
+    camera. Add it per shot; omit it for profile and back views.
+  edit_framing: >-
+    A single reference is scaled and center-cropped to the output size, so the
+    output aspect should follow the reference. Citation tokens like <image_1>
+    changed nothing vs "the reference image" for one reference. 'Low angle'
+    prompts read as eye level at 8 turbo steps.
   speed: >-
     ModelAttentionBackend 'comfy kitchen attention' was ~20% faster at 4 MP with
     no visible change.
@@ -59,4 +81,5 @@ research: >-
   Floor written 2026-10-23 from a learned overlay. Sources:
   https://huggingface.co/briaai/Fibo-2.0-dev ;
   https://huggingface.co/Comfy-Org/Fibo-2.0 ; comfy/supported_models.py Fibo2
-  (shift 1.15) ; local A/B tests 2026-10-23 (RTX 5090).
+  (shift 1.15) ; local A/B tests 2026-10-23 (RTX 5090). Edit notes from local
+  A/B 2026-11-24 (3 subjects x 6 shot prompts, ArcFace w600k_r50 likeness).

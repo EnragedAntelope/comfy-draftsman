@@ -809,7 +809,29 @@ them, so draftsman mirrors that expansion in `graph/subgraph.py`:
   that node's ancestors once with a `PreviewImage` on its first IMAGE output, then
   rewires every cell to a `LoadImage` of the `[temp]` result (`_freeze_stage`), so
   random/LLM nodes above it cannot differ per cell. A `reference` with
-  `always_rerun` nodes and no freeze gets `reference_warning`.
+  `always_rerun` nodes and no freeze gets `reference_warning`. `sweep.axes`
+  (`{name: [{label, ops}]}`) is expanded by `_sweep_spec` into the cartesian
+  product of variants before anything else runs: each cell's ops are every
+  axis's ops in axis order, its label the axis labels joined by ` / `, so a
+  3-subject x 3-shot matrix sends 6 op lists, not 9 copies. The 24-run cap
+  applies to the product.
+- **LoadImage takes paths its combo never lists.** The `image` combo holds only
+  the input folder's root, but LoadImage's `VALIDATE_INPUTS` makes ComfyUI skip
+  the combo check and test `exists_annotated_filepath` instead, which accepts
+  `sub/file.png` (what `upload_image(subfolder=)` hints) and `file.png [output]`.
+  `validate._annotated_upload` accepts both forms on any `*_upload` combo;
+  a `..` or absolute path is still rejected.
+- **ComfyUI ignores unknown input keys.** `/prompt` drops an input its schema
+  lacks without a word, and so does `Workflow.from_api`. `import_workflow` on an
+  API document lists them as `unknown_inputs` (dotted keys count by their root,
+  LM JS inputs are known), the usual sign of a template built for another model.
+- **`dead-end-node` lint.** A node with wired inputs and unlinked outputs that is
+  not an output node never runs (ComfyUI executes only what reaches an output),
+  so an unwired LoRA silently does nothing. validate stays quiet: the graph runs.
+- **Multi-word `search_nodes`.** The full phrase ranks first; nodes matching
+  only some of the words follow (more words first), and core nodes lead pack
+  nodes at equal rank, so "face crop" reaches MediaPipeFaceLandmarker and
+  CropByBBoxes even when a pack node's description holds the phrase.
 - **One websocket clientId per `run_and_wait`.** ComfyUI's `/ws` handler pops the
   socket's sid in its `finally`, so a socket that closes while a new one with the same
   `clientId` connects can remove the new one, and that run never sees its events.
@@ -1034,6 +1056,7 @@ Open:
   (EmptyLatentImage 8; EmptySD3LatentImage / EmptyHunyuanLatentVideo 16) say what the
   editor allows, not what the model needs - so still open.
 - **[OPEN] `refresh_node` / `sync_node_schema` to re-read a node's live schema after install.** Reported as Feature 1: installing a custom node pack mid-session leaves `get_node_info` / `search_nodes` serving the stale pre-install schema until the process restarts. A `refresh_node` tool (or `sync_node_schema` call) that re-fetches `/object_info` for one class — or invalidates the catalog cache — would close it without a restart. Large: needs a cache-invalidation contract in `comfy/catalog.py` and `server._object_info`, plus a scope decision (one class vs. whole doc). Deferred from round 26; validate against a live instance before implementing.
+- **[OPEN] Face-likeness scoring for sweeps.** Reported 2026-11-24: reference-identity sweeps (turnarounds, character sheets) want per-cell similarity to the reference so cells rank without eyeballing. The reporter did it in ~50 lines with insightface buffalo_l ONNX files (SCRFD det_10g + ArcFace w600k_r50) on onnxruntime CPU. Report head yaw (nose offset from the eye midpoint / eye distance) beside it, since similarity alone rewards copying the reference pose. Deferred: it adds onnxruntime as an optional dependency and model-file discovery under models/insightface; design it as an optional extra (`score="face"`) that says nothing when the models are absent. Also deferred from the same report: sweeps above 24 runs and background sweeps.
 - **[OPEN] `diff_workflow` to show what changed between two workflow revisions.** Reported as Nice-to-have 3: callers currently export → hand-diff JSON to see what moved. A `diff_workflow(a, b)` returning added/removed/changed nodes + edges (bounded, like the rest of the surface) would replace that. Deferred from round 26; design the output shape to stay under the tool-surface token ceiling.
 - **[OPEN] Elicitation on the 2026-07-28 protocol.** mcp 2.x carries elicitation in an `InputRequiredResult` round-trip on that protocol, and `ctx.elicit` raises `NoBackChannelError` there, so `_confirm` takes its documented fallback (`*_confirmation_required` + the explicit confirm flag) even for an eliciting client. Pre-2026 handshakes (`initialize`, what clients send today) still get the dialog. The native path is a resolver (`Annotated[ElicitationResult[...], Resolve(fn)]` returning `Elicit(...)`), but each gate decides *whether* to ask deep inside the tool (paid nodes, foreign queue jobs, existing file), so it means lifting those checks into resolvers. Do it when a client negotiates 2026 by default.
 

@@ -1,0 +1,47 @@
+family: sensenova_u16
+display_name: SenseNova U1.6
+# SenseNova U1.6: an 8B mixture-of-transformers checkpoint (understanding and
+# generation in one model), loaded with CheckpointLoaderSimple. It reuses the
+# HiDream-O1 latent and reference-image nodes.
+detect:
+  checkpoint_patterns: ["sensenova_u1", "sensenova-u1"]
+loader: checkpoint
+latent_node: EmptyHiDreamO1LatentImage
+sampling:
+  cfg: {default: 4}
+  steps: {min: 8, max: 50, default: 50}
+  samplers: [euler]
+  schedulers: [simple]
+native_resolution:
+  max_mp: 4.2
+  note: "Trained near 4 MP - use a size from EmptyHiDreamO1LatentImage's list."
+notes:
+  loaders: >-
+    CheckpointLoaderSimple sensenova_u1.6_8b_mot_int8_convrot. Optional 8-step
+    LoRA sensenova_u1.6_8b_mot_8step_lora_bf16 at strength 1: then 8 steps,
+    CFG 1. Optional prompt-enhancer text encoder qwen3.5_9b_qwen_image_2.1_pe_i2i
+    (from the Qwen-Image-2.1 repo).
+  graph: >-
+    Edit: CLIPTextEncode -> HiDreamO1ReferenceImages (attach the source) ->
+    SenseNovaConditioning(task=image) -> KSampler, latent from
+    EmptyHiDreamO1LatentImage at about 4 MP. Base: 50 steps, CFG 4, timestep
+    shift 3 (official CLI). The self-correction pass is trained for
+    text/infographics, not photos.
+  photoreal_identity: >-
+    Weak for photographic identity / turnaround work in local tests: the 8-step
+    LoRA scored mean ArcFace likeness 0.40 (base 50 steps 0.22) vs Qwen-Image
+    2.1 0.74 and FIBO 2.0 0.80 on the same subjects. It follows angles and
+    scenes well but renders an HDR, cartoonish look. Use FIBO 2.0 or
+    Qwen-Image 2.1 for photoreal reference edits.
+sources:
+  - match: ["sensenova_u1.6_8b_mot_int8_convrot"]
+    what: checkpoint (int8)
+    url: https://huggingface.co/Comfy-Org/SenseNova-U1/resolve/main/checkpoints/sensenova_u1.6_8b_mot_int8_convrot.safetensors
+  - match: ["sensenova_u1.6_8b_mot_8step_lora"]
+    what: 8-step LoRA
+    url: https://huggingface.co/Comfy-Org/SenseNova-U1/resolve/main/loras/sensenova_u1.6_8b_mot_8step_lora_bf16.safetensors
+research: >-
+  Floor written 2026-11-24 from a learned overlay. Sources:
+  https://huggingface.co/Comfy-Org/SenseNova-U1 ; Comfy-Org template
+  image_sensenova_u16_image_edit ; local A/B 2026-11-24 (32 GB card,
+  3 subjects x 3 angle shots, ArcFace likeness scoring).

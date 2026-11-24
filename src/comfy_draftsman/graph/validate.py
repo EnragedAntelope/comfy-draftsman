@@ -39,15 +39,18 @@ _ANNOTATED_FILE_RE = re.compile(r"^.+ \[(input|output|temp)\]$")
 
 
 def _annotated_upload(spec: Any, value: Any) -> bool:
-    """``"sub/file.png [output]"`` on an upload combo (LoadImage & kin): ComfyUI's
-    own VALIDATE_INPUTS accepts the annotated form, though it is never in the
-    input folder's listing."""
+    """``"sub/file.png [output]"`` or ``"sub/file.png"`` on an upload combo
+    (LoadImage & kin): ComfyUI's own VALIDATE_INPUTS accepts both, though the
+    combo lists only the input folder's root (upload_image(subfolder=) files)."""
     opts = spec[1] if isinstance(spec, list | tuple) and len(spec) > 1 else None
     return (
         isinstance(value, str)
         and isinstance(opts, dict)
         and any(k.endswith("_upload") and opts[k] for k in opts)
-        and _ANNOTATED_FILE_RE.match(value) is not None
+        and (
+            _ANNOTATED_FILE_RE.match(value) is not None
+            or ("/" in value and ".." not in value and not value.startswith("/"))
+        )
     )
 
 

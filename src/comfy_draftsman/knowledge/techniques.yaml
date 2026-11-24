@@ -27,6 +27,12 @@
     Reweights U-Net skip connections for sharper output at no extra compute
     cost - but the tuned defaults are per-model-family; wrong values smear or
     oversaturate detail.
+- match: ["mediapipefacelandmarker", "cropbybboxes"]
+  note: >-
+    Core face crop: LoadMediaPipeFaceLandmarker -> MediaPipeFaceLandmarker
+    (bboxes) -> CropByBBoxes. The loader lists models from models/detection
+    and is empty until one is there; CropByBBoxes padding is fixed pixels, so
+    it does not scale with face size.
 - match: ["lcm", "lightning", "hyper.?(sd|flux)"]
   # the warning is about non-distilled settings; a family that only runs at CFG 1 has none
   skip_for_distilled: true
