@@ -50,6 +50,7 @@ from .graph.validate import (
     widget_type_problem,
 )
 from .graph.widgets import (
+    LM_JS_INPUTS,
     SYNTHETIC_SUFFIXES,
     _iter_schema_inputs,
     all_slot_names,
@@ -1318,6 +1319,12 @@ async def import_workflow(
     workflow_id = _session().create(wf, title=title or "imported")
     _persist(workflow_id)
     summary = _summary(workflow_id, wf)
+    if "nodes" not in data and (unknown := _unknown_api_inputs(data, await _object_info())):
+        summary["unknown_inputs"] = unknown[:_FINDINGS_CAP]
+        summary["unknown_inputs_note"] = (
+            "ComfyUI silently ignores input keys its schema lacks and the import dropped them - "
+            "usually a template built for another model or node version"
+        )
     if wf.import_notes:
         summary["link_repairs"] = wf.import_notes[:_FINDINGS_CAP]
     # values are read by position, so a node whose schema changed since the save
@@ -1331,6 +1338,25 @@ async def import_workflow(
         if drift:
             summary["widget_drift"] = _cap_findings(drift)
     return summary
+
+
+def _unknown_api_inputs(api: dict[str, Any], object_info: dict[str, Any]) -> list[str]:
+    """'Class #id: key' for each API-format input key the node's schema doesn't
+    declare (dotted dynamic/autogrow keys count by their root name)."""
+    found = []
+    for nid, entry in api.items():
+        class_type = entry.get("class_type") if isinstance(entry, dict) else None
+        if not isinstance(class_type, str) or not (schema := object_info.get(class_type)):
+            continue
+        spec = schema.get("input") or {}
+        known = {k for part in ("required", "optional", "hidden") for k in spec.get(part) or {}}
+        known |= {name for name, _ in LM_JS_INPUTS.get(class_type, [])}
+        found += [
+            f"{class_type} #{nid}: '{key}'"
+            for key in entry.get("inputs") or {}
+            if str(key).split(".")[0] not in known
+        ]
+    return found
 
 
 @mcp.tool(annotations=_READ_LOCAL)
@@ -2344,8 +2370,31 @@ def _sweep_spec(
     sweep: Any,
 ) -> tuple[list[dict[str, Any]], list[Any], list[list[float]], str, int | None] | str:
     """Validated (variants, seeds, crops, reference, freeze), or an error string."""
-    if not isinstance(sweep, dict) or set(sweep) - {"variants", "seeds", "crops", "reference", "freeze"}:
-        return "sweep is {variants: [{label, ops}], seeds: [int], crops: [[x0,y0,x1,y1]], reference?: 'file [input]', freeze?: node_id}"
+    if not isinstance(sweep, dict) or set(sweep) - {"variants", "axes", "seeds", "crops", "reference", "freeze"}:
+        return (
+            "sweep is {variants: [{label, ops}] OR axes: {name: [{label, ops}]}, seeds: [int], "
+            "crops: [[x0,y0,x1,y1]], reference?: 'file [input]', freeze?: node_id}"
+        )
+    if "axes" in sweep:
+        axes = sweep["axes"]
+        if "variants" in sweep:
+            return "pass variants OR axes, not both - axes builds the variants"
+        if not isinstance(axes, dict) or not axes or not all(
+            isinstance(levels, list) and levels and all(isinstance(v, dict) and isinstance(v.get("ops") or [], list) for v in levels)
+            for levels in axes.values()
+        ):
+            return "axes must be {name: [{label, ops:[edit_workflow ops]}, ...]} with at least one level per axis"
+        if math.prod(len(levels) for levels in axes.values()) > _SWEEP_MAX_RUNS:
+            return f"axes make {math.prod(len(v) for v in axes.values())} variants, over {_SWEEP_MAX_RUNS} runs - split it"
+        # cartesian product: each cell runs every axis's ops in axis order, labels joined
+        labelled = [
+            [(str(v.get("label") or f"{name}{i + 1}"), v.get("ops") or []) for i, v in enumerate(levels)]
+            for name, levels in axes.items()
+        ]
+        sweep = {**sweep, "variants": [
+            {"label": " / ".join(label for label, _ in cell), "ops": [op for _, ops in cell for op in ops]}
+            for cell in itertools.product(*labelled)
+        ]}
     freeze = sweep.get("freeze")
     if freeze is not None and (isinstance(freeze, bool) or not isinstance(freeze, int)):
         return "freeze must be the integer id of a node with an IMAGE output"
@@ -2841,14 +2890,15 @@ async def run_workflow(
     relocates later via save_output(prompt_id=...).
 
     front: None (default) refuses to queue when >=2 prompts are pending
-    and returns {status: queue_busy} so the USER can choose; True runs next;
+    ({status: queue_busy}) so the USER can choose; True runs next;
     False waits at the back of the line.
 
-    confirm_spend: partner/API nodes charge per submit, so a
-    graph containing one is gated - pass True only after they agree.
+    confirm_spend: partner/API nodes charge per submit - pass True only after
+    the user agrees.
 
     sweep={variants:[{label,ops}],seeds:[int],crops:[[x0,y0,x1,y1]],reference?:
-    "file [input]",freeze?:node_id}: each variant (ops on a copy) x seed; returns a contact sheet
+    "file [input]",freeze?:node_id}: each variant (ops on a copy) x seed; or
+    axes={name:[{label,ops}]} = every combo. Returns a contact sheet
     (reference = first cell), 1:1 crop sheets, per-run elapsed_s/files. <=24 runs,
     wait=True; crops <=512px or 0-1 floats.
 

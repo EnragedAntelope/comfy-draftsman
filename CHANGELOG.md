@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.25.11 - photo-angles session feedback
+
+### Fixed
+
+- A LoadImage value with a subfolder (`abtest/x.jpg`, what `upload_image(subfolder=)`
+  tells you to use) was rejected by `edit_workflow`, `validate_workflow` and every
+  sweep cell as "not an available option". ComfyUI runs it: LoadImage's own
+  validation skips the combo list. Subfolder paths are now accepted on any upload
+  combo; `..` and absolute paths are still rejected.
+- `search_nodes` with several words also returns nodes that match only some of them,
+  after the exact-phrase hits, and lists core nodes ahead of pack nodes at equal
+  rank. "face crop" now reaches the core MediaPipeFaceLandmarker and CropByBBoxes.
+
+### Added
+
+- `run_workflow(sweep={axes: {name: [{label, ops}]}})` runs every combination of
+  the axes' levels, so a 3-subject x 3-shot sweep no longer repeats each subject's
+  ops three times. The 24-run cap applies to the product.
+- `dead-end-node` lint: a node with wired inputs whose outputs go nowhere (an unwired
+  LoRA) never runs.
+- `import_workflow` on an API document lists input keys the node schema lacks as
+  `unknown_inputs`. ComfyUI ignores them silently.
+- `sensenova_u16` family floor (SenseNova U1.6, promoted from a learned overlay).
+- A technique note for the core face-crop chain (the landmarker loader is empty
+  until a model is in models/detection; CropByBBoxes padding is fixed pixels).
+
+### Changed
+
+- `minimax_h3_image`: text-to-image starts at 20 MP (16 MP showed artifacts that
+  20 MP did not) and the native ceiling rises from 20 to 40 MP. New notes size edits
+  separately (the conditioning node is tuned for a 2048x2048 area) and record that
+  edits drift identity (ArcFace likeness 0.57-0.63 vs FIBO 2.0 0.80).
+- `fibo2`: Edit Turbo notes for reference-identity shots (4 MP + ScaleROPE 0.5 beats
+  ~1 MP, a size that keeps the reference aspect with core nodes, sampler results, the
+  optional face-crop reference, framing).
+
+### Not changed
+
+- The FIBO 2.0 turbo sampling block already exists as the `turbo` variant, matched on
+  the UNet filename; the report read the base block.
+- `organize_workflow`'s Inputs note keeps its generic knob text.
+- Face-likeness scoring, sweeps above 24 runs and background sweeps are written up
+  under docs/ARCHITECTURE.md -> "Remaining TODOs".
+
 ## 0.25.10 - repo audit fixes
 
 ### Fixed
