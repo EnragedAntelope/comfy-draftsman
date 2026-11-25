@@ -19,7 +19,7 @@ import json
 import math
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -117,7 +117,7 @@ class _State:
 
 
 @asynccontextmanager
-async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncGenerator[None]:
     """Close the lazily-created HTTP clients and stop the progress tracker on
     shutdown, so a clean exit doesn't leak 'unclosed client session' warnings or
     leave the websocket reconnect loop running."""
@@ -346,6 +346,14 @@ async def _object_info(refresh: bool = False) -> dict[str, Any]:
 
 def _wf(workflow_id: str) -> Workflow:
     return _session().get(workflow_id)
+
+
+def _relative_path_error(raw: str, what: str) -> str | None:
+    """Error text when a caller's local path is relative: the server's cwd is not
+    the agent's (often a system dir), so it would resolve somewhere invisible."""
+    if Path(raw).expanduser().is_absolute():
+        return None
+    return f"{what} must be an absolute path (got {raw!r}): the server's working directory is not yours"
 
 
 def _persist(workflow_id: str) -> None:
@@ -1275,9 +1283,11 @@ async def import_workflow(
             "list_workflows), or file_path (local .json path)",
         }
     if file_path:
+        if err := _relative_path_error(file_path, "file_path"):
+            return {"error": err}
         try:
-            workflow_json = Path(file_path).read_text(encoding="utf-8")
-        except OSError as e:
+            workflow_json = Path(file_path).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
             return {"error": f"could not read file_path {file_path!r}: {e}"}
     if name:
         try:
@@ -1658,8 +1668,10 @@ def _value_from_file(index: int, op: dict[str, Any]) -> dict[str, Any]:
     if "value" in op:
         raise ValueError(f"operation {index} ({op['op']}): pass 'value' or 'file_path', not both")
     rest = {k: v for k, v in op.items() if k != "file_path"}
+    if err := _relative_path_error(str(op["file_path"]), "file_path"):
+        raise ValueError(f"operation {index} ({op['op']}): {err}")
     try:
-        return {**rest, "value": Path(op["file_path"]).read_text(encoding="utf-8")}
+        return {**rest, "value": Path(op["file_path"]).expanduser().read_text(encoding="utf-8")}
     except (OSError, UnicodeDecodeError) as e:
         raise ValueError(f"operation {index} ({op['op']}): could not read file_path {op['file_path']!r}: {e}") from e
 
@@ -3337,7 +3349,9 @@ async def upload_image(
     if (image_path is None) == (image_base64 is None):
         return {"error": "pass exactly one of image_path or image_base64"}
     if image_path is not None:
-        path = Path(image_path)
+        if err := _relative_path_error(image_path, "image_path"):
+            return {"error": err}
+        path = Path(image_path).expanduser()
         if not path.is_file():
             return {"error": f"not a file: {image_path}"}
         data = path.read_bytes()

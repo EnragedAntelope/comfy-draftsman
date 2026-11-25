@@ -144,13 +144,16 @@ class ComfyClient:
             payload["extra_data"] = extra_data
         response = await self._send("POST", "/prompt", json=payload)
         if response.status_code == 400:
-            body = response.json()
+            try:
+                body = response.json()
+            except ValueError:  # a proxy or old build answering 400 in plain text
+                body = {"error": {"message": response.text[:500]}}
             raise ComfyValidationError(body.get("error", {}), body.get("node_errors", {}))
         response.raise_for_status()
         return response.json()
 
     async def get_history(self, prompt_id: str) -> dict[str, Any]:
-        history = await self._get_json(f"/history/{prompt_id}")
+        history = await self._get_json(f"/history/{quote(prompt_id, safe='')}")
         return history.get(prompt_id, {})
 
     async def get_queue(self) -> dict[str, Any]:
