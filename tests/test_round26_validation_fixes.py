@@ -135,3 +135,14 @@ async def test_import_workflow_reads_local_file(monkeypatch, tmp_path):
     result = await server.import_workflow(file_path=str(p))
     assert result["workflow_id"] == "new-id"
     assert created["wf"].nodes[1].type == "Note"
+
+
+async def test_local_input_paths_must_be_absolute(tmp_path):
+    # the server's cwd is not the caller's, so a relative path is refused up front
+    assert "absolute" in (await server.import_workflow(file_path="wf.json"))["error"]
+    assert "absolute" in (await server.upload_image(image_path="pic.png"))["error"]
+    with pytest.raises(ValueError, match="absolute"):
+        server._value_from_file(0, {"op": "set_widget", "file_path": "prompt.txt"})
+    bad = tmp_path / "latin1.json"
+    bad.write_bytes(b"\xff\xfe{")
+    assert "could not read" in (await server.import_workflow(file_path=str(bad)))["error"]

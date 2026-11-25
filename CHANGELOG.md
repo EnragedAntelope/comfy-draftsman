@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.25.12 - repo audit fixes
+
+### Fixed
+
+- `import_workflow(file_path=)`, `set_widget`'s `file_path` and `upload_image(image_path=)`
+  refuse a relative path with a clear error. It resolved against the server's working
+  directory (often a system folder), not the caller's, and failed as "not found".
+- `import_workflow(file_path=)` on a file that is not UTF-8 returns an error instead
+  of raising.
+- A `/prompt` 400 answer that is not JSON (a proxy, an old build) is reported as a
+  validation error instead of crashing the run.
+- `get_run_status` URL-quotes the prompt id it puts in the `/history` path.
+
 ## 0.25.11 - photo-angles session feedback
 
 ### Fixed
